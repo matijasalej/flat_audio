@@ -1,0 +1,4 @@
+# Only needed for ws / measure / drift / analyze / selftest.
+# discover, listen, play, volume, wol and mock run on plain /usr/bin/python3 (3.9).
+numpy>=1.24,<2.1
+websockets>=13,<16

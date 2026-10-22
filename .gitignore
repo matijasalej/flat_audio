@@ -1,0 +1,16 @@
+# Android / Gradle
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+captures/
+# Rust
+native/target/
+app/src/main/jniLibs/
+# Signing (never commit)
+*.p12
+*.jks
+*.keystore
+# macOS
+.DS_Store

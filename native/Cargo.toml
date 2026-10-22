@@ -13,7 +13,6 @@ crate-type = ["cdylib"]
 [dependencies]
 jni = "0.21"
 log = "0.4"
-android_logger = "0.13"
 serde_json = "1"
 futures-util = { version = "0.3", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
@@ -27,6 +26,10 @@ librespot-core = { git = "https://github.com/librespot-org/librespot", rev = "99
 librespot-connect = { git = "https://github.com/librespot-org/librespot", rev = "99b6088bf3ea028f90192676ac1a337fa4b2ed12", default-features = false }
 librespot-discovery = { git = "https://github.com/librespot-org/librespot", rev = "99b6088bf3ea028f90192676ac1a337fa4b2ed12", default-features = false, features = ["with-libmdns"] }
 librespot-playback = { git = "https://github.com/librespot-org/librespot", rev = "99b6088bf3ea028f90192676ac1a337fa4b2ed12", default-features = false }
+
+# Logging to logcat exists on Android only; the host build (cargo check / cargo test) has no logger.
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.13"
 
 # A Connect receiver replays the credential a controller hands over in the zeroconf blob, and Spotify
 # only honours it under the client id that issued it. Desktop controllers use the desktop (keymaster)

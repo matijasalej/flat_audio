@@ -115,3 +115,50 @@ pub fn mask(name: &str) -> String {
         format!("{head}***")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn events_keep_their_order_and_carry_type_and_time() {
+        let q = EventQueue::new();
+        q.push("playing", json!({ "position_ms": 1234 }));
+        q.push("paused", Value::Null);
+        let first: Value = serde_json::from_str(&q.next(Duration::from_millis(10)).unwrap()).unwrap();
+        assert_eq!(first["t"], "playing");
+        assert_eq!(first["position_ms"], 1234);
+        assert!(first["ts"].as_u64().unwrap() > 1_700_000_000_000);
+        let second: Value = serde_json::from_str(&q.next(Duration::from_millis(10)).unwrap()).unwrap();
+        assert_eq!(second["t"], "paused");
+        assert!(q.next(Duration::from_millis(10)).is_none());
+    }
+
+    #[test]
+    fn a_full_queue_drops_the_oldest_events() {
+        let q = EventQueue::new();
+        for i in 0..(MAX_QUEUED + 5) {
+            q.push_raw(i.to_string());
+        }
+        assert_eq!(q.next(Duration::from_millis(1)).unwrap(), "5");
+    }
+
+    #[test]
+    fn close_wakes_a_waiter_but_queued_events_are_still_delivered() {
+        let q = std::sync::Arc::new(EventQueue::new());
+        q.push_raw("last".to_string());
+        q.close();
+        q.push_raw("ignored".to_string());
+        assert_eq!(q.next(Duration::from_millis(1)).unwrap(), "last");
+        let started = Instant::now();
+        assert!(q.next(Duration::from_secs(5)).is_none());
+        assert!(started.elapsed() < Duration::from_secs(1), "a closed queue must not wait");
+    }
+
+    #[test]
+    fn mask_keeps_two_characters() {
+        assert_eq!(mask("abcdef"), "ab***");
+        assert_eq!(mask("ab"), "**");
+        assert_eq!(mask(""), "**");
+    }
+}

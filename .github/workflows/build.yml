@@ -60,8 +60,8 @@ jobs:
       - name: Check that the vendored librespot-core is the one in use
         working-directory: native
         run: |
-          cargo tree --target aarch64-linux-android -p librespot-core --depth 0 | tee tree.txt
-          grep -q 'native/vendor/librespot-core' tree.txt || { echo "::error::the [patch] for librespot-core is not applied"; exit 1; }
+          cargo tree --target aarch64-linux-android -p librespot-core --depth 0 | tee "$RUNNER_TEMP/tree.txt"
+          grep -q 'native/vendor/librespot-core' "$RUNNER_TEMP/tree.txt" || { echo "::error::the [patch] for librespot-core is not applied"; exit 1; }
 
       - name: Build the native core
         working-directory: native
@@ -115,13 +115,6 @@ jobs:
         with:
           name: WholeFlatAudio
           path: WholeFlatAudio.apk
-          if-no-files-found: ignore
-
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: Cargo.lock
-          path: native/Cargo.lock
           if-no-files-found: ignore
 
       - name: Publish a release

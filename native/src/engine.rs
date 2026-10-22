@@ -237,6 +237,8 @@ pub async fn run(
     let mut spirc_task: Option<SpircTask> = None;
     // Credentials from a phone, used until one connect with them succeeded.
     let mut pending_creds: Option<Credentials> = None;
+    // The last credentials a phone handed over: reconnect material when there is no cache.
+    let mut fallback_creds: Option<Credentials> = None;
     let mut connect_due: Option<Instant> = if cache.as_ref().map_or(false, |c| c.credentials().is_some()) {
         // Cached credentials: connect right away, discovery keeps running next to it.
         Some(Instant::now())
@@ -268,6 +270,7 @@ pub async fn run(
                             "credentials_received",
                             json!({ "user": creds.username.as_deref().map(mask) }),
                         );
+                        fallback_creds = Some(creds.clone());
                         pending_creds = Some(creds);
                         // A new (or re-pairing) controller takes over: drop the current session first.
                         teardown(&mut spirc, &mut spirc_task, &session).await;
@@ -299,13 +302,51 @@ pub async fn run(
                     session.shutdown();
                 }
                 connect_due = Some(Instant::now() + backoff.next_delay());
+                // Whatever took the session down (Wi-Fi blip, new address) may have left the mDNS
+                // responder on a dead interface. Announce again on what is up now, so the phone
+                // finds the device and can re-pair while we are still reconnecting.
+                if let Some(d) = discovery.take() {
+                    let _ = timeout(GOODBYE_GRACE, d.shutdown()).await;
+                }
+                discovery_due = Some(Instant::now() + Duration::from_secs(1));
+            }
+
+            // Discovery before connecting: being pairable must not wait for a slow connect attempt
+            // (the select is biased, so this arm wins when both are due, e.g. right after boot).
+            _ = sleep_opt(discovery_due) => {
+                discovery_due = None;
+                match start_discovery(&cfg.device_name, &device_id) {
+                    Ok(d) => {
+                        info!("zeroconf discovery is up as '{}'", cfg.device_name);
+                        events.push("discovery_started", json!({ "name": cfg.device_name }));
+                        discovery_failures = 0;
+                        discovery = Some(d);
+                    }
+                    Err(e) => {
+                        // Typically no network yet right after boot: keep trying.
+                        discovery_failures += 1;
+                        warn!("zeroconf discovery failed to start: {e}");
+                        if discovery_failures == 1 || discovery_failures % 12 == 0 {
+                            events.push(
+                                "error",
+                                json!({
+                                    "where": "discovery",
+                                    "message": e.to_string(),
+                                    "attempts": discovery_failures,
+                                }),
+                            );
+                        }
+                        discovery_due = Some(Instant::now() + DISCOVERY_RETRY);
+                    }
+                }
             }
 
             _ = sleep_opt(connect_due) => {
                 connect_due = None;
                 let creds = pending_creds
                     .clone()
-                    .or_else(|| cache.as_ref().and_then(|c| c.credentials()));
+                    .or_else(|| cache.as_ref().and_then(|c| c.credentials()))
+                    .or_else(|| fallback_creds.clone());
                 let Some(creds) = creds else {
                     continue;
                 };
@@ -396,34 +437,6 @@ pub async fn run(
                             }),
                         );
                         connect_due = Some(Instant::now() + delay);
-                    }
-                }
-            }
-
-            _ = sleep_opt(discovery_due) => {
-                discovery_due = None;
-                match start_discovery(&cfg.device_name, &device_id) {
-                    Ok(d) => {
-                        info!("zeroconf discovery is up as '{}'", cfg.device_name);
-                        events.push("discovery_started", json!({ "name": cfg.device_name }));
-                        discovery_failures = 0;
-                        discovery = Some(d);
-                    }
-                    Err(e) => {
-                        // Typically no network yet right after boot: keep trying.
-                        discovery_failures += 1;
-                        warn!("zeroconf discovery failed to start: {e}");
-                        if discovery_failures == 1 || discovery_failures % 12 == 0 {
-                            events.push(
-                                "error",
-                                json!({
-                                    "where": "discovery",
-                                    "message": e.to_string(),
-                                    "attempts": discovery_failures,
-                                }),
-                            );
-                        }
-                        discovery_due = Some(Instant::now() + DISCOVERY_RETRY);
                     }
                 }
             }
@@ -618,5 +631,92 @@ fn describe_event(ev: &PlayerEvent) -> (&'static str, Value) {
         ),
         #[allow(unreachable_patterns)]
         other => ("player_event", json!({ "debug": format!("{other:?}") })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use librespot_core::SpotifyUri;
+
+    const TRACK: &str = "spotify:track:6rqhFgbbKwnb9MLmUQDhG6";
+
+    #[test]
+    fn player_events_become_json_with_track_and_position() {
+        let track_id = SpotifyUri::from_uri(TRACK).unwrap();
+        let (t, v) = describe_event(&PlayerEvent::Playing {
+            play_request_id: 7,
+            track_id: track_id.clone(),
+            position_ms: 1500,
+        });
+        assert_eq!(t, "playing");
+        assert_eq!(v["track_id"], TRACK);
+        assert_eq!(v["position_ms"], 1500);
+        assert_eq!(v["play_request_id"], 7);
+
+        let (t, v) = describe_event(&PlayerEvent::Seeked {
+            play_request_id: 8,
+            track_id: track_id.clone(),
+            position_ms: 42,
+        });
+        assert_eq!((t, v["position_ms"].as_u64()), ("seeked", Some(42)));
+
+        let (t, v) = describe_event(&PlayerEvent::EndOfTrack {
+            play_request_id: 9,
+            track_id,
+        });
+        assert_eq!((t, v["track_id"].as_str()), ("end_of_track", Some(TRACK)));
+    }
+
+    #[test]
+    fn volume_is_reported_raw_and_as_percent() {
+        let (t, v) = describe_event(&PlayerEvent::VolumeChanged { volume: 32768 });
+        assert_eq!(t, "volume_changed");
+        assert_eq!(v["volume"], 32768);
+        assert_eq!(v["percent"], 50);
+        assert_eq!(describe_event(&PlayerEvent::VolumeChanged { volume: 0 }).1["percent"], 0);
+        assert_eq!(describe_event(&PlayerEvent::VolumeChanged { volume: 65535 }).1["percent"], 100);
+    }
+
+    #[test]
+    fn account_names_in_player_events_are_masked() {
+        let (t, v) = describe_event(&PlayerEvent::SessionConnected {
+            connection_id: "c1".to_string(),
+            user_name: "someaccount".to_string(),
+        });
+        assert_eq!(t, "player_session_connected");
+        assert_eq!(v["user"], "so***");
+    }
+
+    #[test]
+    fn only_refused_logins_are_permanent_failures() {
+        assert!(is_permanent(&Error::permission_denied("bad credentials")));
+        assert!(is_permanent(&Error::unauthenticated("no credentials")));
+        assert!(!is_permanent(&Error::unavailable("no route")));
+        assert!(!is_permanent(&Error::deadline_exceeded("timeout")));
+    }
+
+    #[test]
+    fn backoff_doubles_up_to_a_minute_and_resets() {
+        let mut b = Backoff::new();
+        let secs: Vec<u64> = (0..9).map(|_| b.next_delay().as_secs()).collect();
+        assert_eq!(secs, vec![1, 2, 4, 8, 16, 32, 60, 60, 60]);
+        b.reset();
+        assert_eq!(b.next_delay().as_secs(), 1);
+    }
+
+    #[test]
+    fn the_device_id_is_40_hex_digits_and_stays_the_same() {
+        let dir = std::env::temp_dir().join(format!(
+            "wholeflat-test-{}-{}",
+            std::process::id(),
+            crate::events::now_ms()
+        ));
+        let first = load_or_create_device_id(&dir);
+        assert_eq!(first.len(), 40);
+        assert!(first.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        assert_eq!(load_or_create_device_id(&dir), first);
+        assert_ne!(random_hex_40(), random_hex_40());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

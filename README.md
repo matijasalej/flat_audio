@@ -2,7 +2,7 @@
 
 Two-room Spotify Connect receiver for Android TV (Google TV), with synchronized Sonos output planned.
 
-**Status: spike.** This build is the scaffold: it shows up in the Spotify app as a Connect device named **Whole Flat**, plays locally at 320 kbps through `AudioTrack`, runs as a foreground service, restarts after a reboot with cached credentials, and has a debug page plus test routes for streaming to a Sonos over UPnP. Target is a Chromecast with Google TV (Android 14, probably 32-bit userland, so the APK carries `armeabi-v7a` and `arm64-v8a`). Nothing here has been run on a device yet.
+**Status: spike.** This build is the scaffold: it shows up in the Spotify app as a Connect device named **Whole Flat**, plays locally at 320 kbps through `AudioTrack`, runs as a foreground service, restarts after a reboot with cached credentials, and has a debug page plus test routes for streaming to a Sonos over UPnP. Target is a Chromecast with Google TV 4K (Android 14), which reports only `armeabi-v7a` (32-bit userland) and has 2 GB of RAM with about 330 MB free, so the footprint matters; the APK carries `armeabi-v7a` and `arm64-v8a`. Nothing here has been run on a device yet.
 
 Spotify Premium is required: librespot calls `exit(1)` for a non-Premium account, which ends the app process.
 
@@ -43,7 +43,9 @@ The test signal is a click every second (2 kHz, every 10th at 4 kHz) over a quie
 
 ## Building
 
-CI only (GitHub Actions, `.github/workflows/build.yml`); there is no Android SDK, JDK or Rust toolchain to install locally. Every push builds the release APK and uploads it as the `WholeFlatAudio` artifact of the run. A push to `main` also publishes a GitHub release `build-<run number>`, which is what the Downloader URL above serves.
+The APK is built by CI only (GitHub Actions, `.github/workflows/build.yml`); no Android SDK, JDK or NDK is needed locally. Every push builds the release APK and uploads it as the `WholeFlatAudio` artifact of the run. A push to `main` also publishes a GitHub release `build-<run number>`, which is what the Downloader URL above serves.
+
+`native/Cargo.lock` is committed so that CI builds the dependency versions that were checked. The Rust core also compiles, and its unit tests run, on a plain host toolchain (`cargo check` and `cargo test --lib` in `native/`); only the Android build itself needs the NDK.
 
 The repository needs three secrets:
 

@@ -80,12 +80,12 @@ object Wav {
         b.put("WAVE".toByteArray(Charsets.US_ASCII))
         b.put("fmt ".toByteArray(Charsets.US_ASCII))
         b.putInt(16)
-        b.putShort(1) // PCM
+        b.putShort(1.toShort()) // PCM
         b.putShort(ToneGenerator.CHANNELS.toShort())
         b.putInt(ToneGenerator.RATE)
         b.putInt(ToneGenerator.RATE * ToneGenerator.CHANNELS * 2)
         b.putShort((ToneGenerator.CHANNELS * 2).toShort())
-        b.putShort(16)
+        b.putShort(16.toShort())
         b.put("data".toByteArray(Charsets.US_ASCII))
         b.putInt(DATA_BYTES.toInt())
         return b.array()
@@ -141,18 +141,22 @@ object Flac {
     fun streamHeader(): ByteArray {
         val b = ByteBuffer.allocate(4 + 4 + 34).order(ByteOrder.BIG_ENDIAN)
         b.put("fLaC".toByteArray(Charsets.US_ASCII))
-        b.put(0x80.toByte()) // last metadata block, type 0 = STREAMINFO
-        b.put(0).put(0).put(34) // block length
+        // last metadata block, type 0 = STREAMINFO, then its length (34) as 24 bits
+        b.put(byteArrayOf(0x80.toByte(), 0, 0, 34))
         b.putShort(BLOCK.toShort()) // min block size
         b.putShort(BLOCK.toShort()) // max block size
-        b.put(0).put(0).put(0) // min frame size: unknown
-        b.put(0).put(0).put(0) // max frame size: unknown
+        b.put(byteArrayOf(0, 0, 0)) // min frame size: unknown
+        b.put(byteArrayOf(0, 0, 0)) // max frame size: unknown
         // 20 bits sample rate (44100 = 0x0AC44), 3 bits channels - 1, 5 bits bits per sample - 1,
         // 36 bits total samples (0 = unknown)
-        b.put(0x0A.toByte())
-        b.put(0xC4.toByte())
-        b.put(0x42.toByte()) // low 4 bits of the rate (0x4), channels - 1 = 1 (001), top bit of bps - 1
-        b.put(0xF0.toByte()) // low 4 bits of bps - 1 = 15 (1111), top 4 bits of the total samples
+        b.put(
+            byteArrayOf(
+                0x0A.toByte(),
+                0xC4.toByte(),
+                0x42.toByte(), // low 4 bits of the rate (0x4), channels - 1 = 1 (001), top bit of bps - 1
+                0xF0.toByte(), // low 4 bits of bps - 1 = 15 (1111), top 4 bits of the total samples
+            ),
+        )
         b.putInt(0) // low 32 bits of the total samples
         b.put(ByteArray(16)) // MD5 of the audio: unknown
         return b.array()
@@ -194,7 +198,7 @@ object Flac {
         out[p] = crc8(out, p).toByte()
         p++
         for (channel in 0 until 2) {
-            out[p++] = 0x02 // subframe header: VERBATIM, no wasted bits
+            out[p++] = 0x02.toByte() // subframe header: VERBATIM, no wasted bits
             for (i in 0 until BLOCK) {
                 val s = pcm[i * 2 + channel].toInt()
                 out[p++] = (s shr 8).toByte()

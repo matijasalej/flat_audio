@@ -25,7 +25,9 @@ use std::time::Duration;
 use jni::objects::{JClass, JShortArray, JString};
 use jni::sys::{jboolean, jint, jstring, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
-use log::{error, info, LevelFilter};
+#[cfg(target_os = "android")]
+use log::LevelFilter;
+use log::{error, info};
 use serde_json::json;
 use tokio::sync::watch;
 
@@ -50,6 +52,7 @@ static INIT: Once = Once::new();
 
 fn init() {
     INIT.call_once(|| {
+        #[cfg(target_os = "android")]
         android_logger::init_once(
             android_logger::Config::default()
                 .with_max_level(LevelFilter::Info)
@@ -194,7 +197,7 @@ pub extern "system" fn Java_io_github_matijasalej_wholeflat_NativeBridge_start(
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_matijasalej_wholeflat_NativeBridge_readPcm(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     buf: JShortArray,
     timeout_ms: jint,
@@ -222,7 +225,7 @@ pub extern "system" fn Java_io_github_matijasalej_wholeflat_NativeBridge_readPcm
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_matijasalej_wholeflat_NativeBridge_nextEvent(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     timeout_ms: jint,
 ) -> jstring {
@@ -251,7 +254,7 @@ pub extern "system" fn Java_io_github_matijasalej_wholeflat_NativeBridge_stop(
 
 #[no_mangle]
 pub extern "system" fn Java_io_github_matijasalej_wholeflat_NativeBridge_version(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
 ) -> jstring {
     match env.new_string(version_string()) {

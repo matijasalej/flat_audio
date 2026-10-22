@@ -179,3 +179,127 @@ impl Sink for RingSink {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    fn read(ring: &Ring, max: usize) -> Vec<i16> {
+        let mut out = vec![0i16; max];
+        match ring.read_timeout(&mut out, Duration::from_millis(20)) {
+            ReadResult::Data(n) => {
+                out.truncate(n);
+                out
+            }
+            ReadResult::Timeout => Vec::new(),
+            ReadResult::Closed => panic!("closed"),
+        }
+    }
+
+    #[test]
+    fn keeps_order_across_the_wrap_around() {
+        let ring = Ring::new(8); // four stereo frames
+        assert!(ring.write_blocking(&[1, 2, 3, 4, 5, 6]));
+        assert_eq!(read(&ring, 4), vec![1, 2, 3, 4]);
+        assert!(ring.write_blocking(&[7, 8, 9, 10])); // 5..10 now straddles the end of the buffer
+        assert_eq!(read(&ring, 16), vec![5, 6, 7, 8, 9, 10]);
+        assert!(read(&ring, 16).is_empty());
+    }
+
+    #[test]
+    fn only_whole_frames_go_in_and_come_out() {
+        let ring = Ring::new(16);
+        assert!(ring.write_blocking(&[1, 2, 3])); // the lone third sample is dropped
+        assert_eq!(read(&ring, 16), vec![1, 2]);
+        assert!(ring.write_blocking(&[1, 2, 3, 4]));
+        assert_eq!(read(&ring, 3), vec![1, 2]); // an odd buffer gets one frame, not 3 samples
+        assert_eq!(read(&ring, 3), vec![3, 4]);
+    }
+
+    #[test]
+    fn read_times_out_when_nothing_arrives() {
+        let ring = Ring::new(8);
+        let mut out = [0i16; 4];
+        let started = Instant::now();
+        assert!(matches!(
+            ring.read_timeout(&mut out, Duration::from_millis(30)),
+            ReadResult::Timeout
+        ));
+        assert!(started.elapsed() >= Duration::from_millis(25));
+    }
+
+    #[test]
+    fn a_full_ring_blocks_the_writer_until_the_reader_makes_room() {
+        let ring = Arc::new(Ring::new(8));
+        assert!(ring.write_blocking(&[0; 8])); // exactly full
+        let writer = {
+            let ring = ring.clone();
+            thread::spawn(move || ring.write_blocking(&[9, 9, 9, 9]))
+        };
+        thread::sleep(Duration::from_millis(80));
+        assert!(!writer.is_finished(), "the writer must wait while the ring is full");
+        assert_eq!(read(&ring, 4), vec![0, 0, 0, 0]);
+        assert!(writer.join().unwrap());
+        assert_eq!(read(&ring, 16), vec![0, 0, 0, 0, 9, 9, 9, 9]);
+    }
+
+    #[test]
+    fn close_releases_a_blocked_writer_and_a_waiting_reader() {
+        let ring = Arc::new(Ring::new(8));
+        assert!(ring.write_blocking(&[0; 8]));
+        let writer = {
+            let ring = ring.clone();
+            thread::spawn(move || ring.write_blocking(&[1, 1]))
+        };
+        thread::sleep(Duration::from_millis(30));
+        ring.close();
+        assert!(!writer.join().unwrap(), "a closed ring drops the rest");
+        let mut out = [0i16; 4];
+        assert!(matches!(
+            ring.read_timeout(&mut out, Duration::from_millis(10)),
+            ReadResult::Closed
+        ));
+    }
+
+    #[test]
+    fn the_sink_converts_to_i16_and_stop_never_fails() {
+        let ring = Arc::new(Ring::new(16));
+        let events = Arc::new(EventQueue::new());
+        let mut sink = RingSink::new(ring.clone(), events.clone());
+        let mut converter = Converter::new(None);
+        sink.start().unwrap();
+        sink.write(AudioPacket::Samples(vec![0.0, 1.0, -1.0, 0.5]), &mut converter)
+            .unwrap();
+        sink.stop().unwrap();
+        let got = read(&ring, 8);
+        assert_eq!(got.len(), 4, "{got:?}");
+        assert_eq!(got[0], 0);
+        assert!(got[1] >= 32766, "full scale positive: {got:?}");
+        assert!(got[2] <= -32767, "full scale negative: {got:?}");
+        assert!((i32::from(got[3]) - 16384).abs() <= 1, "half scale: {got:?}");
+        // start and stop leave a trace on the event queue (debug page)
+        assert!(events.next(Duration::from_millis(5)).unwrap().contains("\"start\""));
+        assert!(events.next(Duration::from_millis(5)).unwrap().contains("\"stop\""));
+    }
+
+    #[test]
+    fn a_steady_producer_and_consumer_lose_nothing() {
+        let ring = Arc::new(Ring::new(64));
+        let producer = {
+            let ring = ring.clone();
+            thread::spawn(move || {
+                for chunk in 0..200i16 {
+                    let block: Vec<i16> = (0..10).map(|i| chunk * 10 + i).collect();
+                    assert!(ring.write_blocking(&block));
+                }
+            })
+        };
+        let mut seen: Vec<i16> = Vec::new();
+        while seen.len() < 2000 {
+            seen.extend(read(&ring, 7)); // 7 rounds down to 6: whole frames at an odd size
+        }
+        producer.join().unwrap();
+        assert_eq!(seen, (0..2000).collect::<Vec<i16>>());
+    }
+}

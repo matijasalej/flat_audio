@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 320x180 Android TV banner, generated; the lettering is stroked polylines. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <path android:fillColor="#0F1720" android:pathData="M0,0 H320 V180 H0 Z" />
+    <path android:fillColor="#1B6EF3" android:pathData="M0,170 H320 V180 H0 Z" />
+    <!-- speaker with two sound waves -->
+    <path android:fillColor="#FFFFFF" android:pathData="M132,34 L146,34 L162,20 L162,72 L146,58 L132,58 Z" />
+    <path android:strokeColor="#6AA6FF" android:strokeWidth="4" android:strokeLineCap="round" android:fillColor="#00000000" android:pathData="M172,34 C180,42 180,50 172,58" />
+    <path android:strokeColor="#6AA6FF" android:strokeWidth="4" android:strokeLineCap="round" android:fillColor="#00000000" android:pathData="M182,26 C196,40 196,52 182,66" />
+    <path android:strokeColor="#FFFFFF" android:strokeWidth="4" android:strokeLineCap="round" android:strokeLineJoin="round" android:fillColor="#00000000" android:pathData="M23,90 L28.5,124 L34,100 L39.5,124 L45,90 M51,90 L51,124 M73,90 L73,124 M51,107 L73,107 M83,90 L97,90 L101,94 L101,120 L97,124 L83,124 L79,120 L79,94 Z M107,90 L107,124 L129,124 M157,90 L135,90 L135,124 L157,124 M135,107 L152,107 M213,90 L191,90 L191,124 M191,107 L208,107 M219,90 L219,124 L241,124 M247,124 L258,90 L269,124 M251.5,112 L264.5,112 M275,90 L297,90 M286,90 L286,124" />
+    <path android:strokeColor="#6AA6FF" android:strokeWidth="3.4" android:strokeLineCap="round" android:strokeLineJoin="round" android:fillColor="#00000000" android:pathData="M110.08,158.48 L118,134 L125.92,158.48 M113.32,149.84 L122.68,149.84 M131.08,134 L131.08,155.6 L133.96,158.48 L144.04,158.48 L146.92,155.6 L146.92,134 M152.08,134 L152.08,158.48 L162.16,158.48 L167.92,152.72 L167.92,139.76 L162.16,134 Z M175.24,134 L186.76,134 M181,134 L181,158.48 M175.24,158.48 L186.76,158.48 M196.96,134 L207.04,134 L209.92,136.88 L209.92,155.6 L207.04,158.48 L196.96,158.48 L194.08,155.6 L194.08,136.88 Z" />
+</vector>

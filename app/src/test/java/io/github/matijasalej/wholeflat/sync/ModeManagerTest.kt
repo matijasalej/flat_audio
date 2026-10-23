@@ -26,7 +26,8 @@ class ModeManagerTest {
         foreground: Foreground = Foreground.UNKNOWN,
         backoff: Long = 0L,
         failed: Int = 0,
-    ) = ModeManager.Inputs(now, mode, source, alive, silent, known, tv, leftCount, leftKind, foreground, backoff, failed, idle)
+        retrying: Boolean = false,
+    ) = ModeManager.Inputs(now, mode, source, alive, silent, known, tv, leftCount, leftKind, foreground, backoff, failed, idle, retrying)
 
     private fun List<Action>.grabs() = count { it is Action.Grab }
     private fun List<Action>.releases() = filterIsInstance<Action.Release>()
@@ -47,6 +48,17 @@ class ModeManagerTest {
         val a = m.decide(inputs(60_000L, silent = 0L))
         assertEquals(1, a.grabs())
         assertTrue(a.releases().isEmpty())
+    }
+
+    @Test
+    fun aTvThatLostItsStreamInARestartIsTriedAgainEvenInAPauseOfTheMusic() {
+        val m = settled()
+        // the music paused 20 s ago: nothing is grabbed for the quiet ...
+        assertEquals(0, m.decide(inputs(60_000L, silent = 20_000L, tv = Tv.FAILED, failed = 1)).grabs())
+        // ... except while the stream is being made again, or its start failed a moment ago
+        assertEquals(1, m.decide(inputs(61_000L, silent = 21_000L, tv = Tv.FAILED, failed = 1, retrying = true)).grabs())
+        // never against the back-off
+        assertEquals(0, m.decide(inputs(62_000L, silent = 22_000L, tv = Tv.FAILED, failed = 2, backoff = 8_000L, retrying = true)).grabs())
     }
 
     @Test

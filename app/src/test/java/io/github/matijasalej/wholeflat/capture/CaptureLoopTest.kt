@@ -642,4 +642,26 @@ class CaptureLoopTest {
         assertEquals(-46.8 * 44.1, followed.trims[0].second.toDouble(), 250.0)
         for (lag in tail(followed, 130.0)) assertEquals(2140.0 + 46.8, lag, 10.0)
     }
+
+    @Test
+    fun aSyncedStreamThatStartsMidStreamAfterTheSpeakerWasSwitchedOffAndOnLandsAtTheSameDelayOfTheSameClock() {
+        // the first stream (started 4 s into the capture) and the one after a power cycle of the speaker (40 s into it, the TV's stream running on)
+        // are both counted from the TV's clock and both land at the common delay: nothing in the rejoin depends on how long the capture has run,
+        // on the ring having wrapped, or on anything that happened to the speaker before
+        val tvClock = object : FrameTimes {
+            override fun nanosOfFrame(frame: Long): Long? = tOf(frame)
+        }
+        for (playAfter in listOf(4.0, 40.0, 95.0)) {
+            val r = simulate(
+                seconds = 90, leadMs = 2200, playAfterS = playAfter, noiseMs = 2.0, seed = 31, syncedTargetMs = 2490.0, syncedClock = tvClock,
+                extraStartMs = 25.0,
+            )
+            assertNull("play after $playAfter s: ${r.rejoinReason}", r.rejoinAt)
+            assertEquals("planned", 2490.0, r.plannedMs, 0.5)
+            assertEquals("play after $playAfter s locked at ${r.lockedMs}", 2515.0, r.lockedMs, 6.0)
+            // placed once (25 ms is more than the leave-alone band of the placing), then at the common delay for the rest of the time
+            assertEquals("play after $playAfter s: ${r.trims}", 1, r.trims.size)
+            for (lag in tail(r, 60.0)) assertEquals("play after $playAfter s", 2490.0, lag, 8.0)
+        }
+    }
 }

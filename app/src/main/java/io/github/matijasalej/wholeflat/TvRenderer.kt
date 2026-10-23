@@ -301,6 +301,10 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     private fun setState(s: State) {
         if (state == s) return
         state = s
+        if (s == State.PLAYING) {
+            restartingUntilMs = 0L
+            lastFailureMs = 0L
+        }
         try {
             onState?.invoke(s)
         } catch (t: Throwable) {
@@ -467,15 +471,21 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
                 (if (pipe != null) ", encoders ${SyncedTiming.encodeMs("ts").toInt()} ms, the hold stays as it is for the life of the stream" else "") + ")",
         )
 
-        // the TV's player: Stop (it may hold an old stream of ours), the item, Play
+        // The TV's player: Stop (it may hold an old stream of ours), the item, Play. A TV that was stopped a moment ago (a re-anchor) is
+        // still busy stopping and says 705 (the transport is locked) to the item until it has settled: its transport is waited for, and a 701
+        // or 705 is tried again for a few seconds instead of failing the grab (which makes the next start wait 10 s).
         api.stop()
+        settleAfterStop(api)
         var set = api.setUri(s.uri, didl)
         var tries = 1
-        while (!set.ok && set.upnpError == 701 && tries < 3) {
-            sleepQuietly(150)
+        while (!set.ok && (set.upnpError == 701 || set.upnpError == 705) && tries < SET_TRIES) {
+            AppLog.add(TAG, "SetAVTransportURI: ${set.describe()} (the TV is still busy), trying again in ${SET_RETRY_MS} ms (try ${tries + 1} of $SET_TRIES)")
+            sleepQuietly(SET_RETRY_MS)
+            if (cancelRequested) return cancelled()
             set = api.setUri(s.uri, didl)
             tries++
         }
+        if (tries > 1) AppLog.add(TAG, "SetAVTransportURI took $tries tries: ${set.describe()}")
         if (!set.ok) {
             fail("SetAVTransportURI: ${set.describe()}")
             return
@@ -495,8 +505,10 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         if (pipe != null) warmup.start(System.nanoTime())
         var play = api.play()
         tries = 1
-        while (!play.ok && play.upnpError == 701 && tries < 3) {
-            sleepQuietly(150)
+        while (!play.ok && (play.upnpError == 701 || play.upnpError == 705) && tries < PLAY_TRIES) {
+            AppLog.add(TAG, "Play: ${play.describe()} (the TV is still busy), trying again in ${PLAY_RETRY_MS} ms (try ${tries + 1} of $PLAY_TRIES)")
+            sleepQuietly(PLAY_RETRY_MS)
+            if (cancelRequested) return cancelled()
             play = api.play()
             tries++
         }
@@ -566,6 +578,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
 
     private fun fail(why: String) {
         lastError = why
+        if (!cancelRequested) lastFailureMs = nowMs()
         session?.let { endSession(it, "failed: $why") }
         session = null
         val wait = backoff.onFailure(nowMs())
@@ -578,6 +591,14 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
                 AppLog.error(TAG, "the give-up hook failed", t)
             }
         }
+    }
+
+    /** After Stop: waits until the TV's transport says it is stopped (or does not answer), for up to [STOP_SETTLE_MS]. */
+    private fun settleAfterStop(api: SonosSoap) {
+        val from = nowMs()
+        waitFor(STOP_SETTLE_MS, stepMs = 150) { transportNow(api).let { it == "STOPPED" || it == "NO_MEDIA_PRESENT" || it.isEmpty() } }
+        val took = nowMs() - from
+        if (took > 400) AppLog.add(TAG, "the TV took $took ms to settle after Stop (transport $lastTransport)")
     }
 
     private fun waitFor(timeoutMs: Long, stepMs: Long = 100, condition: () -> Boolean): Boolean {
@@ -683,7 +704,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             hold = SyncedTiming.tvHoldMs(d, x)
         }
         if (!force && !delayMs.isNaN() && Math.abs(d - delayMs) < DELAY_HYSTERESIS_MS) return
-        if (activeFormat == "ts" && !delayMs.isNaN() && Math.abs(d - delayMs) >= 1.0) {
+        if (activeFormat == "ts" && !delayMs.isNaN() && Math.abs(d - delayMs) >= 1.0 && session?.liveBacklogMs()?.isNaN() == false) {
             val backlog = session?.liveBacklogMs() ?: Double.NaN
             AppLog.add(TAG, "the common delay is now ${fmt(d)} ms (was ${fmt(delayMs)}): the TV's latency ${fmt(x)} ms is the backlog of its connection ${fmt(backlog)} ms and ${Settings.values.tvExtraMs} ms, the hold ${fmt(hold)} ms")
         }
@@ -775,9 +796,25 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         }
     }
 
+    /** Until when (elapsedRealtime, ms) the TV's stream is being made again on purpose: the other room is not sent back to the Lyrics mode meanwhile. */
+    @Volatile
+    private var restartingUntilMs = 0L
+
+    /** When the last grab failed (elapsedRealtime, ms), 0 if none did since the TV last played. */
+    @Volatile
+    private var lastFailureMs = 0L
+
+    /**
+     * Whether the TV's stream is being made again (a re-anchor, a problem of the stream) or its last start failed a moment ago: it is back in
+     * a few seconds, and the other room keeps the delay of Synced mode meanwhile instead of going to the Lyrics mode's lag and back.
+     */
+    val restarting: Boolean get() = nowMs() < restartingUntilMs || (lastFailureMs != 0L && nowMs() < lastFailureMs + FAIL_GRACE_MS)
+
     private fun restart(why: String) {
         AppLog.add(TAG, "the TV stream is made again: $why")
-        doRelease(why, waitHdmi = false)
+        restartingUntilMs = nowMs() + RESTART_WINDOW_MS
+        // the grab sends its own Stop and waits for the TV to settle: a Stop right behind another is what the TV answers with 705
+        doRelease(why, waitHdmi = false, sendStop = false)
         cancelRequested = false
         doGrab(why)
     }
@@ -810,15 +847,15 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     /** How long the stream in force has run (s), -1 if there is none. */
     fun streamAgeSeconds(): Long = if (streamStartedNanos == 0L || session == null) -1L else (System.nanoTime() - streamStartedNanos) / 1_000_000_000L
 
-    private fun doRelease(reason: String, waitHdmi: Boolean = true) {
+    private fun doRelease(reason: String, waitHdmi: Boolean = true, sendStop: Boolean = true) {
         val s = session
         val api = soap
         if (s != null) endSession(s, reason)
         session = null
         val wasOn = state == State.PLAYING || state == State.STARTING
         if (api != null && wasOn) {
-            val r = api.stop()
-            note("release: $reason; Stop ${r.describe()}")
+            val r = if (sendStop) api.stop() else null
+            note("release: $reason; Stop ${r?.describe() ?: "is left to the next start"}")
             if (waitHdmi) returnToHdmi()
         }
         live = false
@@ -1005,6 +1042,25 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
 
         /** The video stream's connections: a little more room, it is about 600 KB/s. */
         private const val TS_SEND_BUFFER_BYTES = 64 * 1024
+
+        /**
+         * SetAVTransportURI is tried this many times when the TV says 701 (transition not available) or 705 (the transport is locked), this far
+         * apart (ms): a TV that has just been stopped has been seen to need several seconds before it takes an item, and a grab that fails
+         * leaves it without a stream (and makes the next start wait). About 14 s in all. Play is tried a few times in the same way.
+         */
+        private const val SET_TRIES = 13
+        private const val SET_RETRY_MS = 1_200L
+        private const val PLAY_TRIES = 6
+        private const val PLAY_RETRY_MS = 600L
+
+        /** After a grab failed the other room keeps the delay of Synced mode for this long (ms): the TV is tried again, and it is not the user who left it. */
+        private const val FAIL_GRACE_MS = 30_000L
+
+        /** After Stop the TV is given this long (ms) to say that its transport is stopped. */
+        private const val STOP_SETTLE_MS = 1_500L
+
+        /** A restart of the stream on purpose is expected to be through within this long (ms). */
+        private const val RESTART_WINDOW_MS = 25_000L
 
         /** The stream is this much older than the burst of a connection (ms) when Play is sent. */
         private const val BURST_MARGIN_MS = 150L

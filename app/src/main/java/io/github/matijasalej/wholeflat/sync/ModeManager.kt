@@ -89,6 +89,11 @@ class ModeManager(
          * [silentForMs], for which "no sound yet" is no sound.
          */
         val idleForMs: Long = silentForMs,
+        /**
+         * The TV's stream is being made again, or its last start failed a moment ago: the TV is tried again whether there is sound at this
+         * moment or not (a pause of the music while a re-anchor retries must not leave the TV without a stream until the music comes back).
+         */
+        val retryingTv: Boolean = false,
     )
 
     sealed class Action {
@@ -191,7 +196,7 @@ class ModeManager(
                 lastRegrabMs = i.nowMs
                 actions.add(Action.Grab)
                 why("grabbing the TV again after the Cast session")
-            } else if (!rePending && (soundNow || justAsked)) {
+            } else if (!rePending && (soundNow || justAsked || i.retryingTv)) {
                 actions.add(Action.Grab)
                 why("grabbing the TV: sound, mode synced")
             }

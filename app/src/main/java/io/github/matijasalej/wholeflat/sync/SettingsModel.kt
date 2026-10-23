@@ -19,7 +19,9 @@ class SettingsValues(
     val captureEnabled: Boolean,
     val captureLivingLatencyMs: Int,
     val captureLeadMs: Int,
-    /** The format of the stream to the Sonos: "flac" or "wav" (see [StreamFormat]). */
+    /** The lag the kitchen is brought to in capture mode (ms after the capture); -1: it is left where it locked. */
+    val kitchenTargetMs: Int,
+    /** The format of the stream to the Sonos: "auto", "flac" or "wav" (see [StreamFormat]). */
     val kitchenFormat: String,
     /** The block size of the FLAC stream: 4096, 1152 or 576 frames. */
     val kitchenFlacBlock: Int,
@@ -36,13 +38,14 @@ class SettingsModel {
     var captureEnabled = true
     var captureLivingLatencyMs = 0
     var captureLeadMs = DEFAULT_CAPTURE_LEAD_MS
-    var kitchenFormat = StreamFormat.FLAC.key
+    var kitchenTargetMs = NO_TARGET
+    var kitchenFormat = StreamFormat.AUTO
     var kitchenFlacBlock = Flac.BLOCK
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
-        captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenFormat, kitchenFlacBlock,
+        captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFormat, kitchenFlacBlock,
     )
 
     fun toJson(): JSONObject {
@@ -57,6 +60,7 @@ class SettingsModel {
         o.put(CAPTURE_ENABLED, captureEnabled)
         o.put(CAPTURE_LIVING_LATENCY_MS, captureLivingLatencyMs)
         o.put(CAPTURE_LEAD_MS, captureLeadMs)
+        o.put(KITCHEN_TARGET_MS, kitchenTargetMs)
         o.put(KITCHEN_FORMAT, kitchenFormat)
         o.put(KITCHEN_FLAC_BLOCK, kitchenFlacBlock)
         return o
@@ -106,9 +110,15 @@ class SettingsModel {
             val v = number(json.get(CAPTURE_LEAD_MS))?.coerceIn(MIN_CAPTURE_LEAD_MS, MAX_CAPTURE_LEAD_MS)
             if (v != null && v != captureLeadMs) { captureLeadMs = v; changed.add(CAPTURE_LEAD_MS) }
         }
+        if (json.has(KITCHEN_TARGET_MS)) {
+            // a number from 0; anything below that, or "off", or null, is no target
+            val raw = json.get(KITCHEN_TARGET_MS)
+            val v = if (raw == JSONObject.NULL || off(raw)) NO_TARGET else number(raw)?.let { if (it < 0) NO_TARGET else it.coerceAtMost(MAX_KITCHEN_TARGET_MS) }
+            if (v != null && v != kitchenTargetMs) { kitchenTargetMs = v; changed.add(KITCHEN_TARGET_MS) }
+        }
         if (json.has(KITCHEN_FORMAT)) {
-            // anything but "flac" or "wav" is ignored
-            val v = StreamFormat.of(json.get(KITCHEN_FORMAT).toString())?.key
+            // anything but "auto", "flac" or "wav" is ignored
+            val v = StreamFormat.settingOf(json.get(KITCHEN_FORMAT).toString())
             if (v != null && v != kitchenFormat) { kitchenFormat = v; changed.add(KITCHEN_FORMAT) }
         }
         if (json.has(KITCHEN_FLAC_BLOCK)) {
@@ -130,6 +140,8 @@ class SettingsModel {
         else -> null
     }
 
+    private fun off(v: Any?): Boolean = v is String && v.trim().lowercase().let { it.isEmpty() || it == "off" || it == "none" || it == "no" }
+
     private fun number(v: Any?): Int? = when (v) {
         is Number -> Math.round(v.toDouble()).toInt()
         is String -> v.trim().toDoubleOrNull()?.let { Math.round(it).toInt() }
@@ -147,6 +159,7 @@ class SettingsModel {
         const val CAPTURE_ENABLED = "capture_enabled"
         const val CAPTURE_LIVING_LATENCY_MS = "capture_living_latency_ms"
         const val CAPTURE_LEAD_MS = "capture_lead_ms"
+        const val KITCHEN_TARGET_MS = "kitchen_target_ms"
         const val KITCHEN_FORMAT = "kitchen_format"
         const val KITCHEN_FLAC_BLOCK = "kitchen_flac_block"
 
@@ -159,8 +172,23 @@ class SettingsModel {
 
         /** Audio sent to the Sonos ahead when a captured stream starts (ms): less is a smaller lag, more is steadier. */
         const val DEFAULT_CAPTURE_LEAD_MS = 150
-        const val MIN_CAPTURE_LEAD_MS = 40
+        const val MIN_CAPTURE_LEAD_MS = 10
         const val MAX_CAPTURE_LEAD_MS = 3_000
+
+        /** `kitchen_target_ms` when the kitchen is not brought to a lag (it stays where it locked). */
+        const val NO_TARGET = -1
+        const val MAX_KITCHEN_TARGET_MS = 3_000
+
+        /**
+         * The version of the stored settings. 2: the default of `kitchen_format` became "auto", but every change of
+         * any setting had stored all of them, so a stored "flac" is the old default and not a choice (see [migrate]).
+         */
+        const val VERSION = 2
+
+        /** Brings settings [stored] by an older [version] up to date (in place). */
+        fun migrate(stored: JSONObject, version: Int) {
+            if (version < 2 && stored.optString(KITCHEN_FORMAT) == "flac") stored.remove(KITCHEN_FORMAT)
+        }
 
         /** Empty, or a host name or address. */
         private val HOST = Regex("^([0-9A-Za-z.\\-]{1,100})?$")

@@ -20,18 +20,19 @@ class SettingsModelTest {
         assertEquals(true, o.getBoolean("capture_enabled"))
         assertEquals(0, o.getInt("capture_living_latency_ms"))
         assertEquals(150, o.getInt("capture_lead_ms"))
-        assertEquals("flac", o.getString("kitchen_format"))
+        assertEquals(-1, o.getInt("kitchen_target_ms"))
+        assertEquals("auto", o.getString("kitchen_format"))
         assertEquals(4096, o.getInt("kitchen_flac_block"))
     }
 
     @Test
-    fun theJsonHasTheSevenKeysTheMacToolReadsTheThreeOfTheCaptureModeAndTheTwoOfTheStreamFormat() {
+    fun theJsonHasTheSevenKeysTheMacToolReadsTheFourOfTheCaptureModeAndTheTwoOfTheStreamFormat() {
         val keys = SettingsModel().toJson().keys().asSequence().toSet()
         assertEquals(
             setOf(
                 "kitchen_enabled", "kitchen_offset_ms", "kitchen_balance", "living_fixed_volume",
                 "tv_screen_off", "tv_wake", "tv_ip",
-                "capture_enabled", "capture_living_latency_ms", "capture_lead_ms",
+                "capture_enabled", "capture_living_latency_ms", "capture_lead_ms", "kitchen_target_ms",
                 "kitchen_format", "kitchen_flac_block",
             ),
             keys,
@@ -39,20 +40,75 @@ class SettingsModelTest {
     }
 
     @Test
-    fun theStreamFormatTakesFlacOrWavInAnyCaseAndIgnoresTheRest() {
+    fun theStreamFormatTakesAutoFlacOrWavInAnyCaseAndIgnoresTheRest() {
         val m = SettingsModel()
+        assertEquals("auto", m.kitchenFormat)
         assertEquals(setOf("kitchen_format"), m.applyJson(JSONObject("""{"kitchen_format": "wav"}""")))
         assertEquals("wav", m.kitchenFormat)
         assertEquals("wav", m.values().kitchenFormat)
         assertEquals(setOf("kitchen_format"), m.applyJson(JSONObject("""{"kitchen_format": " FLAC "}""")))
         assertEquals("flac", m.kitchenFormat)
+        assertEquals(setOf("kitchen_format"), m.applyJson(JSONObject("""{"kitchen_format": "Auto"}""")))
+        assertEquals("auto", m.kitchenFormat)
         // not a format: nothing changes
         assertTrue(m.applyJson(JSONObject("""{"kitchen_format": "mp3"}""")).isEmpty())
         assertTrue(m.applyJson(JSONObject("""{"kitchen_format": ""}""")).isEmpty())
         assertTrue(m.applyJson(JSONObject("""{"kitchen_format": 3}""")).isEmpty())
-        assertEquals("flac", m.kitchenFormat)
+        assertEquals("auto", m.kitchenFormat)
         // the same again is no change
-        assertTrue(m.applyJson(JSONObject("""{"kitchen_format": "flac"}""")).isEmpty())
+        assertTrue(m.applyJson(JSONObject("""{"kitchen_format": "auto"}""")).isEmpty())
+    }
+
+    @Test
+    fun autoMeansWavForTheCaptureAndFlacForSpotify() {
+        assertEquals(StreamFormat.WAV, StreamFormat.resolve("auto", capture = true))
+        assertEquals(StreamFormat.FLAC, StreamFormat.resolve("auto", capture = false))
+        assertEquals(StreamFormat.FLAC, StreamFormat.resolve("flac", capture = true))
+        assertEquals(StreamFormat.WAV, StreamFormat.resolve("wav", capture = false))
+        // a value that is none of them falls back to the choice of auto
+        assertEquals(StreamFormat.WAV, StreamFormat.resolve("mp3", capture = true))
+        assertEquals(StreamFormat.FLAC, StreamFormat.resolve(null, capture = false))
+    }
+
+    @Test
+    fun theTargetLagIsOffByDefaultAndTakesNumbersFromZeroUp() {
+        val m = SettingsModel()
+        assertEquals(-1, m.kitchenTargetMs)
+        assertEquals(setOf("kitchen_target_ms"), m.applyJson(JSONObject("""{"kitchen_target_ms": 240}""")))
+        assertEquals(240, m.values().kitchenTargetMs)
+        assertEquals(setOf("kitchen_target_ms"), m.applyJson(JSONObject("""{"kitchen_target_ms": "250.4"}""")))
+        assertEquals(250, m.kitchenTargetMs)
+        assertEquals(setOf("kitchen_target_ms"), m.applyJson(JSONObject("""{"kitchen_target_ms": 0}""")))
+        assertEquals(0, m.kitchenTargetMs)
+        m.applyJson(JSONObject("""{"kitchen_target_ms": 99999}"""))
+        assertEquals(SettingsModel.MAX_KITCHEN_TARGET_MS, m.kitchenTargetMs)
+        // below zero, off, none, an empty text or null switch it off again
+        for (off in listOf("-5", "-1", "\"off\"", "\"none\"", "\"\"", "null")) {
+            m.applyJson(JSONObject("""{"kitchen_target_ms": 300}"""))
+            assertEquals(setOf("kitchen_target_ms"), m.applyJson(JSONObject("""{"kitchen_target_ms": $off}""")))
+            assertEquals("for $off", -1, m.kitchenTargetMs)
+        }
+        // words that mean nothing change nothing
+        m.applyJson(JSONObject("""{"kitchen_target_ms": 300}"""))
+        assertTrue(m.applyJson(JSONObject("""{"kitchen_target_ms": "soon"}""")).isEmpty())
+        assertEquals(300, m.kitchenTargetMs)
+    }
+
+    @Test
+    fun aFlacStoredByAnOlderVersionWasTheOldDefaultAndBecomesAuto() {
+        val stored = JSONObject("""{"kitchen_format": "flac", "kitchen_offset_ms": 20}""")
+        SettingsModel.migrate(stored, version = 1)
+        val m = SettingsModel()
+        m.applyJson(stored)
+        assertEquals("auto", m.kitchenFormat)
+        assertEquals(20, m.kitchenOffsetMs)
+        // a wav was a choice, and so is a flac of the current version
+        val wav = JSONObject("""{"kitchen_format": "wav"}""")
+        SettingsModel.migrate(wav, version = 1)
+        assertEquals("wav", wav.getString("kitchen_format"))
+        val current = JSONObject("""{"kitchen_format": "flac"}""")
+        SettingsModel.migrate(current, SettingsModel.VERSION)
+        assertEquals("flac", current.getString("kitchen_format"))
     }
 
     @Test
@@ -74,11 +130,12 @@ class SettingsModelTest {
     @Test
     fun theStreamFormatSettingsSurviveAStoreAndAReload() {
         val m = SettingsModel()
-        m.applyJson(JSONObject("""{"kitchen_format": "wav", "kitchen_flac_block": 1152}"""))
+        m.applyJson(JSONObject("""{"kitchen_format": "wav", "kitchen_flac_block": 1152, "kitchen_target_ms": 240}"""))
         val reloaded = SettingsModel()
         reloaded.applyJson(m.toJson())
         assertEquals("wav", reloaded.kitchenFormat)
         assertEquals(1152, reloaded.kitchenFlacBlock)
+        assertEquals(240, reloaded.kitchenTargetMs)
     }
 
     @Test
@@ -95,8 +152,11 @@ class SettingsModelTest {
     @Test
     fun theCaptureLeadIsClamped() {
         val m = SettingsModel()
-        m.applyJson(JSONObject("""{"capture_lead_ms": 10}"""))
+        assertEquals(10, SettingsModel.MIN_CAPTURE_LEAD_MS)
+        m.applyJson(JSONObject("""{"capture_lead_ms": 3}"""))
         assertEquals(SettingsModel.MIN_CAPTURE_LEAD_MS, m.captureLeadMs)
+        m.applyJson(JSONObject("""{"capture_lead_ms": 10}"""))
+        assertEquals(10, m.values().captureLeadMs)
         m.applyJson(JSONObject("""{"capture_lead_ms": 99999}"""))
         assertEquals(SettingsModel.MAX_CAPTURE_LEAD_MS, m.captureLeadMs)
         val changed = m.applyJson(JSONObject("""{"capture_lead_ms": "400"}"""))

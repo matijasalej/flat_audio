@@ -1,8 +1,9 @@
 package io.github.matijasalej.wholeflat.sync
 
 /**
- * The format of the stream to the Sonos (the setting `kitchen_format`): FLAC with frames of a chosen block size, or
- * WAV. The URL of a stream ends in the extension, and the speaker is told the MIME type in the item it is given.
+ * The format of the stream to the Sonos: FLAC with frames of a chosen block size, or WAV. The URL of a stream ends in
+ * the extension, and the speaker is told the MIME type in the item it is given. The setting `kitchen_format` is one
+ * of these or [AUTO], which picks per source (see [resolve]).
  */
 enum class StreamFormat(val key: String, val ext: String, val mime: String) {
     FLAC("flac", "flac", "audio/flac"),
@@ -10,8 +11,23 @@ enum class StreamFormat(val key: String, val ext: String, val mime: String) {
     ;
 
     companion object {
-        /** The format of a setting value ("flac" or "wav", any case); null for anything else. */
+        /**
+         * The value of `kitchen_format` that leaves the choice to the app: WAV for a captured stream (it starts
+         * sooner on the Sonos and needs no block of audio to exist before it can be sent), FLAC for Spotify's.
+         */
+        const val AUTO = "auto"
+
+        /** The format of a setting value ("flac" or "wav", any case); null for anything else, "auto" included. */
         fun of(key: String?): StreamFormat? = values().firstOrNull { it.key.equals(key?.trim(), ignoreCase = true) }
+
+        /** The value of the setting `kitchen_format` that [text] means: "auto", "flac" or "wav" (any case); null for anything else. */
+        fun settingOf(text: String?): String? {
+            val t = text?.trim()?.lowercase() ?: return null
+            return if (t == AUTO || values().any { it.key == t }) t else null
+        }
+
+        /** The format a stream of the capture mode ([capture]) or of Spotify gets under the setting [setting]. */
+        fun resolve(setting: String?, capture: Boolean): StreamFormat = of(setting) ?: if (capture) WAV else FLAC
 
         /** The format of the extension of a stream path (`/k/<token>.flac`); null if it is none. */
         fun ofPath(path: String): StreamFormat? = values().firstOrNull { path.endsWith("." + it.ext) }

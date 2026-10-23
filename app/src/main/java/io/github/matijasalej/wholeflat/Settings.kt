@@ -17,6 +17,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 object Settings {
     private const val PREFS = "wholeflat_settings"
     private const val TAG = "settings"
+    private const val VERSION_KEY = "settings_version"
 
     private val model = SettingsModel()
     private var prefs: SharedPreferences? = null
@@ -39,8 +40,18 @@ object Settings {
         } catch (e: Exception) {
             AppLog.error(TAG, "cannot read the stored settings", e)
         }
+        val version = try {
+            p.getInt(VERSION_KEY, 1)
+        } catch (e: Exception) {
+            1
+        }
+        if (version < SettingsModel.VERSION) {
+            SettingsModel.migrate(stored, version)
+            AppLog.add(TAG, "settings of version $version brought up to ${SettingsModel.VERSION}")
+        }
         model.applyJson(stored)
         values = model.values()
+        if (version < SettingsModel.VERSION) persist()
         AppLog.add(TAG, "loaded: " + model.toJson())
     }
 
@@ -89,6 +100,7 @@ object Settings {
         val p = prefs ?: return
         val json = model.toJson()
         val editor = p.edit()
+        editor.putInt(VERSION_KEY, SettingsModel.VERSION)
         for (key in json.keys()) {
             when (val v = json.get(key)) {
                 is Boolean -> editor.putBoolean(key, v)

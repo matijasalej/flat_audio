@@ -39,6 +39,11 @@ class SettingsValues(
     val tvDlnaLeadinMs: Int,
     /** The send buffer of the TV's socket in KB, small so that a TV that reads slower than real time shows (0: the system's). */
     val tvDlnaSndbufKb: Int,
+    /** The Ambilight of the TV follows the audio in Synced mode and is put back afterwards. */
+    val ambilightSynced: Boolean,
+    /** The Ambilight style in Synced mode (JointSpace `styleName`) and its `menuSetting`. */
+    val ambilightStyle: String,
+    val ambilightMenu: String,
 )
 
 class SettingsModel {
@@ -62,12 +67,16 @@ class SettingsModel {
     var tvDlnaLatencyMs = DEFAULT_TV_DLNA_LATENCY_MS
     var tvDlnaLeadinMs = 0
     var tvDlnaSndbufKb = DEFAULT_TV_DLNA_SNDBUF_KB
+    var ambilightSynced = true
+    var ambilightStyle = DEFAULT_AMBILIGHT_STYLE
+    var ambilightMenu = DEFAULT_AMBILIGHT_MENU
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
         captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvDlnaLatencyMs, tvDlnaLeadinMs, tvDlnaSndbufKb,
+        ambilightSynced, ambilightStyle, ambilightMenu,
     )
 
     fun toJson(): JSONObject {
@@ -92,6 +101,9 @@ class SettingsModel {
         o.put(TV_DLNA_LATENCY_MS, tvDlnaLatencyMs)
         o.put(TV_DLNA_LEADIN_MS, tvDlnaLeadinMs)
         o.put(TV_DLNA_SNDBUF_KB, tvDlnaSndbufKb)
+        o.put(AMBILIGHT_SYNCED, ambilightSynced)
+        o.put(AMBILIGHT_STYLE, ambilightStyle)
+        o.put(AMBILIGHT_MENU, ambilightMenu)
         return o
     }
 
@@ -186,6 +198,19 @@ class SettingsModel {
             val v = number(json.get(TV_DLNA_SNDBUF_KB))?.coerceIn(0, MAX_TV_DLNA_SNDBUF_KB)
             if (v != null && v != tvDlnaSndbufKb) { tvDlnaSndbufKb = v; changed.add(TV_DLNA_SNDBUF_KB) }
         }
+        if (json.has(AMBILIGHT_SYNCED)) {
+            val v = bool(json.get(AMBILIGHT_SYNCED))
+            if (v != null && v != ambilightSynced) { ambilightSynced = v; changed.add(AMBILIGHT_SYNCED) }
+        }
+        if (json.has(AMBILIGHT_STYLE)) {
+            // a JointSpace style name: capital letters, digits and underscores
+            val v = json.get(AMBILIGHT_STYLE).toString().trim().uppercase()
+            if (STYLE_NAME.matches(v) && v != ambilightStyle) { ambilightStyle = v; changed.add(AMBILIGHT_STYLE) }
+        }
+        if (json.has(AMBILIGHT_MENU)) {
+            val v = json.get(AMBILIGHT_MENU).toString().trim().uppercase()
+            if (STYLE_NAME.matches(v) && v != ambilightMenu) { ambilightMenu = v; changed.add(AMBILIGHT_MENU) }
+        }
         return changed
     }
 
@@ -229,6 +254,9 @@ class SettingsModel {
         const val TV_DLNA_LATENCY_MS = "tv_dlna_latency_ms"
         const val TV_DLNA_LEADIN_MS = "tv_dlna_leadin_ms"
         const val TV_DLNA_SNDBUF_KB = "tv_dlna_sndbuf_kb"
+        const val AMBILIGHT_SYNCED = "ambilight_synced"
+        const val AMBILIGHT_STYLE = "ambilight_style"
+        const val AMBILIGHT_MENU = "ambilight_menu"
 
         /** The offset is limited to what a Mac calibration could plausibly ask for. */
         const val MAX_OFFSET_MS = 2_000
@@ -259,6 +287,11 @@ class SettingsModel {
         const val MAX_TV_DLNA_MS = 2_000
         const val DEFAULT_TV_DLNA_SNDBUF_KB = 16
         const val MAX_TV_DLNA_SNDBUF_KB = 256
+
+        /** The Ambilight in Synced mode follows the audio (verified on the TV: the style "Lumina" in its menu). */
+        const val DEFAULT_AMBILIGHT_STYLE = "FOLLOW_AUDIO"
+        const val DEFAULT_AMBILIGHT_MENU = "ENERGY_ADAPTIVE_BRIGHTNESS"
+        private val STYLE_NAME = Regex("^[A-Z][A-Z0-9_]{1,40}$")
 
         /** `kitchen_volume` when the app leaves the volume of the Sonos alone. */
         const val NO_VOLUME = -1

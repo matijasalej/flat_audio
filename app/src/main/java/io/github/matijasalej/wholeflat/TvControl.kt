@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Process
 import android.os.SystemClock
+import io.github.matijasalej.wholeflat.sync.AmbilightApi
 import io.github.matijasalej.wholeflat.sync.VideoPolicy
 import org.json.JSONObject
 import java.net.DatagramPacket
@@ -283,6 +284,98 @@ class TvControl(private val context: Context) {
         }
     }
 
+    // ---- for the DLNA player and the lights ----------------------------------------------------
+
+    /** The power state of the TV ("On", "Standby"), null if it does not answer. */
+    fun powerState(): String? {
+        val ip = currentIp() ?: return null
+        return getPowerState(ip)
+    }
+
+    /**
+     * Makes sure the TV is on before it is given a stream: if it is in standby and waking is allowed (`tv_wake`), it is woken and
+     * waited for (best effort, [waitSeconds]). False if it is not on in the end.
+     */
+    fun ensureOn(waitSeconds: Int = WAKE_WAIT_S): Boolean {
+        val ip = currentIp() ?: return false
+        var power = getPowerState(ip)
+        lastPower = power ?: "unreachable"
+        if (power == "On") return true
+        if (power == null || !Settings.values.tvWake) return false
+        wakesSent++
+        val ok = postJson(ip, "powerstate", "{\"powerstate\":\"On\"}")
+        note("TV power state was $power, asked it to wake: ${if (ok) "accepted" else "refused"}")
+        var waited = 0
+        while (waited < waitSeconds) {
+            sleepQuietly(1000)
+            waited++
+            power = getPowerState(ip)
+            lastPower = power ?: "unreachable"
+            if (power == "On") break
+        }
+        if (power != "On") return false
+        sleepQuietly(1500) // the picture needs a moment before it takes commands
+        return true
+    }
+
+    /**
+     * What the TV is showing, from JointSpace (`/6/context`, `level1`): "BrowseDlna" while it is in its DLNA player, "WatchExtension"
+     * on an HDMI input, something else elsewhere. Null if the TV does not answer.
+     */
+    fun context(): String? {
+        val ip = currentIp() ?: return null
+        val text = httpText("GET", "http://$ip:$PORT/6/context", null, 1500, quiet = true) ?: return null
+        return try {
+            val level1 = JSONObject(text).optString("level1", "")
+            lastContext = level1
+            level1.ifEmpty { null }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    @Volatile
+    var lastContext: String = ""
+        private set
+
+    /** The package that is in front on this box now (from the usage events), null if unknown or the usage access is not granted. */
+    fun foregroundPackage(): String? {
+        if (!hasUsageAccess()) return null
+        isVideoInFront() // reads the events and keeps the package
+        return lastForeground
+    }
+
+    /** The packages of the home screens (the launcher), for telling them from a video app. */
+    fun launcherPackages(): Set<String> = homePackages()
+
+    /** The Ambilight of the TV through JointSpace, for [io.github.matijasalej.wholeflat.sync.AmbilightControl]. */
+    val ambilight: AmbilightApi = object : AmbilightApi {
+        override fun power(): String? {
+            val ip = currentIp() ?: return null
+            val text = httpText("GET", "http://$ip:$PORT/6/ambilight/power", null, 2000, quiet = true) ?: return null
+            return try {
+                JSONObject(text).optString("power", "").ifEmpty { null }
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+        override fun config(): String? {
+            val ip = currentIp() ?: return null
+            return httpText("GET", "http://$ip:$PORT/6/ambilight/currentconfiguration", null, 2000, quiet = true)?.trim()?.ifEmpty { null }
+        }
+
+        override fun setPower(on: Boolean): Boolean {
+            val ip = currentIp() ?: return false
+            return postJson(ip, "ambilight/power", "{\"power\":\"${if (on) "On" else "Off"}\"}")
+        }
+
+        override fun setConfig(json: String): Boolean {
+            val ip = currentIp() ?: return false
+            return postJson(ip, "ambilight/currentconfiguration", json)
+        }
+    }
+
     // ---- JointSpace ----------------------------------------------------------------------------
 
     /** The address to use: the one typed on the settings screen, else the one found by SSDP. */
@@ -449,6 +542,7 @@ class TvControl(private val context: Context) {
         o.put("usage_access", hasUsageAccess())
         o.put("foreground", lastForeground ?: JSONObject.NULL)
         o.put("video_in_front", lastVideo ?: JSONObject.NULL)
+        o.put("context", lastContext.ifEmpty { JSONObject.NULL })
         o.put("wakes_sent", wakesSent)
         o.put("screen_off_sent", screenOffSent)
         o.put("last_action", lastAction)

@@ -30,6 +30,9 @@ class SettingsModelTest {
         assertEquals(300, o.getInt("tv_dlna_latency_ms"))
         assertEquals(0, o.getInt("tv_dlna_leadin_ms"))
         assertEquals(16, o.getInt("tv_dlna_sndbuf_kb"))
+        assertEquals(true, o.getBoolean("ambilight_synced"))
+        assertEquals("FOLLOW_AUDIO", o.getString("ambilight_style"))
+        assertEquals("ENERGY_ADAPTIVE_BRIGHTNESS", o.getString("ambilight_menu"))
     }
 
     @Test
@@ -42,6 +45,7 @@ class SettingsModelTest {
                 "capture_enabled", "capture_living_latency_ms", "capture_lead_ms", "kitchen_target_ms", "kitchen_floor_ms",
                 "kitchen_volume", "capture_volume_mirror", "kitchen_format", "kitchen_flac_block",
                 "mode", "tv_dlna_latency_ms", "tv_dlna_leadin_ms", "tv_dlna_sndbuf_kb",
+                "ambilight_synced", "ambilight_style", "ambilight_menu",
             ),
             keys,
         )
@@ -114,6 +118,19 @@ class SettingsModelTest {
         assertTrue(m.applyJson(JSONObject("""{"mode": 3}""")).isEmpty())
         assertTrue(m.applyJson(JSONObject("""{"mode": ""}""")).isEmpty())
         assertEquals("synced", m.mode)
+    }
+
+    @Test
+    fun theAmbilightSettingsTakeStyleNamesAndSwitches() {
+        val m = SettingsModel()
+        assertEquals(setOf("ambilight_synced"), m.applyJson(JSONObject("""{"ambilight_synced": "off"}""")))
+        assertEquals(false, m.values().ambilightSynced)
+        assertEquals(setOf("ambilight_style", "ambilight_menu"), m.applyJson(JSONObject("""{"ambilight_style": " follow_video ", "ambilight_menu": "standard"}""")))
+        assertEquals("FOLLOW_VIDEO", m.values().ambilightStyle)
+        assertEquals("STANDARD", m.values().ambilightMenu)
+        // not a style name: ignored
+        assertTrue(m.applyJson(JSONObject("""{"ambilight_style": "rain bow", "ambilight_menu": "", "ambilight_synced": "maybe"}""")).isEmpty())
+        assertEquals("FOLLOW_VIDEO", m.ambilightStyle)
     }
 
     @Test

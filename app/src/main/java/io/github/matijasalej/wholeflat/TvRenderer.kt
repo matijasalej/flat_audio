@@ -412,6 +412,8 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         if (pipe != null) {
             s.ts = pipe
             s.onGet = { t -> warmup.onGet(t) }
+            // the TV's latency is the backlog of the connection it plays: when it makes another (or drops one) the common delay is worked out again
+            s.onTsChange = { post("connections changed") { refreshTiming(force = false) } }
             s.sendBufferBytes = TS_SEND_BUFFER_BYTES
         } else {
             s.startAtConnect = { began -> startFrameAt(feed, began) }
@@ -496,6 +498,8 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         val p = pipeline ?: return
         if (live || state != State.PLAYING) return
         if (!warmup.poll(System.nanoTime(), s.streamCount, true)) return
+        // the connection that stayed open is the one the TV plays: its backlog is what the TV's latency is made of
+        refreshTiming(force = true)
         val info = p.goLive()
         live = true
         warmupMs = warmup.durationMs(System.nanoTime())
@@ -607,7 +611,10 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     // ---- the timing ------------------------------------------------------------------------------
 
     /** X, the TV's own delay from our write to its sound (ms), for the format in use. */
-    fun tvLatencyMs(): Int = SyncedTiming.tvLatencyMs(Settings.values.tvLatencyMs, activeFormat)
+    fun tvLatencyMs(): Int {
+        val v = Settings.values
+        return SyncedTiming.tvLatencyMs(v.tvLatencyMs, activeFormat, session?.liveBacklogMs() ?: Double.NaN, v.tvBurstMs, v.tvExtraMs)
+    }
 
     /**
      * The common delay D of the rooms and the hold of the TV's stream from the settings and the pipeline of the capture. Only a change
@@ -633,6 +640,10 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             hold = SyncedTiming.tvHoldMs(d, x)
         }
         if (!force && !delayMs.isNaN() && Math.abs(d - delayMs) < DELAY_HYSTERESIS_MS) return
+        if (activeFormat == "ts" && !delayMs.isNaN() && Math.abs(d - delayMs) >= 1.0) {
+            val backlog = session?.liveBacklogMs() ?: Double.NaN
+            AppLog.add(TAG, "the common delay is now ${fmt(d)} ms (was ${fmt(delayMs)}): the TV's latency ${fmt(x)} ms is the backlog of its connection ${fmt(backlog)} ms and ${Settings.values.tvExtraMs} ms, the hold ${fmt(hold)} ms")
+        }
         delayMs = d
         holdMs = hold
         try {
@@ -864,6 +875,8 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         o.put("hold_ms", jsonNumber(holdMs))
         o.put("tv_latency_ms", tvLatencyMs())
         o.put("tv_latency_setting", v.tvLatencyMs)
+        o.put("tv_extra_ms", v.tvExtraMs)
+        o.put("backlog_ms", jsonNumber(session?.liveBacklogMs() ?: Double.NaN))
         o.put("format", activeFormat)
         o.put("live", live)
         o.put("warming_up", warming)

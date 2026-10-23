@@ -13,7 +13,7 @@ import java.util.ArrayDeque
  *
  * Positions are byte counts since the start of the stream. Thread safe. Plain Kotlin.
  */
-class TsHistory(private val maxBytes: Long = 6L shl 20, private val maxAgeNanos: Long = 10_000_000_000L) {
+class TsHistory(private val maxBytes: Long = 16L shl 20, private val maxAgeNanos: Long = 12_000_000_000L) {
     private class Entry(val pos: Long, val bytes: ByteArray, val nanos: Long, val key: Boolean)
 
     /** What a read gives. */
@@ -36,6 +36,7 @@ class TsHistory(private val maxBytes: Long = 6L shl 20, private val maxAgeNanos:
     private var held = 0L
     private var end = 0L
     private var closed = false
+    private var newestKeyPos = -1L
 
     /** The position after the newest byte. */
     val endPos: Long get() = synchronized(lock) { end }
@@ -51,6 +52,7 @@ class TsHistory(private val maxBytes: Long = 6L shl 20, private val maxAgeNanos:
     fun append(bytes: ByteArray, nanos: Long, key: Boolean) {
         if (bytes.isEmpty()) return
         synchronized(lock) {
+            if (key) newestKeyPos = end
             entries.addLast(Entry(end, bytes, nanos, key))
             end += bytes.size
             held += bytes.size
@@ -61,8 +63,7 @@ class TsHistory(private val maxBytes: Long = 6L shl 20, private val maxAgeNanos:
 
     /** What is older than the ring keeps goes, but never the newest key place and what follows it. */
     private fun trim(nowNanos: Long) {
-        var newestKey = -1L
-        for (e in entries) if (e.key) newestKey = e.pos
+        val newestKey = newestKeyPos
         while (entries.size > 1) {
             val first = entries.peekFirst()!!
             if (newestKey >= 0 && first.pos >= newestKey) return

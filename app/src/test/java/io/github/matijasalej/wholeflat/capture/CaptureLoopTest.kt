@@ -74,6 +74,8 @@ class CaptureLoopTest {
         trackerIn: CaptureTracker? = null,
         /** The lowest lag aimed for, from the settings (NaN: none). */
         floorMs: Double = Double.NaN,
+        /** How long the capture has been running when Play goes out (a lead is limited by what the buffer holds). */
+        playAfterS: Double = 1.23,
     ): Result {
         val buffer = CaptureBuffer(rate, rate * 8)
         buffer.newGeneration(1)
@@ -94,8 +96,8 @@ class CaptureLoopTest {
         }
         fun framesAt(t: Long): Long = Math.floorDiv((t - t0) * rate, 1_000_000_000L)
 
-        // Play goes out 1.23 s into the capture
-        val tPlay = t0 + 1_230_000_000L
+        // Play goes out 1.23 s into the capture (or when the test says)
+        val tPlay = t0 + (playAfterS * 1e9).toLong()
         capture(framesAt(tPlay))
         var offset = offsetMs
         // what a stream planned at the moment of Play sees (a later plan, as after a restart, has its own numbers)
@@ -482,5 +484,35 @@ class CaptureLoopTest {
         assertEquals(0, r.relocks)
         for (lag in tail(r, 25.0, 30.0)) assertEquals(r.lockedMs, lag, 7.0)
         for (lag in tail(r, 130.0)) assertEquals(350.0, lag, 7.0)
+    }
+
+    // ---- Synced mode: the kitchen is held two and a half seconds behind the capture ---------------------------------
+
+    @Test
+    fun aLagOfTwoAndAHalfSecondsIsHeldLikeAnyOther() {
+        // the Sonos gets the stream 2.3 s of audio ahead of what it plays (the lead of Synced mode), so the stream that is built
+        // as it is captured is far ahead of the speaker: nothing about the control may depend on that
+        val r = simulate(seconds = 240, leadMs = 2_300, driftPpm = 20.0, noiseMs = 3.4, seed = 11, targetMs = 2_590.0, playAfterS = 5.0)
+        assertNull("no restart: ${r.rejoinReason}", r.rejoinAt)
+        assertEquals(0, r.relocks)
+        assertEquals(2_590.0, r.plannedMs, 0.5)
+        assertEquals(2_590.0, r.lockedMs, 5.0)
+        for (lag in tail(r, 40.0)) assertEquals(2_590.0, lag, 8.0)
+        assertTrue(r.tracker.steer.learnedFloorMs.isNaN())
+    }
+
+    @Test
+    fun aTargetThatMovesByTensOfMillisecondsInSyncedModeIsFollowedWithoutARestart() {
+        // the TV reconnected and its latency moved: +50 ms, later -70 ms (3 ms per second, so about 17 s and 24 s)
+        val up = simulate(seconds = 200, leadMs = 2_300, noiseMs = 3.4, seed = 12, targetMs = 2_590.0, changeTargetAtS = 60, newTargetMs = 2_640.0, playAfterS = 5.0)
+        assertNull("no restart: ${up.rejoinReason}", up.rejoinAt)
+        assertEquals(0, up.relocks)
+        for (lag in tail(up, 40.0, 60.0)) assertEquals(2_590.0, lag, 8.0)
+        for (lag in tail(up, 100.0)) assertEquals(2_640.0, lag, 8.0)
+        val down = simulate(seconds = 200, leadMs = 2_300, noiseMs = 3.4, seed = 13, targetMs = 2_590.0, changeTargetAtS = 60, newTargetMs = 2_520.0, playAfterS = 5.0)
+        assertNull("no restart: ${down.rejoinReason}", down.rejoinAt)
+        assertEquals(0, down.relocks)
+        for (lag in tail(down, 110.0)) assertEquals(2_520.0, lag, 8.0)
+        assertTrue("it went at the pace of the ramp: ${steepestFall(down.lags, 10.0, 60.0)}", steepestFall(down.lags, 10.0, 60.0) <= 45.0)
     }
 }

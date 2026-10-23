@@ -9,7 +9,7 @@ import io.github.matijasalej.wholeflat.sync.H264
 
 /**
  * The H.264 encoder of the lyrics video: 1920 x 1080 at 30 frames a second from the input surface (the pictures are drawn on it), High
- * profile if the encoder has it (else Main, else what it gives), constant bitrate about 5 Mbit/s, an IDR picture every second, no
+ * profile if the encoder has it (else Main, else what it gives), constant bitrate about 6 Mbit/s (the transport stream is padded to 9 Mbit/s around it), an IDR picture every second, no
  * B-frames, the lowest latency the encoder offers, and the previous picture repeated if no new one comes for 100 ms. The hardware
  * encoder of this box is `c2.amlogic.avc.encoder` (tried first, then whatever makes `video/avc`).
  *

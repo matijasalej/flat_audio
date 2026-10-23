@@ -211,7 +211,8 @@ class SyncedController(
         // the TV plays our music (not just the splash of the warm-up)
         val playing = renderer.state == TvRenderer.State.PLAYING && renderer.live && effectiveMode == Mode.SYNCED
         kitchen.holdStart = if (effectiveMode == Mode.SYNCED && renderer.warming) "the TV is warming up (a splash and silence), its music is not live yet" else null
-        holdTheKitchen(playing, now)
+        // while the TV warms up again (a re-anchor) the kitchen is not sent back to the lag of Lyrics mode: it would be started twice
+        holdTheKitchen(playing, now, keepTarget = effectiveMode == Mode.SYNCED && renderer.warming)
         present(effectiveMode, playing, source, now)
         reanchorCheck(playing, silent)
         recoverAfterCrash(now)
@@ -286,7 +287,7 @@ class SyncedController(
 
     // ---- the kitchen -----------------------------------------------------------------------------
 
-    private fun holdTheKitchen(playing: Boolean, now: Long) {
+    private fun holdTheKitchen(playing: Boolean, now: Long, keepTarget: Boolean = false) {
         val offset = Settings.values.kitchenOffsetMs
         if (playing) {
             val d = renderer.delayMs
@@ -296,7 +297,7 @@ class SyncedController(
                 // the lead that puts the lag at the common delay at once: the target less the Play-to-sound delay and the pipeline
                 kitchen.syncedLeadMs = maxOf(0.0, target - kitchen.fixedLagMs())
             }
-        } else {
+        } else if (!keepTarget) {
             kitchen.syncedTargetMs = Double.NaN
             kitchen.syncedLeadMs = Double.NaN
         }

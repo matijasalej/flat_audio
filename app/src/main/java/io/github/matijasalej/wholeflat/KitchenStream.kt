@@ -117,6 +117,13 @@ class KitchenSession(
 
     private val tsOpen = AtomicInteger()
 
+    /** The backlog (ms: how old the key picture was that the connection started at, when it was made) of every open connection of a transport stream, by connection number. */
+    private val tsBacklogs = java.util.concurrent.ConcurrentSkipListMap<Int, Double>()
+
+    /** Called when the set of open connections of a transport stream changed (one was made or one ended): the TV's latency may be another. */
+    @Volatile
+    var onTsChange: (() -> Unit)? = null
+
     fun tsConnectionOpened() {
         tsOpen.incrementAndGet()
     }
@@ -124,6 +131,31 @@ class KitchenSession(
     fun tsConnectionClosed() {
         tsOpen.decrementAndGet()
     }
+
+    /** The connection [id] started at a key picture that was [backlogMs] old. */
+    fun tsStarted(id: Int, backlogMs: Double) {
+        tsBacklogs[id] = backlogMs
+        notifyTsChange()
+    }
+
+    /** The connection [id] ended. */
+    fun tsEnded(id: Int) {
+        if (tsBacklogs.remove(id) != null) notifyTsChange()
+    }
+
+    private fun notifyTsChange() {
+        try {
+            onTsChange?.invoke()
+        } catch (t: Throwable) {
+            AppLog.error("stream", "the connection hook failed", t)
+        }
+    }
+
+    /**
+     * The backlog of the connection that the TV plays: the newest one that is open (the TV makes some short ones to look at the stream and
+     * stays on the last); NaN if none is open. The TV's latency is this plus a constant.
+     */
+    fun liveBacklogMs(): Double = tsBacklogs.lastEntry()?.value ?: Double.NaN
 
     /** The statistics of a connection are put in the log every this many ms (0: not). */
     @Volatile
@@ -808,10 +840,12 @@ object KitchenStreams {
                 return
             }
             val startNanos = history.nanosAt(pos)
-            val startAgeMs = if (startNanos == null) Double.NaN else (began - startNanos) / 1e6
+            // the age of the place the TV starts at, as it is when its first byte is written: the TV's latency is this and a constant
+            val startAgeMs = if (startNanos == null) Double.NaN else (System.nanoTime() - startNanos) / 1e6
             val burst = history.endPos - pos
             rec?.startAgeMs = startAgeMs
             rec?.burstBytes = burst
+            if (!startAgeMs.isNaN()) session.tsStarted(connectionId, startAgeMs)
             log(
                 "$remote GET session ${session.token} conn $connectionId, the live video stream from the key place that is " +
                     "${if (startAgeMs.isNaN()) "?" else "%.0f".format(java.util.Locale.US, startAgeMs)} ms old ($burst bytes at once, lead ${lead / 1_000_000L} ms)" +
@@ -897,6 +931,7 @@ object KitchenStreams {
             closedBy = "server"
         } finally {
             session.tsConnectionClosed()
+            session.tsEnded(connectionId)
             val ended = System.nanoTime()
             if (rec != null) {
                 rec.bytes = bytes

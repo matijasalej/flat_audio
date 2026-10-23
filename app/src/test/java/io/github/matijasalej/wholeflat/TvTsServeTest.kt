@@ -301,6 +301,39 @@ class TvTsServeTest {
     }
 
     @Test
+    fun theBacklogOfTheNewestOpenConnectionIsWhatTheTvPlaysAndTheHookIsToldOfEveryChange() {
+        val feed = Feed(1_500 * ms)
+        // key places 3 s, 2.4 s and 1 s old: a lead of 1.5 s starts at the one 2.4 s old, which is the newest that is 1.5 s old
+        val now = System.nanoTime()
+        feed.history.append(unit(1), now - 3_000 * ms, true)
+        feed.history.append(unit(2), now - 2_400 * ms, true)
+        feed.history.append(unit(3), now - 1_000 * ms, true)
+        val s = tsSession(feed)
+        val changes = AtomicInteger()
+        s.onTsChange = { changes.incrementAndGet() }
+        assertTrue(s.liveBacklogMs().isNaN())
+        val a = FakeConn()
+        val ta = serveAsync(s, "GET", a)
+        waitUntil { !s.liveBacklogMs().isNaN() }
+        assertEquals(2_400.0, s.liveBacklogMs(), 60.0)
+        // a second connection, with a lead that gives another start: it is the newest, so it counts
+        feed.lead = 500 * ms
+        val b = FakeConn()
+        val tb = serveAsync(s, "GET", b)
+        waitUntil { changes.get() >= 2 }
+        assertEquals(1_000.0, s.liveBacklogMs(), 80.0)
+        // the newest ends: the one before it counts again
+        b.peerCloses()
+        tb.join(5_000)
+        waitUntil { changes.get() >= 3 }
+        assertEquals(2_400.0, s.liveBacklogMs(), 60.0)
+        a.peerCloses()
+        ta.join(5_000)
+        assertTrue(s.liveBacklogMs().isNaN())
+        assertEquals(4, changes.get())
+    }
+
+    @Test
     fun theHookOfTheWarmUpIsToldOfEveryGetAndTheTimeIsKept() {
         val feed = Feed(1_000 * ms)
         filled(feed, System.nanoTime())

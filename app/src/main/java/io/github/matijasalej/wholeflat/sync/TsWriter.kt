@@ -36,12 +36,12 @@ class DueQueue<T> {
 
 /**
  * The last step before the network: audio frames and video access units are queued with the moment each is to be written (the capture
- * time of its picture or sound plus the hold of the stream), and written in that order, through the muxer, into the ring that the
- * connections of the TV read from. What is due but late is written at once; how late is counted. Between the items the muxer is asked
- * for what is due without data (the PCR packets and the tables), so that the clock of the stream never stands still. Thread safe as far as
- * [submitAudio] and [submitVideo] may be called while another thread calls [step]. Plain Kotlin.
+ * time of its picture or sound plus the hold of the stream); when that moment comes it goes into the muxer, which sends it at the rate of
+ * the stream, and the slots that have come by ([slotOf] says how many) are emitted into the ring that the connections of the TV read from.
+ * The stream is constant in rate: what is not picture or sound is padding. What is due but late is queued at once; how late is counted.
+ * Thread safe as far as [submitAudio] and [submitVideo] may be called while another thread calls [step]. Plain Kotlin.
  */
-class TsWriter(private val mux: TsMuxer, private val history: TsHistory) {
+class TsWriter(private val mux: TsMuxer, private val history: TsHistory, private val slotOf: (Long) -> Long) {
     private sealed class Item {
         class Video(val au: ByteArray, val pts90: Long, val key: Boolean) : Item()
         class Audio(val adts: ByteArray, val pts90: Long) : Item()
@@ -49,7 +49,7 @@ class TsWriter(private val mux: TsMuxer, private val history: TsHistory) {
 
     private val queue = DueQueue<Item>()
 
-    /** How late the items were when they were written (ms): the latest, and the sums for averages (read them with [takeStats]). */
+    /** How late the items were when they were queued for sending (ms): averages and the latest, since the last [takeStats]. */
     class Stats(
         val audioLateAvgMs: Double,
         val audioLateMaxMs: Double,
@@ -71,6 +71,7 @@ class TsWriter(private val mux: TsMuxer, private val history: TsHistory) {
     var keyUnits = 0L
         private set
 
+    /** Bytes emitted into the ring (all of the stream, padding included). */
     @Volatile
     var bytes = 0L
         private set
@@ -81,26 +82,52 @@ class TsWriter(private val mux: TsMuxer, private val history: TsHistory) {
 
     val queued: Int get() = queue.size
 
-    /** Writes everything that is due at [nowNanos]; returns the time to come back at (the next item's, but never later than [maxWaitNanos] from now). */
+    /** Packets that wait in the muxer for their slot, and how many of them are video. */
+    val packetsWaiting: Int get() = synchronized(mux) { mux.queuedPackets }
+    val videoPacketsWaiting: Int get() = synchronized(mux) { mux.queuedVideoPackets }
+
+    /** Queues what is due at [nowNanos] and emits the slots that have come by; returns the time to come back at (never later than [maxWaitNanos] from now). */
     fun step(nowNanos: Long, maxWaitNanos: Long = 5_000_000L): Long {
-        while (true) {
-            val (due, item) = queue.popDue(nowNanos) ?: break
-            val lateMs = maxOf(0L, nowNanos - due) / 1e6
-            val out = when (item) {
-                is Item.Video -> mux.video(item.au, item.pts90, item.key, nowNanos).also { noteLate(false, lateMs) }
-                is Item.Audio -> mux.audio(item.adts, item.pts90, nowNanos).also { noteLate(true, lateMs) }
+        synchronized(mux) {
+            while (true) {
+                val (due, item) = queue.popDue(nowNanos) ?: break
+                val lateMs = maxOf(0L, nowNanos - due) / 1e6
+                when (item) {
+                    is Item.Video -> {
+                        mux.queueVideo(item.au, item.pts90, item.key)
+                        noteLate(false, lateMs)
+                    }
+                    is Item.Audio -> {
+                        mux.queueAudio(item.adts, item.pts90)
+                        noteLate(true, lateMs)
+                    }
+                }
             }
-            put(out, nowNanos)
+            val slot = slotOf(nowNanos)
+            while (mux.nextSlotToEmit <= slot) {
+                val upTo = minOf(slot, mux.nextSlotToEmit + CHUNK_SLOTS - 1)
+                put(mux.emit(upTo), nowNanos)
+            }
         }
-        mux.idle(nowNanos)?.let { put(it, nowNanos) }
         val next = queue.nextDue()
         return if (next == null) nowNanos + maxWaitNanos else minOf(next, nowNanos + maxWaitNanos)
     }
 
-    private fun put(out: TsMuxer.Out, nowNanos: Long) {
-        history.append(out.bytes, nowNanos, out.keyStart)
-        bytes += out.bytes.size
-        if (out.keyStart) keyUnits++
+    /** The emitted packets go into the ring in pieces that begin where a place to start begins. */
+    private fun put(e: TsMuxer.Emitted, nowNanos: Long) {
+        if (e.bytes.isEmpty()) return
+        var from = 0
+        for (k in e.keyOffsets) {
+            if (k > from) history.append(e.bytes.copyOfRange(from, k), nowNanos, false)
+            from = k
+            keyUnits++
+            // a place to start: from here to the next one (or the end)
+            val next = e.keyOffsets.firstOrNull { it > k } ?: e.bytes.size
+            history.append(e.bytes.copyOfRange(k, next), nowNanos, true)
+            from = next
+        }
+        if (from < e.bytes.size) history.append(if (from == 0) e.bytes else e.bytes.copyOfRange(from, e.bytes.size), nowNanos, false)
+        bytes += e.bytes.size
     }
 
     @Synchronized
@@ -131,5 +158,10 @@ class TsWriter(private val mux: TsMuxer, private val history: TsHistory) {
         videoLateMax = 0.0
         videoCount = 0
         return s
+    }
+
+    private companion object {
+        /** One call of the muxer gives at most this many slots (about 1 s at 9 Mbit/s). */
+        const val CHUNK_SLOTS = 6_000L
     }
 }

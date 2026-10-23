@@ -8,10 +8,13 @@ import org.junit.Test
 class TsWriterTest {
     private val ms = 1_000_000L
 
+    /** The slot that is due at a time: 5984.04 a second, from the time 0. */
+    private val slotOf: (Long) -> Long = { t -> Math.floorDiv(t * 5_984_040L, 1_000_000_000_000L) }
+
     private fun setup(): Triple<TsMuxer, TsHistory, TsWriter> {
-        val mux = TsMuxer().also { it.setClock(0L, 0L) }
+        val mux = TsMuxer()
         val history = TsHistory()
-        return Triple(mux, history, TsWriter(mux, history))
+        return Triple(mux, history, TsWriter(mux, history, slotOf))
     }
 
     private fun au(n: Int) = ByteArray(n) { (it + 1).toByte() }
@@ -22,31 +25,45 @@ class TsWriterTest {
     }
 
     @Test
-    fun itemsComeOutInTheOrderTheyAreDueNotTheOrderTheyCame() {
+    fun theRingHoldsExactlyTheSlotsThatHaveComeByWhetherAnythingWasSentOrNot() {
+        val (_, history, w) = setup()
+        w.step(1_000 * ms)
+        val slots = slotOf(1_000 * ms) + 1
+        assertEquals(slots * 188, history.endPos)
+        assertEquals(slots * 188, w.bytes)
+        w.step(1_500 * ms)
+        assertEquals((slotOf(1_500 * ms) + 1) * 188, history.endPos)
+        val r = everything(history)
+        assertEquals(emptyList<String>(), r.errors)
+        // padding, the clock and the tables
+        assertTrue(r.packets.count { it.pid == TsMuxer.NULL_PID } > r.packets.size * 0.95)
+    }
+
+    @Test
+    fun itemsReachTheStreamInTheOrderTheyAreDueNotTheOrderTheyCame() {
         val (_, history, w) = setup()
         w.submitAudio(30 * ms, au(100), 3_000)
         w.submitVideo(10 * ms, au(500), 1_000, true)
         w.submitAudio(20 * ms, au(100), 2_000)
-        w.step(40 * ms)
+        w.step(60 * ms)
         val r = everything(history)
         assertEquals(emptyList<String>(), r.errors)
-        val order = r.packets.filter { it.pusi && (it.pid == TsMuxer.VIDEO_PID || it.pid == TsMuxer.AUDIO_PID) }.map { it.pid }
-        assertEquals(listOf(TsMuxer.VIDEO_PID, TsMuxer.AUDIO_PID, TsMuxer.AUDIO_PID), order)
         assertEquals(listOf(2_000L, 3_000L), r.pes[TsMuxer.AUDIO_PID]!!.map { it.pts })
+        assertEquals(1, r.pes[TsMuxer.VIDEO_PID]!!.size)
+        // the audio that was due first is first among the audio, and every item went out whole
+        assertEquals(500, r.pes[TsMuxer.VIDEO_PID]!![0].payload.size)
     }
 
     @Test
-    fun nothingIsWrittenBeforeItIsDue() {
-        val (_, history, w) = setup()
+    fun nothingIsQueuedBeforeItIsDue() {
+        val (mux, history, w) = setup()
         w.submitAudio(100 * ms, au(100), 3_000)
         val next = w.step(10 * ms)
-        // the clock of the stream runs on: a PCR packet and the tables may have been written, but no audio
-        val packets = history.endPos
-        val r = if (packets > 0) everything(history) else null
-        assertTrue(r == null || r.pes.isEmpty())
-        // and it says when to come back: no later than the item's time
+        assertEquals(0L, mux.audioFrames)
         assertTrue(next <= 100 * ms)
         w.step(100 * ms)
+        assertEquals(1L, mux.audioFrames)
+        w.step(150 * ms)
         assertEquals(1, everything(history).pes[TsMuxer.AUDIO_PID]!!.size)
     }
 
@@ -60,10 +77,11 @@ class TsWriterTest {
     }
 
     @Test
-    fun aKeyAccessUnitIsAPlaceToStartInTheRing() {
+    fun aKeyPictureIsAPlaceToStartInTheRing() {
         val (_, history, w) = setup()
-        w.submitVideo(1 * ms, au(2_000), 1_000, true)
-        w.submitAudio(2 * ms, au(100), 1_100)
+        w.step(5 * ms)
+        w.submitVideo(10 * ms, au(2_000), 1_000, true)
+        w.submitAudio(12 * ms, au(100), 1_100)
         w.submitVideo(40 * ms, au(300), 4_000, false)
         w.submitVideo(1_001 * ms, au(2_000), 91_000, true)
         w.step(50 * ms)
@@ -71,16 +89,22 @@ class TsWriterTest {
         w.step(1_100 * ms)
         assertEquals(2, history.keyUnits)
         assertEquals(2L, w.keyUnits)
-        assertEquals(0L, history.startFor(2_000 * ms, 2_000 * ms)) // the first unit begins with the tables of the first key unit
-        assertTrue(history.startFor(1_100 * ms, 0)!! > 0L)
+        // the places begin with the PAT
+        val first = history.startFor(2_000 * ms, 2_000 * ms)!!
+        val bytes = (history.read(first, 188, 10) as TsHistory.Read.Data).bytes
+        assertEquals(0, ((bytes[1].toInt() and 0x1F) shl 8) or (bytes[2].toInt() and 0xFF))
+        assertTrue(history.newestKey()!! > first)
+        // everything that came was kept whole
+        val r = everything(history)
+        assertEquals(emptyList<String>(), r.errors)
     }
 
     @Test
-    fun theRingGetsTheMomentOfTheWriteNotTheDueTime() {
+    fun theRingGetsTheMomentOfTheStepNotTheDueTime() {
         val (_, history, w) = setup()
         w.submitVideo(1 * ms, au(500), 1_000, true) // due at 1 ms, written at 70 ms: 69 ms late
         w.step(70 * ms)
-        assertEquals(70 * ms, history.nanosAt(0))
+        assertEquals(70 * ms, history.nanosAt(history.newestKey()!!))
         val s = w.takeStats()
         assertEquals(69.0, s.videoLateMaxMs, 0.01)
         assertEquals(1, s.videoCount)
@@ -103,19 +127,34 @@ class TsWriterTest {
     }
 
     @Test
-    fun whenNothingComesThePcrAndTheTablesKeepComing() {
-        val (_, history, w) = setup()
+    fun theClockOfTheStreamNeverStandsStillAndAKeyPictureIsNotPaidForByTheAudio() {
+        val (mux, history, w) = setup()
         var t = 0L
-        while (t < 500 * ms) {
+        w.submitVideo(5 * ms, au(150_000), 90_000, true)
+        while (t < 400 * ms) {
+            // audio every 23 ms
+            if (t % (23 * ms) == 0L) w.submitAudio(t, au(300), 90_000 + t / ms * 90)
             w.step(t)
-            t += 5 * ms
+            t += ms
         }
         val r = everything(history)
         assertEquals(emptyList<String>(), r.errors)
+        // the picture took the 130 ms it takes, and the audio was all there in the meantime
+        assertEquals(1, r.pes[TsMuxer.VIDEO_PID]!!.size)
+        assertEquals(150_000, r.pes[TsMuxer.VIDEO_PID]!![0].payload.size)
+        assertTrue("audio frames ${r.pes[TsMuxer.AUDIO_PID]!!.size}", r.pes[TsMuxer.AUDIO_PID]!!.size >= 15)
         val pcrs = r.packets.filter { it.pcr != null }
-        assertTrue("pcr packets ${pcrs.size}", pcrs.size >= 20)
-        for (i in 1 until pcrs.size) assertTrue((pcrs[i].pcr!! - pcrs[i - 1].pcr!!) / 27_000.0 <= 40.0)
-        assertTrue(r.packets.count { it.pid == 0 } >= 4)
+        for (i in 1 until pcrs.size) assertTrue((pcrs[i].pcr!! - pcrs[i - 1].pcr!!) / 27_000.0 <= 20.1)
+        assertEquals(0, mux.queuedVideoPackets)
+    }
+
+    @Test
+    fun aStallOfTheWriterIsMadeUpWithoutBreakingTheStream() {
+        val (_, history, w) = setup()
+        w.step(100 * ms)
+        // nothing for 20 s (a thread that was starved): the slots that passed are all emitted, in pieces
+        w.step(20_100 * ms)
+        assertEquals((slotOf(20_100 * ms) + 1) * 188, history.endPos)
     }
 
     @Test

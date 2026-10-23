@@ -45,6 +45,12 @@ class SettingsValues(
      * TV took well (a second behind live, paced to live); 0: at the next key picture made after the connection.
      */
     val tvBurstMs: Int,
+    /**
+     * What the TV adds to the age of the key picture it started at (the backlog) between our write and its sound (ms): its latency is the
+     * backlog plus this, 490 ms in the device tests (the same on each of three runs, to 10 ms). The common delay of the two rooms is the
+     * hold of the stream plus that latency.
+     */
+    val tvExtraMs: Int,
     /** How far the PCR of the video stream runs behind the timestamps of what it carries (ms): the lead a player wants; ffmpeg writes 700. */
     val tvPcrLeadMs: Int,
     /** A re-anchor of the TV's stream (a restart with a warm-up) is asked for when the stream is this old (minutes) and a song ends; 0: never. */
@@ -81,6 +87,7 @@ class SettingsModel {
     var tvLatencyMs = AUTO_TV_LATENCY
     var tvFormat = TV_FORMAT_TS
     var tvBurstMs = DEFAULT_TV_BURST_MS
+    var tvExtraMs = DEFAULT_TV_EXTRA_MS
     var tvPcrLeadMs = DEFAULT_TV_PCR_LEAD_MS
     var tvReanchorMin = 0
     var tvRender = TV_RENDER_AUTO
@@ -93,7 +100,7 @@ class SettingsModel {
     fun values(): SettingsValues = SettingsValues(
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
-        captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvPcrLeadMs, tvReanchorMin, tvRender, karaoke,
+        captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPcrLeadMs, tvReanchorMin, tvRender, karaoke,
         ambilightSynced, ambilightStyle, ambilightMenu,
     )
 
@@ -119,6 +126,7 @@ class SettingsModel {
         o.put(TV_LATENCY_MS, tvLatencyMs)
         o.put(TV_FORMAT, tvFormat)
         o.put(TV_BURST_MS, tvBurstMs)
+        o.put(TV_EXTRA_MS, tvExtraMs)
         o.put(TV_PCR_LEAD_MS, tvPcrLeadMs)
         o.put(TV_REANCHOR_MIN, tvReanchorMin)
         o.put(TV_RENDER, tvRender)
@@ -222,6 +230,10 @@ class SettingsModel {
             val v = number(json.get(TV_BURST_MS))?.coerceIn(0, MAX_TV_BURST_MS)
             if (v != null && v != tvBurstMs) { tvBurstMs = v; changed.add(TV_BURST_MS) }
         }
+        if (json.has(TV_EXTRA_MS)) {
+            val v = number(json.get(TV_EXTRA_MS))?.coerceIn(MIN_TV_EXTRA_MS, MAX_TV_EXTRA_MS)
+            if (v != null && v != tvExtraMs) { tvExtraMs = v; changed.add(TV_EXTRA_MS) }
+        }
         if (json.has(TV_PCR_LEAD_MS)) {
             val v = number(json.get(TV_PCR_LEAD_MS))?.coerceIn(MIN_TV_PCR_LEAD_MS, MAX_TV_PCR_LEAD_MS)
             if (v != null && v != tvPcrLeadMs) { tvPcrLeadMs = v; changed.add(TV_PCR_LEAD_MS) }
@@ -295,6 +307,7 @@ class SettingsModel {
         const val TV_LATENCY_MS = "tv_latency_ms"
         const val TV_FORMAT = "tv_format"
         const val TV_BURST_MS = "tv_burst_ms"
+        const val TV_EXTRA_MS = "tv_extra_ms"
         const val TV_PCR_LEAD_MS = "tv_pcr_lead_ms"
         const val TV_REANCHOR_MIN = "tv_reanchor_min"
         const val TV_RENDER = "tv_render"
@@ -310,10 +323,10 @@ class SettingsModel {
         /** How much the living room can hear a captured player later than it is captured (ms). */
         const val MAX_CAPTURE_LATENCY_MS = 1_000
 
-        /** Audio sent to the Sonos ahead when a captured stream starts (ms): less is a smaller lag, more is steadier. */
+        /** Audio sent to the Sonos ahead when a captured stream starts (ms): less is a smaller lag, more is steadier. Synced mode uses the seconds. */
         const val DEFAULT_CAPTURE_LEAD_MS = 80
         const val MIN_CAPTURE_LEAD_MS = 10
-        const val MAX_CAPTURE_LEAD_MS = 3_000
+        const val MAX_CAPTURE_LEAD_MS = 5_000
 
         /** `kitchen_target_ms` when the kitchen is not brought to a lag (it stays where it locked). */
         const val NO_TARGET = -1
@@ -341,9 +354,14 @@ class SettingsModel {
         const val TV_FORMAT_TS = "ts"
         const val TV_FORMAT_L16 = "l16"
 
-        /** A connection of the TV starts at a key picture at least this old (ms); the device test that the TV took well used a second. */
-        const val DEFAULT_TV_BURST_MS = 1_000
+        /** A connection of the TV starts at a key picture at least this old (ms): 1.5 s in the device tests (the backlog came out 1.5 to 2.5 s). */
+        const val DEFAULT_TV_BURST_MS = 1_500
         const val MAX_TV_BURST_MS = 5_000
+
+        /** The TV's latency is the backlog of its connection plus this (ms): 490 in the device tests. */
+        const val DEFAULT_TV_EXTRA_MS = 490
+        const val MIN_TV_EXTRA_MS = -1_000
+        const val MAX_TV_EXTRA_MS = 3_000
 
         /** ffmpeg's mux delay, which the TV played. */
         const val DEFAULT_TV_PCR_LEAD_MS = 700

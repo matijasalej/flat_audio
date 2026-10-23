@@ -15,22 +15,36 @@ class SyncedTimingTest {
     }
 
     @Test
-    fun theUsualLatencyDependsOnTheStreamFormatAndTheSettingWinsWhenGiven() {
+    fun theAudioOnlyStreamHasTheUsualLatencyAndTheSettingWinsWhenGiven() {
         assertEquals(300, SyncedTiming.tvLatencyMs(-1, "l16"))
-        assertEquals(950, SyncedTiming.tvLatencyMs(-1, "ts"))
         assertEquals(1_450, SyncedTiming.tvLatencyMs(1_450, "ts"))
         assertEquals(0, SyncedTiming.tvLatencyMs(0, "l16"))
+    }
+
+    @Test
+    fun theLatencyOfTheVideoStreamIsTheBacklogOfTheConnectionPlusHalfASecond() {
+        // the device tests: a backlog of 1.60 s gave 2.10 s, one of 2.17 s gave 2.66 s (the same extra, to 10 ms)
+        assertEquals(2_090, SyncedTiming.tvLatencyMs(-1, "ts", backlogMs = 1_600.0))
+        assertEquals(2_660, SyncedTiming.tvLatencyMs(-1, "ts", backlogMs = 2_170.0))
+        // the extra is a setting
+        assertEquals(2_110, SyncedTiming.tvLatencyMs(-1, "ts", backlogMs = 1_600.0, extraMs = 510))
+        assertEquals(1_580, SyncedTiming.tvLatencyMs(-1, "ts", backlogMs = 1_600.0, extraMs = -20))
+        // before the TV has a connection: the lead of the start and the spacing of the warm-up's key pictures
+        assertEquals(2_090, SyncedTiming.tvLatencyMs(-1, "ts"))
+        assertEquals(1_090, SyncedTiming.tvLatencyMs(-1, "ts", burstMs = 500))
+        // a latency that is set is the latency, whatever the backlog
+        assertEquals(1_800, SyncedTiming.tvLatencyMs(1_800, "ts", backlogMs = 2_170.0))
     }
 
     @Test
     fun theVideoStreamMakesRoomForItsEncodersAndTheAudioOnlyStreamDoesNot() {
         assertEquals(100.0, SyncedTiming.encodeMs("ts"), 0.0)
         assertEquals(0.0, SyncedTiming.encodeMs("l16"), 0.0)
-        // with the defaults of the video stream: X 950 ms, pipeline 80 ms and encoders 100 ms, margin 30 ms, Sonos target 322 ms
-        val d = SyncedTiming.delayMs(950.0, 80.0 + SyncedTiming.encodeMs("ts"), 322.0)
-        assertEquals(1_160.0, d, 0.0)
+        // with the video stream: X 2090 ms (backlog 1.6 s and 0.49 s), pipeline 80 ms and encoders 100 ms, margin 30 ms, Sonos target 322 ms
+        val d = SyncedTiming.delayMs(2_090.0, 80.0 + SyncedTiming.encodeMs("ts"), 322.0)
+        assertEquals(2_300.0, d, 0.0)
         // the stream is held 210 ms: the 80 of the pipeline, the 100 of the encoders and the 30 of the margin
-        assertEquals(210.0, SyncedTiming.tvHoldMs(d, 950.0), 0.0)
+        assertEquals(210.0, SyncedTiming.tvHoldMs(d, 2_090.0), 0.0)
     }
 
     @Test

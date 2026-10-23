@@ -8,6 +8,7 @@ import io.github.matijasalej.wholeflat.capture.CaptureFrames
 import io.github.matijasalej.wholeflat.sync.Adts
 import io.github.matijasalej.wholeflat.sync.CalibrationClicks
 import io.github.matijasalej.wholeflat.sync.ClickTrack
+import io.github.matijasalej.wholeflat.sync.FrameLabels
 import io.github.matijasalej.wholeflat.sync.H264
 import io.github.matijasalej.wholeflat.sync.LyricsLayout
 import io.github.matijasalej.wholeflat.sync.Picture
@@ -30,7 +31,9 @@ import java.util.concurrent.locks.LockSupport
  *
  * **The clock.** Frame f of the capture is to sound in the TV [holdNanos] after its capture plus the TV's own delay; so it is *written*
  * at capture(f) + hold, and the PTS of a frame is the position of that capture frame in the stream (sample counted, so the audio never
- * jitters); the PCR is the capture clock at the moment of the write minus the lead that a player wants (700 ms, as ffmpeg writes it).
+ * jitters). The stream is constant in rate (9 Mbit/s, padded with null packets: see [TsMuxer]) and its clock is the number of the packet
+ * slot, which follows the capture clock: the slot that is due at a time is the one that goes with the capture frame of that time less the
+ * hold, and the PCR of a slot is what the position in the stream says, a lead (700 ms, as ffmpeg writes it) behind the PTS of what is sent then.
  * The pictures are drawn at 30 per second on the wall clock, each labelled with the capture time whose lyric state it shows (its drawing
  * time less the hold plus what the encoder needs), so the line that is sung in the sound is the line that is lit in the picture. The
  * hold is fixed for the life of the stream: the TV's player follows the PTS and PCR of what it was given, so a hold that moves would
@@ -57,10 +60,10 @@ class TvTsPipeline(
     /** What [goLive] decided: the first capture frame of the music and when it is written to the TV. */
     class LiveInfo(val firstFrame: Long, val dueNanos: Long)
 
-    override val history = TsHistory()
+    override val history = TsHistory(HISTORY_BYTES, HISTORY_NANOS)
     private val rate = feed.rate
     private val mux = TsMuxer()
-    private val writer = TsWriter(mux, history)
+    private val writer = TsWriter(mux, history) { t -> slotOf(t) }
 
     @Volatile
     private var running = false
@@ -92,7 +95,7 @@ class TvTsPipeline(
     private var renderer: LyricsRenderer? = null
     private var lastVideoPts = Long.MIN_VALUE
     private var lastVideoPtsOut = Long.MIN_VALUE
-    private val labels = Labels()
+    private val labels = FrameLabels()
     private val startLatch = CountDownLatch(1)
 
     @Volatile
@@ -142,7 +145,8 @@ class TvTsPipeline(
         cap0Nanos = feed.clock.nanosOfFrame(f0) ?: (now - (newest - f0) * 1_000_000_000L / rate)
         slew = SlewClock(rate, f0, cap0Nanos)
         startedNanos = now
-        mux.pcrOf = { t -> pcrOf(t) }
+        // slot 0 is the write of the first audio block, whose PCR is a lead behind its PTS
+        mux.pcrBase27 = (PTS_BASE - leadTicks) * 300L
 
         val audio = TvAudioEncoder(rate, AUDIO_BITRATE) { raw -> onAudioFrame(raw) }
         try {
@@ -180,6 +184,11 @@ class TvTsPipeline(
                 // going
             }
         }
+        if (threads.any { it.isAlive }) {
+            // a drawing that is stuck on a surface that the encoder no longer takes from is freed by ending the encoder
+            AppLog.add(TAG, "a thread of the lyrics video does not end, the encoders are stopped under it")
+            venc?.stop()
+        }
         threads.clear()
         aenc?.stop()
         aenc = null
@@ -213,10 +222,13 @@ class TvTsPipeline(
 
     // ---- the clock -------------------------------------------------------------------------------
 
-    /** The PCR (27 MHz) for a write at [nowNanos]: the position of the capture clock at that time less the hold, less the lead the player wants. */
-    private fun pcrOf(nowNanos: Long): Long {
+    /**
+     * The slot of the stream that is due at [nowNanos]: the packets of the stream go out at the mux rate, counted on the capture clock (the
+     * frame of the capture that is at the live edge now is the one captured one hold ago), from slot 0 at the first audio block.
+     */
+    private fun slotOf(nowNanos: Long): Long {
         val frames = slew.frameAt(nowNanos - holdNanos)
-        return (PTS_BASE - leadTicks) * 300L + Math.round((frames - f0) * 27_000_000.0 / rate)
+        return Math.floor((frames - f0) / rate * mux.slotsPerSecond).toLong()
     }
 
     private fun audioPts(block: Long): Long = PTS_BASE + Math.round(block * BLOCK * 90_000.0 / rate)
@@ -299,38 +311,6 @@ class TvTsPipeline(
     }
 
     // ---- video -----------------------------------------------------------------------------------
-
-    /** Pictures that were put on the surface: when (the encoder's timestamp, ns), the capture time they show and their PTS. */
-    private class Labels {
-        private val times = LongArray(64)
-        private val captures = LongArray(64)
-        private val pts = LongArray(64)
-        private var n = 0
-
-        @Synchronized
-        fun add(t: Long, capture: Long, p: Long) {
-            val i = n % times.size
-            times[i] = t
-            captures[i] = capture
-            pts[i] = p
-            n++
-        }
-
-        /** The picture whose time is the nearest to [t] and within 25 ms of it: its capture time and PTS; null if none. */
-        @Synchronized
-        fun nearest(t: Long): Pair<Long, Long>? {
-            var best = -1
-            var bestD = Long.MAX_VALUE
-            for (i in 0 until minOf(n, times.size)) {
-                val d = Math.abs(times[i] - t)
-                if (d < bestD) {
-                    bestD = d
-                    best = i
-                }
-            }
-            return if (best >= 0 && bestD <= 25_000_000L) Pair(captures[best], pts[best]) else null
-        }
-    }
 
     private fun videoLoop() {
         var started = false
@@ -435,7 +415,7 @@ class TvTsPipeline(
     }
 
     private fun onVideoFrame(au: ByteArray, ptsUs: Long, key: Boolean) {
-        val label = labels.nearest(ptsUs * 1000L)
+        val label = labels.find(ptsUs * 1000L)
         val pts: Long
         val due: Long
         if (label != null) {
@@ -460,6 +440,8 @@ class TvTsPipeline(
         var lastLog = System.nanoTime()
         var lastBytes = 0L
         var lastFrames = 0L
+        var lastEncoded = 0L
+        var lastNulls = 0L
         var lastSlewNanos = 0L
         while (running) {
             val now = System.nanoTime()
@@ -474,18 +456,22 @@ class TvTsPipeline(
                 val frames = venc?.framesOut ?: 0L
                 lastStats = String.format(
                     java.util.Locale.US,
-                    "video %.1f fps, %.0f kbit/s in all, a picture takes %.1f ms to draw (%s) and %.0f ms to encode (at most %.0f), " +
-                        "written late: audio %.1f ms avg %.0f max, video %.1f avg %.0f max; %d queued, %d KB in the ring, " +
-                        "%d short audio blocks, %d unlabeled and %d skipped pictures, clock %.2f ms from the plain count, %s",
-                    (frames - lastFrames) / seconds, (writer.bytes - lastBytes) * 8 / seconds / 1000.0,
+                    "video %.1f fps, the encoder gave %.0f kbit/s, the stream %.0f kbit/s of which %.0f %% padding, a picture takes %.1f ms to draw (%s) " +
+                        "and %.0f ms to encode (at most %.0f), queued for sending late: audio %.1f ms avg %.0f max, video %.1f avg %.0f max; " +
+                        "%d waiting (%d packets, %d of them video), %d KB in the ring, %d short audio blocks, %d unlabeled and %d skipped pictures, " +
+                        "clock %.2f ms from the plain count, %s",
+                    (frames - lastFrames) / seconds, ((venc?.bytesOut ?: 0L) - lastEncoded) * 8 / seconds / 1000.0,
+                    (writer.bytes - lastBytes) * 8 / seconds / 1000.0, (mux.nullPackets - lastNulls) * 100.0 / maxOf(1L, (writer.bytes - lastBytes) / TsMuxer.PACKET),
                     renderer?.averageRenderMs ?: 0.0, renderer?.path?.key ?: "-", venc?.latencyAvgMs ?: 0.0, venc?.latencyMaxMs ?: 0.0,
-                    s.audioLateAvgMs, s.audioLateMaxMs, s.videoLateAvgMs, s.videoLateMaxMs, s.queued, history.heldBytes / 1024,
-                    shortBlocks.get(), unlabeledFrames.get(), skippedFrames.get(), slew.adjustMs, if (live) "live" else "warming up",
+                    s.audioLateAvgMs, s.audioLateMaxMs, s.videoLateAvgMs, s.videoLateMaxMs, s.queued, writer.packetsWaiting, writer.videoPacketsWaiting,
+                    history.heldBytes / 1024, shortBlocks.get(), unlabeledFrames.get(), skippedFrames.get(), slew.adjustMs, if (live) "live" else "warming up",
                 )
                 AppLog.add(TAG, lastStats)
                 lastLog = now
                 lastBytes = writer.bytes
                 lastFrames = frames
+                lastEncoded = venc?.bytesOut ?: 0L
+                lastNulls = mux.nullPackets
             }
             val wait = next - System.nanoTime()
             if (wait > 0) LockSupport.parkNanos(minOf(wait, 5_000_000L))
@@ -543,11 +529,16 @@ class TvTsPipeline(
         o.put("short_audio_blocks", shortBlocks.get())
         o.put("click_blocks", clickBlocks.get())
         o.put("unlabeled_pictures", unlabeledFrames.get())
+        o.put("encoder_clock_offset_ms", if (labels.learnedOffset) labels.epochOffsetNanos / 1_000_000L else 0L)
         o.put("skipped_pictures", skippedFrames.get())
         o.put("ring_kb", history.heldBytes / 1024)
         o.put("ring_key_units", history.keyUnits)
         o.put("queued", writer.queued)
+        o.put("packets_waiting", writer.packetsWaiting)
+        o.put("video_packets_waiting", writer.videoPacketsWaiting)
         o.put("muxed_kb", writer.bytes / 1024)
+        o.put("mux_rate_kbit_s", mux.muxRate / 1000)
+        o.put("padding_percent", Math.round(mux.nullPackets * 1000.0 / maxOf(1L, mux.packets)) / 10.0)
         o.put("hold_ms", holdNanos / 1_000_000L)
         o.put("first_audio_frame", f0)
         o.put("age_s", (System.nanoTime() - startedNanos) / 1_000_000_000L)
@@ -560,7 +551,11 @@ class TvTsPipeline(
         private const val TAG = "tvvideo"
         const val FPS = 30
         private const val FRAME_NANOS = 1_000_000_000L / FPS
-        const val VIDEO_BITRATE = 5_000_000
+        const val VIDEO_BITRATE = 6_000_000
+
+        /** The ring holds the last 12 s or 16 MB of the stream (9 Mbit/s is 1.1 MB a second); a connection starts up to 2.5 s back. */
+        private const val HISTORY_BYTES = 16L shl 20
+        private const val HISTORY_NANOS = 12_000_000_000L
         const val AUDIO_BITRATE = 192_000
         private const val BLOCK = 1024
 

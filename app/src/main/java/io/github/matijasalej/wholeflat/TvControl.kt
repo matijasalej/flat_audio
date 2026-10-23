@@ -18,6 +18,7 @@ import java.net.InetAddress
 import java.net.MulticastSocket
 import java.net.SocketTimeoutException
 import java.net.URL
+import io.github.matijasalej.wholeflat.sync.WakeOnLan
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledThreadPoolExecutor
@@ -196,18 +197,9 @@ class TvControl(private val context: Context) {
             note("the TV at $ip does not answer")
             return
         }
+        if (power == "On") learnMac(ip)
         if (v.tvWake && power != "On") {
-            wakesSent++
-            val ok = postJson(ip, "powerstate", "{\"powerstate\":\"On\"}")
-            note("TV power state was $power, asked it to wake: ${if (ok) "accepted" else "refused"}")
-            var waited = 0
-            while (waited < WAKE_WAIT_S) {
-                sleepQuietly(1000)
-                waited++
-                power = getPowerState(ip)
-                lastPower = power ?: "unreachable"
-                if (power == "On") break
-            }
+            power = wakeUp(ip, power, WAKE_WAIT_S)
             if (power != "On") {
                 note("the TV did not come on within $WAKE_WAIT_S s")
                 return
@@ -286,6 +278,91 @@ class TvControl(private val context: Context) {
 
     // ---- for the DLNA player and the lights ----------------------------------------------------
 
+    /**
+     * Wakes the TV and waits up to [waitSeconds] for it to say "On"; returns the last power state. JointSpace is asked first; a TV that
+     * refuses (it did, in standby) or is still not on after 3 s gets the Wake-on-LAN packet of its network chip.
+     */
+    private fun wakeUp(ip: String, was: String, waitSeconds: Int): String? {
+        wakesSent++
+        val ok = postJson(ip, "powerstate", "{\"powerstate\":\"On\"}")
+        note("TV power state was $was, asked it to wake: ${if (ok) "accepted" else "refused"}")
+        var magic = !ok
+        if (magic) sendMagic(ip, "JointSpace refused")
+        var power: String? = was
+        var waited = 0
+        while (waited < waitSeconds) {
+            sleepQuietly(1000)
+            waited++
+            power = getPowerState(ip)
+            lastPower = power ?: "unreachable"
+            if (power == "On") break
+            if (!magic && waited >= 3) {
+                magic = true
+                sendMagic(ip, "still ${power ?: "silent"} after 3 s")
+            }
+        }
+        return power
+    }
+
+    @Volatile
+    private var wolSent = 0
+
+    private var macLearnTried = false
+
+    /** The MAC address in use: the setting, else the one JointSpace told. */
+    private fun macText(): String = Settings.values.tvMac.ifEmpty { prefs.getString(PREF_MAC, "") ?: "" }
+
+    /** Sends the magic packet three times, 300 ms apart, to the broadcast address, the subnet's and the TV itself (port 9). */
+    private fun sendMagic(ip: String, why: String) {
+        val text = macText()
+        val mac = WakeOnLan.parseMac(text)
+        if (mac == null) {
+            note("no MAC address for Wake-on-LAN ($why)")
+            return
+        }
+        val packet = WakeOnLan.packet(mac)
+        val targets = linkedSetOf("255.255.255.255", ip.substringBeforeLast('.') + ".255", ip)
+        var sent = 0
+        try {
+            java.net.DatagramSocket().use { sock ->
+                sock.broadcast = true
+                for (round in 0 until 3) {
+                    for (t in targets) {
+                        try {
+                            sock.send(java.net.DatagramPacket(packet, packet.size, java.net.InetAddress.getByName(t), 9))
+                            sent++
+                        } catch (e: Exception) {
+                            lastError = "Wake-on-LAN to $t: $e"
+                        }
+                    }
+                    if (round < 2) sleepQuietly(300)
+                }
+            }
+        } catch (e: Exception) {
+            lastError = "Wake-on-LAN: $e"
+        }
+        wolSent++
+        note("Wake-on-LAN sent to $text ($why): $sent packets")
+    }
+
+    /** Reads the TV's own MAC address once per run (when it is on) so that Wake-on-LAN has one even if the setting is empty. */
+    private fun learnMac(ip: String) {
+        if (macLearnTried) return
+        macLearnTried = true
+        val text = httpText("GET", "http://$ip:$PORT/6/network/devices", null, 1500, quiet = true)
+        val mac = text?.let { WakeOnLan.macFromDevices(it) }
+        if (mac == null) {
+            macLearnTried = false
+            return
+        }
+        prefs.edit().putString(PREF_MAC, mac).apply()
+        val set = Settings.values.tvMac
+        note("the TV reports the MAC address $mac" + if (set.isNotEmpty() && !set.equals(mac, ignoreCase = true)) " (tv_mac says $set)" else "")
+    }
+
+    /** The power state the TV last had when it was looked at ("On", "Standby", "unreachable"), empty before the first look. */
+    fun lastKnownPower(): String = lastPower
+
     /** The power state of the TV ("On", "Standby"), null if it does not answer. */
     fun powerState(): String? {
         val ip = currentIp() ?: return null
@@ -300,19 +377,12 @@ class TvControl(private val context: Context) {
         val ip = currentIp() ?: return false
         var power = getPowerState(ip)
         lastPower = power ?: "unreachable"
-        if (power == "On") return true
-        if (power == null || !Settings.values.tvWake) return false
-        wakesSent++
-        val ok = postJson(ip, "powerstate", "{\"powerstate\":\"On\"}")
-        note("TV power state was $power, asked it to wake: ${if (ok) "accepted" else "refused"}")
-        var waited = 0
-        while (waited < waitSeconds) {
-            sleepQuietly(1000)
-            waited++
-            power = getPowerState(ip)
-            lastPower = power ?: "unreachable"
-            if (power == "On") break
+        if (power == "On") {
+            learnMac(ip)
+            return true
         }
+        if (power == null || !Settings.values.tvWake) return false
+        power = wakeUp(ip, power, waitSeconds)
         if (power != "On") return false
         sleepQuietly(1500) // the picture needs a moment before it takes commands
         return true
@@ -575,6 +645,8 @@ class TvControl(private val context: Context) {
         o.put("video_in_front", lastVideo ?: JSONObject.NULL)
         o.put("context", lastContext.ifEmpty { JSONObject.NULL })
         o.put("wakes_sent", wakesSent)
+        o.put("wol_sent", wolSent)
+        o.put("mac", macText().ifEmpty { JSONObject.NULL })
         o.put("screen_off_sent", screenOffSent)
         o.put("last_action", lastAction)
         o.put("last_action_age_s", if (lastActionAtMs == 0L) -1L else (SystemClock.elapsedRealtime() - lastActionAtMs) / 1000)
@@ -586,6 +658,7 @@ class TvControl(private val context: Context) {
         private const val TAG = "tv"
         private const val PORT = 1925
         private const val PREF_IP = "detected_ip"
+        private const val PREF_MAC = "mac"
         private const val KIND_CALIBRATION = 3
 
         /** A start after at least this much silence runs the sequence. */

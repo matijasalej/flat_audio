@@ -38,8 +38,18 @@ object Flac {
         return c
     }
 
+    /** The sample rate code of the frame header (FLAC format, section "frame header"). */
+    private fun rateCode(sampleRate: Int): Int = when (sampleRate) {
+        44_100 -> 0b1001
+        48_000 -> 0b1010
+        32_000 -> 0b1000
+        96_000 -> 0b1011
+        else -> throw IllegalArgumentException("sample rate $sampleRate has no code in the FLAC frame header")
+    }
+
     /** "fLaC" plus one STREAMINFO block (the last metadata block). */
-    fun streamHeader(): ByteArray {
+    fun streamHeader(sampleRate: Int = 44_100): ByteArray {
+        rateCode(sampleRate) // refuses a rate the frames cannot carry
         val b = ByteBuffer.allocate(4 + 4 + 34).order(ByteOrder.BIG_ENDIAN)
         b.put("fLaC".toByteArray(Charsets.US_ASCII))
         // last metadata block, type 0 = STREAMINFO, then its length (34) as 24 bits
@@ -48,17 +58,8 @@ object Flac {
         b.putShort(BLOCK.toShort()) // max block size
         b.put(byteArrayOf(0, 0, 0)) // min frame size: unknown
         b.put(byteArrayOf(0, 0, 0)) // max frame size: unknown
-        // 20 bits sample rate (44100 = 0x0AC44), 3 bits channels - 1, 5 bits bits per sample - 1,
-        // 36 bits total samples (0 = unknown)
-        b.put(
-            byteArrayOf(
-                0x0A.toByte(),
-                0xC4.toByte(),
-                0x42.toByte(), // low 4 bits of the rate (0x4), channels - 1 = 1 (001), top bit of bps - 1
-                0xF0.toByte(), // low 4 bits of bps - 1 = 15 (1111), top 4 bits of the total samples
-            ),
-        )
-        b.putInt(0) // low 32 bits of the total samples
+        // 20 bits sample rate, 3 bits channels - 1, 5 bits bits per sample - 1, 36 bits total samples (0 = unknown)
+        b.putLong((sampleRate.toLong() shl 44) or (1L shl 41) or (15L shl 36))
         b.put(ByteArray(16)) // MD5 of the audio: unknown
         return b.array()
     }
@@ -86,14 +87,14 @@ object Flac {
     }
 
     /** One frame of [BLOCK] stereo frames from [pcm] (interleaved, at least BLOCK * 2 shorts). */
-    fun frame(number: Long, pcm: ShortArray): ByteArray {
+    fun frame(number: Long, pcm: ShortArray, sampleRate: Int = 44_100): ByteArray {
         val coded = utf8Number(number)
         val headerLength = 4 + coded.size + 1
         val out = ByteArray(headerLength + 2 * (1 + BLOCK * 2) + 2)
         var p = 0
         out[p++] = 0xFF.toByte()
         out[p++] = 0xF8.toByte() // sync, fixed block size
-        out[p++] = 0xC9.toByte() // block size code 1100 = 4096, sample rate code 1001 = 44.1 kHz
+        out[p++] = ((0b1100 shl 4) or rateCode(sampleRate)).toByte() // block size code 1100 = 4096, then the sample rate code
         out[p++] = 0x18.toByte() // channel assignment 0001 = 2 independent channels, 16 bit
         for (b in coded) out[p++] = b
         out[p] = crc8(out, p).toByte()

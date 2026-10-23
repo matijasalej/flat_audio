@@ -88,6 +88,31 @@ class FlacTest {
     }
 
     @Test
+    fun a48kHzStreamSaysSoInTheStreamInfoAndInEveryFrame() {
+        val h = Flac.streamHeader(48_000)
+        assertEquals(42, h.size)
+        val packed = ByteBuffer.wrap(h, 18, 8).long
+        assertEquals(48_000L, packed ushr 44)
+        assertEquals(2L, ((packed ushr 41) and 7L) + 1)
+        assertEquals(16L, ((packed ushr 36) and 31L) + 1)
+        assertEquals(0L, packed and 0xFFFFFFFFFL)
+        val frame = Flac.frame(3, pcm(1), 48_000)
+        assertEquals("4096 frames, 48 kHz", 0xCA, u8(frame[2]))
+        assertEquals("header crc", crc8(frame, 0, 5), u8(frame[5]))
+        val crc = crc16(frame, 0, frame.size - 2)
+        assertEquals(crc shr 8, u8(frame[frame.size - 2]))
+        assertEquals(crc and 0xFF, u8(frame[frame.size - 1]))
+        // the default is still 44.1 kHz
+        assertArrayEquals(Flac.streamHeader(), Flac.streamHeader(44_100))
+        assertEquals(0xC9, u8(Flac.frame(3, pcm(1))[2]))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun aRateWithoutACodeIsRefused() {
+        Flac.streamHeader(12_345)
+    }
+
+    @Test
     fun frameNumbersAreCodedLikeUtf8() {
         val numbers = intArrayOf(0, 1, 127, 128, 2047, 2048, 55_295, 57_344, 65_535, 65_536, 130_000, 1_114_111)
         for (n in numbers) {

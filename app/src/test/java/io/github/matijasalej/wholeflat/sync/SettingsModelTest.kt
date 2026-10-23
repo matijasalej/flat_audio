@@ -17,18 +17,45 @@ class SettingsModelTest {
         assertEquals(true, o.getBoolean("tv_screen_off"))
         assertEquals(true, o.getBoolean("tv_wake"))
         assertEquals("", o.getString("tv_ip"))
+        assertEquals(true, o.getBoolean("capture_enabled"))
+        assertEquals(0, o.getInt("capture_living_latency_ms"))
+        assertEquals(150, o.getInt("capture_lead_ms"))
     }
 
     @Test
-    fun theJsonHasExactlyTheSevenKeysTheMacToolReads() {
+    fun theJsonHasTheSevenKeysTheMacToolReadsAndTheThreeOfTheCaptureMode() {
         val keys = SettingsModel().toJson().keys().asSequence().toSet()
         assertEquals(
             setOf(
                 "kitchen_enabled", "kitchen_offset_ms", "kitchen_balance", "living_fixed_volume",
                 "tv_screen_off", "tv_wake", "tv_ip",
+                "capture_enabled", "capture_living_latency_ms", "capture_lead_ms",
             ),
             keys,
         )
+    }
+
+    @Test
+    fun theCaptureSettingsAreClampedAndAcceptWords() {
+        val m = SettingsModel()
+        m.applyJson(JSONObject("""{"capture_living_latency_ms": 5000, "capture_enabled": "off"}"""))
+        assertEquals(SettingsModel.MAX_CAPTURE_LATENCY_MS, m.captureLivingLatencyMs)
+        assertFalse(m.captureEnabled)
+        m.applyJson(JSONObject("""{"capture_living_latency_ms": -30}"""))
+        assertEquals(-30, m.captureLivingLatencyMs)
+        assertEquals(-30, m.values().captureLivingLatencyMs)
+    }
+
+    @Test
+    fun theCaptureLeadIsClamped() {
+        val m = SettingsModel()
+        m.applyJson(JSONObject("""{"capture_lead_ms": 10}"""))
+        assertEquals(SettingsModel.MIN_CAPTURE_LEAD_MS, m.captureLeadMs)
+        m.applyJson(JSONObject("""{"capture_lead_ms": 99999}"""))
+        assertEquals(SettingsModel.MAX_CAPTURE_LEAD_MS, m.captureLeadMs)
+        val changed = m.applyJson(JSONObject("""{"capture_lead_ms": "400"}"""))
+        assertEquals(setOf("capture_lead_ms"), changed)
+        assertEquals(400, m.values().captureLeadMs)
     }
 
     @Test

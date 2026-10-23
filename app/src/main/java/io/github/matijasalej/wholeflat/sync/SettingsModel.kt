@@ -16,6 +16,9 @@ class SettingsValues(
     val tvScreenOff: Boolean,
     val tvWake: Boolean,
     val tvIp: String,
+    val captureEnabled: Boolean,
+    val captureLivingLatencyMs: Int,
+    val captureLeadMs: Int,
 )
 
 class SettingsModel {
@@ -26,10 +29,14 @@ class SettingsModel {
     var tvScreenOff = true
     var tvWake = true
     var tvIp = ""
+    var captureEnabled = true
+    var captureLivingLatencyMs = 0
+    var captureLeadMs = DEFAULT_CAPTURE_LEAD_MS
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
+        captureEnabled, captureLivingLatencyMs, captureLeadMs,
     )
 
     fun toJson(): JSONObject {
@@ -41,6 +48,9 @@ class SettingsModel {
         o.put(TV_SCREEN_OFF, tvScreenOff)
         o.put(TV_WAKE, tvWake)
         o.put(TV_IP, tvIp)
+        o.put(CAPTURE_ENABLED, captureEnabled)
+        o.put(CAPTURE_LIVING_LATENCY_MS, captureLivingLatencyMs)
+        o.put(CAPTURE_LEAD_MS, captureLeadMs)
         return o
     }
 
@@ -76,6 +86,18 @@ class SettingsModel {
             val v = if (raw == JSONObject.NULL) "" else raw.toString().trim()
             if (HOST.matches(v) && v != tvIp) { tvIp = v; changed.add(TV_IP) }
         }
+        if (json.has(CAPTURE_ENABLED)) {
+            val v = bool(json.get(CAPTURE_ENABLED))
+            if (v != null && v != captureEnabled) { captureEnabled = v; changed.add(CAPTURE_ENABLED) }
+        }
+        if (json.has(CAPTURE_LIVING_LATENCY_MS)) {
+            val v = number(json.get(CAPTURE_LIVING_LATENCY_MS))?.coerceIn(-MAX_CAPTURE_LATENCY_MS, MAX_CAPTURE_LATENCY_MS)
+            if (v != null && v != captureLivingLatencyMs) { captureLivingLatencyMs = v; changed.add(CAPTURE_LIVING_LATENCY_MS) }
+        }
+        if (json.has(CAPTURE_LEAD_MS)) {
+            val v = number(json.get(CAPTURE_LEAD_MS))?.coerceIn(MIN_CAPTURE_LEAD_MS, MAX_CAPTURE_LEAD_MS)
+            if (v != null && v != captureLeadMs) { captureLeadMs = v; changed.add(CAPTURE_LEAD_MS) }
+        }
         return changed
     }
 
@@ -104,10 +126,21 @@ class SettingsModel {
         const val TV_SCREEN_OFF = "tv_screen_off"
         const val TV_WAKE = "tv_wake"
         const val TV_IP = "tv_ip"
+        const val CAPTURE_ENABLED = "capture_enabled"
+        const val CAPTURE_LIVING_LATENCY_MS = "capture_living_latency_ms"
+        const val CAPTURE_LEAD_MS = "capture_lead_ms"
 
         /** The offset is limited to what a Mac calibration could plausibly ask for. */
         const val MAX_OFFSET_MS = 2_000
         const val MAX_BALANCE = 20
+
+        /** How much the living room can hear a captured player later than it is captured (ms). */
+        const val MAX_CAPTURE_LATENCY_MS = 1_000
+
+        /** Audio sent to the Sonos ahead when a captured stream starts (ms): less is a smaller lag, more is steadier. */
+        const val DEFAULT_CAPTURE_LEAD_MS = 150
+        const val MIN_CAPTURE_LEAD_MS = 40
+        const val MAX_CAPTURE_LEAD_MS = 3_000
 
         /** Empty, or a host name or address. */
         private val HOST = Regex("^([0-9A-Za-z.\\-]{1,100})?$")

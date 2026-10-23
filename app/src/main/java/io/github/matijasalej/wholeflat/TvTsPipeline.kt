@@ -153,6 +153,7 @@ class TvTsPipeline(
     private val renderFailures = AtomicLong()
     private val clickBlocks = AtomicLong()
     private val syncRequestsForPicture = AtomicLong()
+    private val sameTimePictures = AtomicLong()
 
     @Volatile
     private var lastStats = ""
@@ -527,12 +528,21 @@ class TvTsPipeline(
             pts = (if (lastVideoPtsOut == Long.MIN_VALUE) PTS_BASE else lastVideoPtsOut) + spec.frameTicks
             due = if (lastVideoDue == Long.MIN_VALUE) System.nanoTime() else lastVideoDue + frameNanos
         }
-        if (pts <= lastVideoPtsOut) return // never two pictures with one time
-        lastVideoPtsOut = pts
-        lastVideoDue = due
+        // never two pictures with one time, and none is thrown away for it: a picture that is left out is a missing reference for the ones after it
+        // (the TV conceals it with blocks and ghosts until the next key picture); it gets the next tick instead
+        val pts2 = if (pts <= lastVideoPtsOut) {
+            sameTimePictures.incrementAndGet()
+            lastVideoPtsOut + 1
+        } else {
+            pts
+        }
+        lastVideoPtsOut = pts2
+        // and they leave in the order they came: a picture is never due before the one it follows
+        val due2 = if (lastVideoDue != Long.MIN_VALUE && due < lastVideoDue) lastVideoDue else due
+        lastVideoDue = due2
         val isKey = key || H264.isKey(au)
         val unit = H264.accessUnit(au, 0, au.size, venc?.parameterSets, isKey)
-        writer.submitVideo(due, unit, pts, isKey)
+        writer.submitVideo(due2, unit, pts2, isKey)
     }
 
     // ---- the writer ------------------------------------------------------------------------------
@@ -555,7 +565,18 @@ class TvTsPipeline(
                 slew.update(now - holdNanos, feed.clock.frameAtNanosExact(now - holdNanos))
             }
             val next = writer.step(now)
+            for (d in writer.takeDrops()) {
+                // every picture that is left out of the stream is told with its kind: a P picture dropped after a key picture is a hole in what the next ones refer to
+                if (dropLogs++ < DROP_LOGS_PER_PERIOD) {
+                    AppLog.add(
+                        TAG,
+                        "WARNING a ${if (d.key) "key" else "P"} picture was dropped (${if (d.verdict == LateVideoGate.Verdict.TOO_LATE) "too late" else "it refers to one that was dropped"}: " +
+                            "${d.lateMs.toLong()} ms after its time, ${d.bytes} bytes, time ${d.pts90 / 90} ms); the TV goes on from the next key picture",
+                    )
+                }
+            }
             if (now - lastLog >= STATS_EVERY_NANOS) {
+                dropLogs = 0
                 val seconds = (now - lastLog) / 1e9
                 val s = writer.takeStats()
                 val frames = venc?.framesOut ?: 0L
@@ -603,6 +624,8 @@ class TvTsPipeline(
             }
         }
     }
+
+    private var dropLogs = 0
 
     @Volatile
     private var lastEncodeAvg = 0.0
@@ -720,6 +743,8 @@ class TvTsPipeline(
         o.put("unlabeled_pictures", unlabeledFrames.get())
         o.put("encoder_clock_offset_ms", if (labels.learnedOffset) labels.epochOffsetNanos / 1_000_000L else 0L)
         o.put("skipped_pictures", skippedFrames.get())
+        o.put("same_time_pictures", sameTimePictures.get())
+        o.put("encoder_split_pieces", v?.splitPieces ?: 0L)
         o.put("video_budget_ms", VIDEO_BUDGET_NANOS / 1_000_000L)
         o.put("video_dropped", gate.dropped)
         o.put("video_dropped_late", gate.droppedLate)
@@ -796,6 +821,9 @@ class TvTsPipeline(
         /** The watch sleeps this long and tells when it slept much longer (the app was kept from running); a stall this long (ms) is put in the log. */
         private const val WATCH_TICK_NANOS = 20_000_000L
         private const val STALL_LOG_MS = 150.0
+
+        /** At most this many dropped pictures are named in the log in a period of 5 s. */
+        private const val DROP_LOGS_PER_PERIOD = 30
 
         /** A step of the writer that made up more slots than this (about 100 ms of the stream at 9 Mbit/s) is put in the log with the others. */
         private const val HELD_UP_SLOTS = 600L

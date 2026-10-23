@@ -63,6 +63,17 @@ class TvVideoEncoder(
     var syncRequests = 0L
         private set
 
+    /** Output buffers that were another piece of the picture before them (same time): the encoder gives a picture in slices; they are made one. */
+    @Volatile
+    var splitPieces = 0L
+        private set
+
+    // the last picture that came out, held until the next one begins or 20 ms pass: a picture that comes in several output buffers is one access unit
+    private var held: java.io.ByteArrayOutputStream? = null
+    private var heldPts = 0L
+    private var heldKey = false
+    private var heldArrived = 0L
+
     @Volatile
     var lastError: String? = null
         private set
@@ -212,7 +223,7 @@ class TvVideoEncoder(
             while (running) {
                 val index = c.dequeueOutputBuffer(info, 20_000)
                 when {
-                    index == MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
+                    index == MediaCodec.INFO_TRY_AGAIN_LATER -> flushHeld()
                     index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> AppLog.add(TAG, "video encoder output format: ${c.outputFormat}")
                     index >= 0 -> {
                         val arrived = System.nanoTime()
@@ -225,18 +236,7 @@ class TvVideoEncoder(
                             if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
                                 parameterSets = H264.parameterSets(bytes)
                             } else {
-                                framesOut++
-                                bytesOut += bytes.size
-                                val key = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
-                                if (key) keyFramesOut++
-                                val latency = (arrived - info.presentationTimeUs * 1000L) / 1e6
-                                noteLatency(latency)
-                                if (latency > SLOW_MS && latency < 2_000 && arrived - lastSlowLogNanos > 2_000_000_000L) {
-                                    lastSlowLogNanos = arrived
-                                    AppLog.add(TAG, "a picture took ${latency.toLong()} ms to come out of the encoder (${bytes.size} bytes${if (key) ", a key picture" else ""}, ${syncRequests} sync requests so far)")
-                                }
-                                record(arrived / 1_000_000L, info.presentationTimeUs, bytes.size, key, latency)
-                                onFrame(bytes, info.presentationTimeUs, key)
+                                accept(bytes, info.presentationTimeUs, info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0, arrived)
                             }
                         }
                         c.releaseOutputBuffer(index, false)
@@ -252,6 +252,41 @@ class TvVideoEncoder(
     }
 
     @Synchronized
+    /** An output buffer of a picture: the next piece of the one held (same time), or the first of a new one, which lets the held one go. */
+    private fun accept(bytes: ByteArray, ptsUs: Long, key: Boolean, arrived: Long) {
+        val h = held
+        if (h != null && ptsUs == heldPts) {
+            h.write(bytes)
+            heldKey = heldKey || key
+            splitPieces++
+            if (splitPieces == 1L) AppLog.add(TAG, "the encoder gives a picture in pieces (${bytes.size} bytes after the first): they are made one access unit")
+            return
+        }
+        flushHeld()
+        held = java.io.ByteArrayOutputStream(maxOf(bytes.size, 4096)).also { it.write(bytes) }
+        heldPts = ptsUs
+        heldKey = key
+        heldArrived = arrived
+    }
+
+    /** The held picture goes on to the stream. */
+    private fun flushHeld() {
+        val h = held ?: return
+        held = null
+        val bytes = h.toByteArray()
+        framesOut++
+        bytesOut += bytes.size
+        if (heldKey) keyFramesOut++
+        val latency = (heldArrived - heldPts * 1000L) / 1e6
+        noteLatency(latency)
+        if (latency > SLOW_MS && latency < 2_000 && heldArrived - lastSlowLogNanos > 2_000_000_000L) {
+            lastSlowLogNanos = heldArrived
+            AppLog.add(TAG, "a picture took ${latency.toLong()} ms to come out of the encoder (${bytes.size} bytes${if (heldKey) ", a key picture" else ""}, ${syncRequests} sync requests so far)")
+        }
+        record(heldArrived / 1_000_000L, heldPts, bytes.size, heldKey, latency)
+        onFrame(bytes, heldPts, heldKey)
+    }
+
     private fun noteLatency(ms: Double) {
         // a timestamp that is not the time of the picture (a repeated one) gives a nonsense: only plausible ones count
         if (ms < -50 || ms > 2_000) return

@@ -89,7 +89,30 @@ class TsWriter(private val mux: TsMuxer, private val history: TsHistory, private
     var bytes = 0L
         private set
 
-    fun submitVideo(dueNanos: Long, au: ByteArray, pts90: Long, key: Boolean) = queue.add(dueNanos, Item.Video(au, pts90, key))
+    private var lastVideoDue = Long.MIN_VALUE
+
+    /**
+     * A picture is never due before the one it follows (the encoder gives them in order, and the next refers to the last): a due time that
+     * would put it ahead is the last one's, and the queue keeps equal times in the order they came.
+     */
+    @Synchronized
+    fun submitVideo(dueNanos: Long, au: ByteArray, pts90: Long, key: Boolean) {
+        val d = if (dueNanos < lastVideoDue) lastVideoDue else dueNanos
+        lastVideoDue = d
+        queue.add(d, Item.Video(au, pts90, key))
+    }
+
+    /** A picture the gate did not let into the stream. */
+    class Drop(val key: Boolean, val verdict: LateVideoGate.Verdict, val lateMs: Double, val bytes: Int, val pts90: Long)
+
+    private val drops = java.util.ArrayDeque<Drop>()
+
+    /** The pictures dropped since the last call (at most the last 64), for the log. */
+    fun takeDrops(): List<Drop> = synchronized(drops) {
+        val l = drops.toList()
+        drops.clear()
+        l
+    }
 
     fun submitAudio(dueNanos: Long, adts: ByteArray, pts90: Long) = queue.add(dueNanos, Item.Audio(adts, pts90))
 
@@ -114,6 +137,10 @@ class TsWriter(private val mux: TsMuxer, private val history: TsHistory, private
                             noteLate(false, lateMs)
                         } else {
                             noteDropped()
+                            synchronized(drops) {
+                                drops.addLast(Drop(item.key, verdict, lateMs, item.au.size, item.pts90))
+                                while (drops.size > 64) drops.removeFirst()
+                            }
                         }
                     }
                     is Item.Audio -> {

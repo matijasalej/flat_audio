@@ -327,4 +327,87 @@ class TsWriterTest {
         assertTrue("slots at once ${s.maxStepSlots}", s.maxStepSlots in 4_700L..4_760L)
         assertEquals(0L, w.takeStats().maxStepSlots)
     }
+
+    // ---- the stream after a stall of the writer ---------------------------------------------------
+
+    /** Every PID counts its packets that carry a payload 0, 1, 2, ... mod 16, and a packet that carries only the clock repeats the last count. */
+    private fun continuityErrors(r: TsReader): List<String> {
+        val errors = ArrayList<String>()
+        val last = HashMap<Int, Int>()
+        for (p in r.packets) {
+            if (p.pid == TsMuxer.NULL_PID) continue
+            val hasPayload = p.afc and 1 != 0
+            val before = last[p.pid]
+            if (hasPayload) {
+                if (before != null && p.cc != (before + 1) % 16) errors.add("pid ${p.pid} packet ${p.index}: count ${p.cc} after $before")
+                last[p.pid] = p.cc
+            } else if (before != null && p.cc != before) {
+                errors.add("pid ${p.pid} packet ${p.index}: a packet without payload has count ${p.cc}, the last was $before")
+            }
+        }
+        return errors
+    }
+
+    @Test
+    fun aStallOfTheWriterKeepsEveryPidContinuousAndEveryPictureWholeAndInOrder() {
+        val (_, history, w) = setup()
+        val pictures = ArrayList<ByteArray>()
+        var t = 0L
+        var n = 0
+        while (t <= 1_700) {
+            if (t % 33 == 0L && t <= 1_600) {
+                val au = ByteArray(if (n == 0) 20_000 else 800 + 41 * n) { (n * 7 + it).toByte() }
+                pictures.add(au)
+                w.submitVideo(t * ms + 20 * ms, au, 90_000L + n * 3_000L, n == 0)
+                n++
+            }
+            if (t % 23 == 0L) w.submitAudio(t * ms, au(300), 90_000L + t * 90)
+            // the writer runs until 100 ms, is not run from 100 to 900 ms (the system did not run it), and goes on
+            if (t <= 100 || t >= 900) w.step(t * ms)
+            t++
+        }
+        val r = everything(history)
+        assertEquals(emptyList<String>(), r.errors)
+        assertEquals(emptyList<String>(), continuityErrors(r))
+        val video = r.pes[TsMuxer.VIDEO_PID]!!
+        assertEquals(pictures.size, video.size)
+        for (i in pictures.indices) assertEquals("picture $i", pictures[i].toList(), video[i].payload.toList())
+        assertEquals(video.map { it.pts!! }, video.map { it.pts!! }.sorted())
+        val audio = r.pes[TsMuxer.AUDIO_PID]!!
+        assertEquals(audio.map { it.pts!! }, audio.map { it.pts!! }.sorted())
+        // the clock was never more than 20 ms apart in the stream, the stall included
+        val pcrs = r.packets.filter { it.pcr != null }
+        for (i in 1 until pcrs.size) assertTrue((pcrs[i].pcr!! - pcrs[i - 1].pcr!!) / 27_000.0 <= 20.1)
+    }
+
+    @Test
+    fun picturesLeaveInTheOrderTheyCameWhateverDueTimesTheyWereGiven() {
+        val (_, history, w) = setup()
+        // the second picture was given an earlier time than the first (a draw that came sooner than its tick): it still goes after it
+        w.submitVideo(50 * ms, au(400), 90_000, true)
+        w.submitVideo(40 * ms, au(300), 93_000, false)
+        w.submitVideo(41 * ms, au(200), 96_000, false)
+        w.step(100 * ms)
+        val video = everything(history).pes[TsMuxer.VIDEO_PID]!!
+        assertEquals(listOf(90_000L, 93_000L, 96_000L), video.map { it.pts })
+        assertEquals(listOf(400, 300, 200), video.map { it.payload.size })
+    }
+
+    @Test
+    fun everyDroppedPictureIsToldWithItsKindAndWhy() {
+        val (_, w, _) = gated()
+        run(w, 0, 899)
+        w.submitVideo(100 * ms, au(3_000), 9_000, false) // a P picture 800 ms late
+        w.submitVideo(900 * ms, au(3_000), 12_000, false) // on time, but it refers to the one that was left out
+        w.submitVideo(930 * ms, au(9_000), 15_000, true) // a key picture on time: the video goes on
+        run(w, 900, 1_000)
+        val drops = w.takeDrops()
+        assertEquals(2, drops.size)
+        assertEquals(false, drops[0].key)
+        assertEquals(LateVideoGate.Verdict.TOO_LATE, drops[0].verdict)
+        assertTrue(drops[0].lateMs >= 799.0)
+        assertEquals(LateVideoGate.Verdict.BROKEN, drops[1].verdict)
+        assertEquals(12_000L, drops[1].pts90)
+        assertEquals(emptyList<TsWriter.Drop>(), w.takeDrops())
+    }
 }

@@ -52,7 +52,7 @@ class SyncedHoldTest {
     @Test
     fun aSmallErrorAtTheStartIsLeftAloneAndItIsStillPlaced() {
         val hold = SyncedHold(rate)
-        assertTrue(hold.onReading(at(0.0), 12.0, 2_171.0) is SyncedHold.Decision.Hold)
+        assertTrue(hold.onReading(at(0.0), 4.0, 2_171.0) is SyncedHold.Decision.Hold)
         assertTrue(hold.placed)
         assertEquals(0, hold.corrections)
         // 30 ms is inside the band: nothing is done about it, however long it lasts

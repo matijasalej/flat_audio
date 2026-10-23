@@ -141,8 +141,11 @@ class SyncedHold(
     private fun fmt(v: Double): String = String.format(java.util.Locale.US, "%.1f", v)
 
     companion object {
-        /** The placing leaves an error smaller than this alone (ms): the readings of the lag are good to 10 ms or so, and an error that small is not heard. */
-        const val PLACE_MIN_MS = 15.0
+        /**
+         * The placing leaves an error smaller than this alone (ms): the median of the readings that the lock is made of is good to 1 or 2 ms
+         * against the clock of the TV's stream (it was 10 ms or more against the capture's own clock), and an error of 5 ms is not heard.
+         */
+        const val PLACE_MIN_MS = 6.0
 
         /** The band inside which the kitchen is left alone (ms). */
         const val FAR_MS = 40.0

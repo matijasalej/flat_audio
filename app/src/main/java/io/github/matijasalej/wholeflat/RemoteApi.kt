@@ -25,6 +25,7 @@ object RemoteApi {
         o.put("kitchen_text", kitchenText())
         o.put("source", AppState.source)
         o.put("version", BuildInfo.versionName)
+        o.put("lights", AppState.lights?.phoneJson() ?: JSONObject.NULL)
         return o
     }
 

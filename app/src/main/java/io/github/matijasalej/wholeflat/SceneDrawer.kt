@@ -8,6 +8,8 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
+import io.github.matijasalej.wholeflat.light.LightHook
+import io.github.matijasalej.wholeflat.light.LightPainter
 import io.github.matijasalej.wholeflat.sync.CoverColor
 import io.github.matijasalej.wholeflat.sync.Lrc
 import io.github.matijasalej.wholeflat.sync.LyricsLayout
@@ -38,8 +40,13 @@ class SceneDrawer(context: Context) {
     private var coverScaled: Bitmap? = null
     private var coverScaledSize = 0
 
-    /** Draws [picture] with what is known of the track in [scene]. */
-    fun draw(canvas: Canvas, picture: Picture, scene: TvScene?) {
+    private val lightPainter by lazy { LightPainter() }
+
+    /**
+     * Draws [picture] with what is known of the track in [scene]. With [lights] (the 16 colours of the mood lights), black becomes the
+     * light and the lyrics get a glow band at the edges, which the Ambilight reads.
+     */
+    fun draw(canvas: Canvas, picture: Picture, scene: TvScene?, lights: IntArray? = null) {
         // the design is made for 1920 x 1080; a smaller picture (the setting `tv_video`) is the same design on a smaller canvas
         val scale = canvas.width.toFloat() / LyricsLayout.W
         val scaled = canvas.width > 0 && Math.abs(scale - 1f) > 0.001f
@@ -49,9 +56,12 @@ class SceneDrawer(context: Context) {
         }
         try {
             when (picture) {
-                Picture.BLACK -> canvas.drawColor(Color.BLACK)
+                Picture.BLACK -> if (lights != null) lightPainter.full(canvas, lights, LyricsLayout.W.toFloat(), LyricsLayout.H.toFloat()) else canvas.drawColor(Color.BLACK)
                 Picture.SPLASH -> splash(canvas, scene?.background ?: CoverColor.DEFAULT)
-                Picture.LYRICS -> if (scene == null) splash(canvas, CoverColor.DEFAULT) else lyrics(canvas, scene)
+                Picture.LYRICS -> {
+                    if (scene == null) splash(canvas, CoverColor.DEFAULT) else lyrics(canvas, scene)
+                    if (lights != null) lightPainter.band(canvas, lights, LyricsLayout.W.toFloat(), LyricsLayout.H.toFloat(), LightHook.bandShare, scene?.background ?: CoverColor.DEFAULT)
+                }
             }
         } finally {
             if (scaled) canvas.restore()

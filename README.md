@@ -176,6 +176,37 @@ The phone page is these three buttons and the volume of the kitchen (the slider 
 
 What to watch: `/synced` (the mode manager, the screen and lights, what it last decided and why), `/tv/dlna` (the TV's player: transport state, `warmup_ms`, `backlog_ms`, `delay_ms`, `hold_frozen_ms`, `hdmi_return`, and the `video` block: the encoders, the way the picture is drawn, frames a second, kbit/s and the share of padding, how late items were queued, the packets waiting), `/tv/last-sessions` (every connection of the TV: when it started, how old its key place was, the bytes it was given at once, how long writes blocked, how far behind the live edge it read, who closed it and why) and `/log` (tags `synced`, `tvdlna`, `tvvideo`, `stream`).
 
+## Mood lights: the Ambilight follows each song
+
+The lights listen to the captured music on a thread of their own, about 5 to 10 % of one core of the box, and decide song by song what the Ambilight shows (16 zones on this TV: 4 left, 8 top, 4 right).
+
+- **The class:**
+  - **Mono** (one colour) for calm songs or songs without a clear beat.
+  - **Duo** (a home colour and an accent, swapping at each new section) for most songs.
+  - **Multi** (four colours, a step every four beats) for energetic songs with a clear beat.
+  - A chorus or a drop lifts the class for 32 beats, a breakdown lowers it.
+- **The colours** are the cover's (the same as behind the lyrics), tinted by the mood: more energy is more saturated and brighter, a happy song turns towards yellow-orange, a sad one towards blue.
+- **The motion** follows the tempo:
+  - a swell a beat below 75 BPM;
+  - a hit on every beat up to 150 BPM, on every second beat above;
+  - no pulses until the tempo has locked, about 5 s into a song (sooner for a song heard before), and then the brightness follows the loudness.
+- **The flash limit:** flashes never start closer than 360 ms (ITU-R BT.1702), and a saturated red never flashes deeper than 10 %.
+
+**How it reaches the TV.** In Synced mode the lights are painted into the picture the TV already gets: the whole picture in the `ambilight` display (the screen is off, so only the Ambilight sees it), and a glow band at the edges of the lyrics in `screen`. The Ambilight reads the edges of that picture, and the picture carries the time stamp of its sound, so the lights come with the music; they are drawn `lights_offset_ms` ahead (default 20 ms), because a light up to 125 ms early goes unnoticed and one more than 45 ms late does not (ITU-R BT.1359). In Lyrics mode (the Spotify app over HDMI) the TV's own styles are used, one JointSpace call per song or section. JointSpace is never asked more than about once a second: the TV's server stalls at 10 calls a second.
+
+**His choice.** The phone page shows the class and the tempo under **Lights**, with **Less colour** and **More colour**: the song keeps that class from then on (`/lights/colour?step=auto` gives it back to the app). Every song is remembered (its tempo, energy, mood, class and his choice) at `/lights/history`.
+
+| Setting (at `/lights/set?...`) | Meaning |
+| --- | --- |
+| `lights` (`mood`, `tv`) | `mood`: the mood lights. `tv`: as before (the TV's own `ambilight_style`, a black picture). |
+| `lights_strength` (`subtle`, `adaptive`, `punchy`) | How deep the pulses go. |
+| `lights_offset_ms` (-200 to 300, default 20) | How far ahead of the sound the lights are drawn. |
+| `lights_band_pct` (1 to 12, default 5) | The width of the glow band round the lyrics, in % of the width. |
+| `lights_synced_style` (default `FOLLOW_AUDIO/ENERGY_ADAPTIVE_BRIGHTNESS`) | The TV's style in Synced mode. `FOLLOW_VIDEO/<menu>` takes the painted pulses; Lumina (the default) takes the painted colours and makes its own pulses from the audio. |
+| `lights_native_mono`, `_duo`, `_multi` | The TV's style per class in Lyrics mode: `COLOR` (the home colour held), `COLORS:<algorithm>` (a FOLLOW_AUDIO algorithm in our colours) or a plain FOLLOW_AUDIO algorithm. |
+
+What to watch: `/lights` (the song, tempo, lock, energy, mood, sections, the look and why, the cover's hues, the painter's pulses, the TV's style, the analysis's CPU time), `/lights/zones` (the 16 colours of the last picture), `/tv/preview.jpg` (the picture with the lights), `/log` (tag `lights`). `/lights/test?pattern=split|zones|chase|pulse|steps|solid&seconds=20&color=ff8800` paints a test picture (for checking on the TV what the Ambilight makes of it); `pattern=off` ends it.
+
 ## Free storage
 
 The Google TV has little storage, and the Spotify app's own cache has filled it to 97% once, which made the installation of this app fail. This app keeps its own use small (no audio cache, only the login and a few settings on disk, the log is in memory and bounded), and shows the free space of `/data` in `/status.json` (`storage`) and on the status screen of the app. **Below 300 MB it warns** (the screen says LOW, and the log gets a line). If it does, clear the cache of the Spotify app and other apps in Settings, Apps.

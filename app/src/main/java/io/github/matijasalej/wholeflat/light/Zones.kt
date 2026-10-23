@@ -36,6 +36,7 @@ object Zones {
      * each edge keeps to itself).
      */
     fun image(zones: IntArray, w: Int, h: Int, out: IntArray, sharpness: Double = 6.0) {
+        val wts = weights(w, h, sharpness)
         val left = IntArray(h)
         val right = IntArray(h)
         val top = IntArray(w)
@@ -45,23 +46,52 @@ object Zones {
             right[y] = along(zones, LEFT + TOP, RIGHT, fy) // right 0 at the top
         }
         for (x in 0 until w) top[x] = along(zones, LEFT, TOP, (x + 0.5) / w)
+        var i = 0
         for (y in 0 until h) {
-            val fy = (y + 0.5) / h
-            val wt = Math.pow(1.0 - fy, sharpness)
+            val l = left[y]
+            val r = right[y]
+            for (x in 0 until w) {
+                val t = top[x]
+                val wl = wts[3 * i]
+                val wt = wts[3 * i + 1]
+                val wr = wts[3 * i + 2]
+                val red = Colors.red(l) * wl + Colors.red(t) * wt + Colors.red(r) * wr
+                val green = Colors.green(l) * wl + Colors.green(t) * wt + Colors.green(r) * wr
+                val blue = Colors.blue(l) * wl + Colors.blue(t) * wt + Colors.blue(r) * wr
+                out[i] = Colors.rgb((red + 0.5).toInt(), (green + 0.5).toInt(), (blue + 0.5).toInt())
+                i++
+            }
+        }
+    }
+
+    @Volatile
+    private var cached: Triple<Int, Int, Double>? = null
+
+    @Volatile
+    private var cachedWeights = DoubleArray(0)
+
+    /** The share of the left, top and right edge in every pixel (they sum to 1); worked out once per size. */
+    private fun weights(w: Int, h: Int, sharpness: Double): DoubleArray {
+        val key = Triple(w, h, sharpness)
+        if (cached == key) return cachedWeights
+        val out = DoubleArray(3 * w * h)
+        var i = 0
+        for (y in 0 until h) {
+            val wt = Math.pow(1.0 - (y + 0.5) / h, sharpness)
             for (x in 0 until w) {
                 val fx = (x + 0.5) / w
                 val wl = Math.pow(1.0 - fx, sharpness)
                 val wr = Math.pow(fx, sharpness)
                 val sum = wl + wt + wr
-                val l = left[y]
-                val t = top[x]
-                val r = right[y]
-                val red = (Colors.red(l) * wl + Colors.red(t) * wt + Colors.red(r) * wr) / sum
-                val green = (Colors.green(l) * wl + Colors.green(t) * wt + Colors.green(r) * wr) / sum
-                val blue = (Colors.blue(l) * wl + Colors.blue(t) * wt + Colors.blue(r) * wr) / sum
-                out[y * w + x] = Colors.rgb(Math.round(red).toInt(), Math.round(green).toInt(), Math.round(blue).toInt())
+                out[3 * i] = wl / sum
+                out[3 * i + 1] = wt / sum
+                out[3 * i + 2] = wr / sum
+                i++
             }
         }
+        cachedWeights = out
+        cached = key
+        return out
     }
 
     /** The colour at [pos] (0 to 1 along the side, in zone order) of the [n] zones from [from]: linear between the zone centres. */

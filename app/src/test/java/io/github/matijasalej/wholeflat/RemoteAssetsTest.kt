@@ -9,8 +9,8 @@ import java.io.File
 
 /**
  * The phone page and what the home screen of the phone needs: the page links the manifest and the icon and says that it is an app, the
- * manifest says where it starts and has its icons, and the icons are PNGs of the sizes that are named. The page has the three displays and the
- * volume of the kitchen and nothing else (no mode buttons, no fine sync: that is on the debug page).
+ * manifest says where it starts and has its icons, and the icons are PNGs of the sizes that are named. The page has the three displays, the
+ * volume of the kitchen and the less or more colour of the mood lights, and nothing else (no mode buttons, no fine sync: that is on the debug page).
  */
 class RemoteAssetsTest {
     private fun dir(): File {
@@ -57,6 +57,8 @@ class RemoteAssetsTest {
         assertFalse(html.contains("lyrics="))
         assertEquals(3, Regex("""class="choice"""").findAll(html).count())
         assertEquals(1, Regex("""type="range"""").findAll(html).count())
+        assertTrue(html.contains("/lights/colour?step="))
+        assertEquals(2, Regex("""class="colour"""").findAll(html).count())
     }
 
     @Test

@@ -18,6 +18,7 @@ import io.github.matijasalej.wholeflat.sync.TsFeed
 import io.github.matijasalej.wholeflat.sync.TsHistory
 import io.github.matijasalej.wholeflat.sync.TsMuxer
 import io.github.matijasalej.wholeflat.sync.TsWriter
+import io.github.matijasalej.wholeflat.light.LightHook
 import io.github.matijasalej.wholeflat.sync.TvPicture
 import io.github.matijasalej.wholeflat.sync.TvVideoSpec
 import org.json.JSONObject
@@ -425,7 +426,7 @@ class TvTsPipeline(
         val r = renderer ?: return
         val pts = videoPts(captureNanos)
         val scene = if (pic == Picture.BLACK) null else scenes.scene(captureNanos)
-        val stamp = r.render(pic, scene, System.nanoTime())
+        val stamp = r.render(pic, scene, System.nanoTime(), LightHook.frame(captureNanos, pic))
         labels.add(stamp, captureNanos, pts)
         synchronized(drawn) {
             drawn.addLast(Drawn(stamp / 1_000_000L, stamp / 1000L, r.lastRenderMs, wakeLateMs, scene?.positionMs ?: -1L))
@@ -545,7 +546,7 @@ class TvTsPipeline(
             val bmp = Bitmap.createBitmap(LyricsLayout.W / 2, LyricsLayout.H / 2, Bitmap.Config.ARGB_8888)
             synchronized(previewDrawer) {
                 // the drawer scales the 1920 x 1080 design to the canvas it is given
-                previewDrawer.draw(Canvas(bmp), pic, scene)
+                previewDrawer.draw(Canvas(bmp), pic, scene, LightHook.preview(c, pic))
             }
             val out = ByteArrayOutputStream()
             bmp.compress(Bitmap.CompressFormat.JPEG, 82, out)

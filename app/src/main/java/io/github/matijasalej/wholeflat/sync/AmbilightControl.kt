@@ -28,6 +28,7 @@ interface AmbilightStore {
  * is overridden by the style that the power-on restores: seen on the TV); leaving puts back what was remembered, and if that was
  * "off" (the power was Off or the style was "OFF") it just switches the power off. The remembered state is stored before anything is
  * changed, so that an app that crashed in Synced mode puts the lights back at its next start ([recover]) instead of leaving them on.
+ * The mood lights may give a whole configuration of their own ([config]); without one, the style is [style] with [menuSetting].
  *
  * Plain Kotlin behind two small interfaces.
  */
@@ -36,6 +37,7 @@ class AmbilightControl(
     private val store: AmbilightStore,
     private val style: () -> String,
     private val menuSetting: () -> String,
+    private val config: () -> String? = { null },
 ) {
     /** The state the lights were in before Synced mode: the power ("On" / "Off") and the raw configuration JSON. */
     class Saved(val power: String, val config: String)
@@ -78,9 +80,10 @@ class AmbilightControl(
         remembered = saved
         store.write(saved)
         val on = api.setPower(true)
-        val set = api.setConfig(styleJson())
+        val json = styleJson()
+        val set = api.setConfig(json)
         entered = true
-        note("Ambilight on (was ${saved.power}, ${styleName(saved.config)}), power ${ok(on)}, style ${style()} ${ok(set)}", on && set)
+        note("Ambilight on (was ${saved.power}, ${styleName(saved.config)}), power ${ok(on)}, style ${styleName(json)} ${ok(set)}", on && set)
         return true
     }
 
@@ -106,8 +109,9 @@ class AmbilightControl(
     @Synchronized
     fun restyle() {
         if (!entered) return
-        val set = api.setConfig(styleJson())
-        note("Ambilight style ${style()} ${ok(set)}", set)
+        val json = styleJson()
+        val set = api.setConfig(json)
+        note("Ambilight style ${styleName(json)} ${ok(set)}", set)
     }
 
     private fun restore(saved: Saved, why: String) {
@@ -126,6 +130,7 @@ class AmbilightControl(
     }
 
     private fun styleJson(): String {
+        config()?.let { return it }
         val o = JSONObject()
         o.put("styleName", style())
         o.put("isExpert", false)

@@ -30,6 +30,8 @@ class LightPlanner(private val rate: Int = 44100) {
     enum class Variant { FULL, BAND }
 
     enum class Strength(val key: String, val factor: Double) {
+        /** No pulses of ours: the TV makes them (Lumina reads the colours from the picture and pulses them with the audio). */
+        NONE("none", 0.0),
         SUBTLE("subtle", 0.5),
         ADAPTIVE("adaptive", 1.0),
         PUNCHY("punchy", 1.35),

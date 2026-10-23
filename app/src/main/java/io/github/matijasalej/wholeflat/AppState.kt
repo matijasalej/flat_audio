@@ -93,6 +93,7 @@ object AppState {
     @Volatile var capture: CaptureSource? = null
     @Volatile var tvRenderer: TvRenderer? = null
     @Volatile var synced: SyncedController? = null
+    @Volatile var lights: io.github.matijasalej.wholeflat.light.LightEngine? = null
 
     /** The lyrics of the track that plays, and its cover: the lyrics picture of the TV and the phone page read them. */
     @Volatile var lyrics: LyricsRepository? = null

@@ -69,7 +69,13 @@ class SyncedController(
         },
         { Settings.values.ambilightStyle },
         { Settings.values.ambilightMenu },
+        { AppState.lights?.tvConfig() },
     )
+
+    /** The mood lights want another style of the TV (a new song in Lyrics mode, or their settings changed): put on if the lights are on. */
+    fun restyleAmbilight() {
+        exec.execute { ambilight.restyle() }
+    }
 
     @Volatile
     private var screenOffByUs = prefs.getBoolean(SCREEN_OFF_KEY, false)

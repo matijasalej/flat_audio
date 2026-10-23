@@ -79,6 +79,7 @@ class PlaybackService : Service() {
     private lateinit var tv: TvControl
     private lateinit var tvRenderer: TvRenderer
     private lateinit var synced: SyncedController
+    private lateinit var lights: io.github.matijasalej.wholeflat.light.LightEngine
     private lateinit var captureFeed: CaptureFeed
     private lateinit var captureSource: CaptureSource
     private var bootThread: Thread? = null
@@ -151,6 +152,8 @@ class PlaybackService : Service() {
         AppState.capture = captureSource
         AppState.tvRenderer = tvRenderer
         AppState.synced = synced
+        lights = io.github.matijasalej.wholeflat.light.LightEngine(this, captureFeed, coverCache)
+        AppState.lights = lights
         Settings.addListener(settingsListener)
         applyVolume()
         acquireLocks()
@@ -161,6 +164,7 @@ class PlaybackService : Service() {
         tv.start()
         tvRenderer.start()
         synced.start()
+        lights.start()
         DebugServer.ensureStarted(this)
         captureSource.start(captureFeed, CaptureEvents())
     }
@@ -199,6 +203,7 @@ class PlaybackService : Service() {
         }
         try {
             // the TV is given back first: the lights and the screen are put as they were, the player is stopped
+            if (::lights.isInitialized) lights.stop()
             if (::synced.isInitialized) synced.stop()
             if (::tvRenderer.isInitialized) tvRenderer.stop()
         } catch (t: Throwable) {
@@ -221,6 +226,7 @@ class PlaybackService : Service() {
         AppState.capture = null
         AppState.tvRenderer = null
         AppState.synced = null
+        AppState.lights = null
         AppState.source = "idle"
         Settings.removeListener(settingsListener)
         try {

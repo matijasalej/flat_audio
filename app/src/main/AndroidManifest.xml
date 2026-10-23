@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -10,6 +11,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Which app is in front, so that the TV's screen is not switched off under a video. Not grantable
+         from a dialog: adb shell appops set io.github.matijasalej.wholeflat GET_USAGE_STATS allow -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
 
     <uses-feature
         android:name="android.software.leanback"
@@ -18,8 +24,16 @@
         android:name="android.hardware.touchscreen"
         android:required="false" />
 
-    <!-- usesCleartextTraffic: the Sonos speakers speak plain HTTP (UPnP on :1400) and the test
-         signal is served over plain HTTP from this device. -->
+    <!-- The launcher is looked up to tell it from a video app (package visibility on Android 11+). -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.HOME" />
+        </intent>
+    </queries>
+
+    <!-- usesCleartextTraffic: the Sonos speakers speak plain HTTP (UPnP on :1400), the TV speaks plain
+         HTTP (JointSpace on :1925), and the kitchen stream is served over plain HTTP from this device. -->
     <application
         android:allowBackup="false"
         android:banner="@drawable/banner"

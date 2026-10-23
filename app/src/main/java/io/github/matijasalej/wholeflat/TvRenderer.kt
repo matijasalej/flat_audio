@@ -808,31 +808,47 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     }
 
     /**
-     * After Stop the TV is to be on its HDMI input again. It usually is, by itself. If it is not (it stays in its media player), it is
-     * helped: the Back key of the TV (only while the TV says it is in its media player), then a moment of this app's own activity (which
-     * makes the box claim the screen again where the TV follows that); each step is checked by what the TV says it is showing.
+     * After Stop the TV is to be on its HDMI input again. It usually is, by itself within a second or two. If it is not (it stays in its
+     * media player, the context `BrowseDlna`), it is helped: first a moment of this app's own activity (which makes the box claim the
+     * screen again where the TV follows that), then the Back key of the TV (only while the TV says it is in its media player). Each step
+     * is checked by what the TV says it is showing, put in the log with the time it took, and `hdmi_return` says where it is.
      */
     private fun returnToHdmi() {
         val t0 = nowMs()
-        hdmiReturn = "on its way: Stop was sent, waiting for the TV to show HDMI"
+        fun since() = nowMs() - t0
+        fun step(text: String) {
+            hdmiReturn = "on its way: $text (${since()} ms after Stop)"
+            AppLog.add(TAG, "back to HDMI, ${since()} ms after Stop: $text; the TV shows ${tv.lastContext.ifEmpty { "?" }}")
+        }
         fun onHdmi(): Boolean = tv.context() == HDMI_CONTEXT
         fun waitHdmi(ms: Long): Boolean {
             val end = nowMs() + ms
             while (nowMs() < end) {
                 if (exec.isShutdown) return false
                 if (onHdmi()) return true
-                sleepQuietly(300)
+                sleepQuietly(250)
             }
             return onHdmi()
         }
-        if (waitHdmi(HDMI_WAIT_MS)) {
-            hdmiReturn = "back on HDMI ${nowMs() - t0} ms after Stop"
-        } else if (tv.lastContext == MEDIA_PLAYER_CONTEXT && tv.key("Back") && waitHdmi(HDMI_WAIT_MS)) {
-            hdmiReturn = "back on HDMI ${nowMs() - t0} ms after Stop, with the Back key of the TV"
-        } else if (startNudge() && waitHdmi(HDMI_WAIT_MS)) {
-            hdmiReturn = "back on HDMI ${nowMs() - t0} ms after Stop, after this app's own activity was shown for a moment"
+        step("Stop was sent, waiting for the TV to show HDMI by itself")
+        val how: String? = when {
+            waitHdmi(HDMI_SELF_MS) -> "by itself"
+            else -> {
+                step("it does not; this app shows an activity of its own for an instant")
+                if (startNudge() && waitHdmi(HDMI_HELP_MS)) {
+                    "after this app's own activity was shown for a moment"
+                } else if (tv.lastContext == MEDIA_PLAYER_CONTEXT) {
+                    step("still in its media player; the Back key of the TV")
+                    if (tv.key("Back") && waitHdmi(HDMI_HELP_MS)) "with the Back key of the TV" else null
+                } else {
+                    null
+                }
+            }
+        }
+        hdmiReturn = if (how != null) {
+            "back on HDMI ${since()} ms after Stop, $how"
         } else {
-            hdmiReturn = "NOT back on HDMI ${nowMs() - t0} ms after Stop (the TV shows ${tv.lastContext.ifEmpty { "?" }}); on this box 'cmd hdmi_control onetouchplay' over adb does it"
+            "NOT back on HDMI ${since()} ms after Stop (the TV shows ${tv.lastContext.ifEmpty { "?" }}); on this box 'cmd hdmi_control onetouchplay' over adb does it"
         }
         AppLog.add(TAG, "the TV is $hdmiReturn")
     }
@@ -978,8 +994,9 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         private const val HDMI_CONTEXT = "WatchExtension"
         private const val MEDIA_PLAYER_CONTEXT = "BrowseDlna"
 
-        /** After Stop the TV is given this long (ms) to be back on HDMI by itself, and after each help. */
-        private const val HDMI_WAIT_MS = 3_000L
+        /** After Stop the TV is given this long (ms) to be back on HDMI by itself (it was seen to take longer than 8 s or not to come at all when it did not in the first second or two), and after each help. */
+        private const val HDMI_SELF_MS = 1_500L
+        private const val HDMI_HELP_MS = 2_500L
         private const val DMR_PORT = 2870
         const val KIND_TV = 101
         private const val TV_EPOCH = -2L

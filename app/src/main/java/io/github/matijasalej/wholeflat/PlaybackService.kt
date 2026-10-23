@@ -16,10 +16,13 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.system.Os
+import android.widget.Toast
 import io.github.matijasalej.wholeflat.sync.VolumeCurve
 import org.json.JSONObject
 import kotlin.concurrent.thread
@@ -60,6 +63,8 @@ class PlaybackService : Service() {
     private var epoch = 0
 
     private lateinit var livingRoom: LivingRoom
+    private lateinit var kitchen: Kitchen
+    private lateinit var tv: TvControl
     private var bootThread: Thread? = null
     private var eventThread: Thread? = null
     private val restartTimes = ArrayList<Long>()
@@ -87,13 +92,20 @@ class PlaybackService : Service() {
         AppState.service = "starting"
         Settings.init(this)
         livingRoom = LivingRoom(this)
+        kitchen = Kitchen(this, livingRoom)
+        tv = TvControl(this)
+        livingRoom.coordinator = Conductor(kitchen, tv)
+        kitchen.onJoined = { toast("Kitchen connected") }
         AppState.livingRoom = livingRoom
+        AppState.kitchen = kitchen
+        AppState.tv = tv
         Settings.addListener(settingsListener)
         applyVolume()
         acquireLocks()
         createMediaSession()
         registerNetworkCallback()
         livingRoom.start()
+        kitchen.start()
         DebugServer.ensureStarted(this)
     }
 
@@ -125,11 +137,19 @@ class PlaybackService : Service() {
         }
         unregisterNetworkCallback()
         try {
+            if (::kitchen.isInitialized) kitchen.stop()
+            if (::tv.isInitialized) tv.stop()
+        } catch (t: Throwable) {
+            AppLog.error(TAG, "stopping the kitchen failed", t)
+        }
+        try {
             if (::livingRoom.isInitialized) livingRoom.stop()
         } catch (t: Throwable) {
             AppLog.error(TAG, "stopping the living room failed", t)
         }
         AppState.livingRoom = null
+        AppState.kitchen = null
+        AppState.tv = null
         Settings.removeListener(settingsListener)
         try {
             mediaSession?.isActive = false
@@ -207,6 +227,7 @@ class PlaybackService : Service() {
         AppLog.add(TAG, "native engine started: ${AppState.nativeVersion}")
         val myEpoch = epoch
         livingRoom.engineReset()
+        kitchen.engineReset()
         eventThread = thread(name = "wf-events") { eventLoop(myEpoch) }
         updateNotification()
         return true
@@ -337,6 +358,18 @@ class PlaybackService : Service() {
         }
     }
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private fun toast(text: String) {
+        mainHandler.post {
+            try {
+                Toast.makeText(applicationContext, text, Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                AppLog.error(TAG, "cannot show a toast", e)
+            }
+        }
+    }
+
     // ---- settings and volume -------------------------------------------------------------------
 
     private val settingsListener: (Set<String>) -> Unit = { changed ->
@@ -439,6 +472,7 @@ class PlaybackService : Service() {
                 AppState.volumePercent = o.optInt("percent", -1)
                 AppState.volumeRaw = o.optInt("volume", -1)
                 applyVolume()
+                if (AppState.volumeRaw >= 0) kitchen.onVolume(AppState.volumeRaw)
             }
             "error" -> AppState.lastError = o.optString("where") + ": " + o.optString("message")
             "engine_exit" -> {
@@ -516,6 +550,9 @@ class PlaybackService : Service() {
                 )
                 if (AppState.playback == "playing" || AppState.playback == "paused") {
                     AppState.title?.let { sb.append(" | ").append(it) }
+                }
+                if (::kitchen.isInitialized && Settings.values.kitchenEnabled) {
+                    sb.append(" | kitchen ").append(kitchen.state.label)
                 }
             }
             "error" -> sb.append("error, see the debug page")

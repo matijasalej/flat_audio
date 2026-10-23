@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.Process
 import android.os.SystemClock
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -12,35 +13,39 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
-import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
-import java.net.SocketAddress
 import java.net.URLDecoder
 import kotlin.concurrent.thread
 
 /**
- * A small hand-rolled HTTP server on 0.0.0.0:8080 (one thread per connection): the debug page and
- * JSON endpoints, the Sonos test routes, and the streaming test signal that the Sonos pulls.
+ * A small hand-rolled HTTP server on 0.0.0.0:8080 (one thread per connection): the status page and
+ * JSON endpoints, the settings, the calibration test signal, and the stream the Sonos pulls.
  *
  * Routes:
- *   GET /                  HTML status, refreshes every 2 s
- *   GET /status.json       the status model
- *   GET /log               the in-memory log, plain text
- *   GET /sys               device facts (model, ABIs, SDK, IPs, uptime)
- *   GET /net/udp319        can this app bind UDP 319 and 320 (PTP, AirPlay 2) without root?
- *   GET /sonos/discover    SSDP search for Sonos speakers
- *   GET /sonos/play        ?ip=..&fmt=wav|flac&scheme=http|x-rincon-mp3radio&prebuffer=S
- *   GET /sonos/stop        ?ip=..
- *   GET /sonos/position    ?ip=..   raw GetTransportInfo + GetPositionInfo
- *   GET /test/tone.wav     the test signal as an endless WAV
- *   GET /test/tone.flac    the test signal as a chunked FLAC stream
+ *   GET  /                      HTML status, refreshes every 2 s
+ *   GET  /status.json           everything: service, Spotify, living room, kitchen, TV, settings
+ *   GET  /log                   the in-memory log, plain text
+ *   GET  /sys                   device facts (model, ABIs, SDK, IPs, uptime)
+ *   GET  /settings              the settings as JSON (also `?key=value` to change some)
+ *   POST /settings              JSON body with some of the keys; answers with all settings
+ *   GET  /calibrate/start       ?seconds=N (default 30): the click track through the whole pipeline
+ *   GET  /calibrate/stop        ends the click track
+ *   GET  /kitchen               the kitchen's status
+ *   GET  /kitchen/rejoin        restarts the Sonos stream (only the kitchen)
+ *   GET  /kitchen/search        looks for Sonos speakers again
+ *   GET  /kitchen/select        ?ip=...: use this speaker
+ *   GET  /tv                    the TV's status
+ *   GET  /tv/run                runs the wake and screen-off sequence now
+ *   GET  /tv/detect             looks for the TV again
+ *   GET  /k/<token>.flac        the kitchen stream (GET and HEAD), pulled by the Sonos
  */
 object DebugServer {
     const val PORT = 8080
     private const val TAG = "http"
+    private const val MAX_BODY = 64 * 1024
     private val IP_PATTERN = Regex("^[0-9A-Za-z.\\-]{1,100}$")
 
     @Volatile
@@ -54,6 +59,7 @@ object DebugServer {
         val path: String,
         val query: Map<String, String>,
         val headers: Map<String, String>,
+        val body: String,
         val remote: String,
     )
 
@@ -149,58 +155,138 @@ object DebugServer {
                 headers[lines[i].substring(0, colon).trim().lowercase()] = lines[i].substring(colon + 1).trim()
             }
         }
-        return Request(parts[0].uppercase(), path, query, headers, remote)
+        var body = ""
+        val length = headers["content-length"]?.toIntOrNull() ?: 0
+        if (length in 1..MAX_BODY) {
+            val bytes = ByteArray(length)
+            var read = 0
+            while (read < length) {
+                val n = input.read(bytes, read, length - read)
+                if (n < 0) return null
+                read += n
+            }
+            body = String(bytes, Charsets.UTF_8)
+        }
+        return Request(parts[0].uppercase(), path, query, headers, body, remote)
     }
 
     private fun route(req: Request, client: Socket, out: OutputStream) {
         val head = req.method == "HEAD"
-        if (req.method != "GET" && !head) {
+        val kitchenToken = KitchenStreams.tokenOf(req.path)
+        if (kitchenToken != null) {
+            val kitchen = AppState.kitchen
+            if (kitchen == null || (req.method != "GET" && !head)) {
+                sendText(out, 404, "no kitchen\n", head)
+                return
+            }
+            KitchenStreams.serve(kitchen, kitchenToken, req.method, req.remote, req.headers["user-agent"] ?: "", client, out)
+            return
+        }
+        if (req.method != "GET" && !head && !(req.method == "POST" && req.path == "/settings")) {
             sendText(out, 405, "method not allowed\n", head)
             return
         }
-        val context = appContext
         when (req.path) {
             "/" -> sendBytes(out, 200, "text/html; charset=utf-8", indexHtml().toByteArray(Charsets.UTF_8), head)
             "/status.json" -> sendJson(out, 200, AppState.toJson(), head)
             "/log" -> sendBytes(out, 200, "text/plain; charset=utf-8", AppLog.dump().toByteArray(Charsets.UTF_8), head)
             "/sys" -> sendJson(out, 200, sysJson(), head)
-            "/net/udp319" -> sendJson(out, 200, udpProbe(), head)
-            "/sonos/discover" -> {
-                if (context == null) return sendText(out, 500, "no context\n", head)
-                AppLog.add(TAG, "${req.remote} GET /sonos/discover")
-                sendJson(out, 200, Sonos.discover(context), head)
+            "/settings" -> settingsRoute(req, out, head)
+            "/calibrate/start" -> {
+                val seconds = (req.query["seconds"]?.toIntOrNull() ?: 30).coerceIn(1, 600)
+                AppLog.add(TAG, "${req.remote} calibrate/start seconds=$seconds")
+                sendJson(out, 200, calibrateStart(seconds), head)
             }
-            "/sonos/play" -> {
-                if (context == null) return sendText(out, 500, "no context\n", head)
-                val ip = sonosIp(req) ?: return sendText(out, 400, "missing or invalid ip=\n", head)
-                val fmt = req.query["fmt"] ?: "wav"
-                val scheme = req.query["scheme"] ?: "http"
-                val prebuffer = (req.query["prebuffer"]?.toDoubleOrNull() ?: 2.0).coerceIn(0.0, 30.0)
-                if (fmt != "wav" && fmt != "flac") return sendText(out, 400, "fmt must be wav or flac\n", head)
-                if (scheme != "http" && scheme != "x-rincon-mp3radio") {
-                    return sendText(out, 400, "scheme must be http or x-rincon-mp3radio\n", head)
+            "/calibrate/stop" -> {
+                AppLog.add(TAG, "${req.remote} calibrate/stop")
+                val o = JSONObject()
+                try {
+                    NativeBridge.calibStop()
+                    o.put("ok", true)
+                } catch (t: Throwable) {
+                    o.put("ok", false)
+                    o.put("error", t.toString())
                 }
-                AppLog.add(TAG, "${req.remote} GET /sonos/play ip=$ip fmt=$fmt scheme=$scheme prebuffer=$prebuffer")
-                sendJson(out, 200, Sonos.play(context, ip, fmt, scheme, prebuffer), head)
+                sendJson(out, 200, o, head)
             }
-            "/sonos/stop" -> {
-                val ip = sonosIp(req) ?: return sendText(out, 400, "missing or invalid ip=\n", head)
-                AppLog.add(TAG, "${req.remote} GET /sonos/stop ip=$ip")
-                sendJson(out, 200, Sonos.stop(ip), head)
+            "/kitchen" -> sendJson(out, 200, AppState.kitchen?.statusJson() ?: JSONObject().put("state", "not running"), head)
+            "/kitchen/rejoin" -> {
+                AppState.kitchen?.rejoinNow()
+                sendJson(out, 200, JSONObject().put("ok", AppState.kitchen != null), head)
             }
-            "/sonos/position" -> {
-                val ip = sonosIp(req) ?: return sendText(out, 400, "missing or invalid ip=\n", head)
-                sendJson(out, 200, Sonos.position(ip), head)
+            "/kitchen/search" -> {
+                AppState.kitchen?.searchNow()
+                sendJson(out, 200, JSONObject().put("ok", AppState.kitchen != null), head)
             }
-            "/test/tone.wav" -> serveTone(req, client, out, flac = false)
-            "/test/tone.flac" -> serveTone(req, client, out, flac = true)
+            "/kitchen/select" -> {
+                val ip = req.query["ip"]
+                if (ip == null || !IP_PATTERN.matches(ip)) return sendText(out, 400, "missing or invalid ip=\n", head)
+                AppState.kitchen?.select(ip)
+                sendJson(out, 200, JSONObject().put("ok", AppState.kitchen != null).put("ip", ip), head)
+            }
+            "/tv" -> sendJson(out, 200, AppState.tv?.statusJson() ?: JSONObject().put("state", "not running"), head)
+            "/tv/run" -> {
+                AppState.tv?.runNow()
+                sendJson(out, 200, JSONObject().put("ok", AppState.tv != null), head)
+            }
+            "/tv/detect" -> {
+                AppState.tv?.detectNow()
+                sendJson(out, 200, JSONObject().put("ok", AppState.tv != null), head)
+            }
             else -> sendText(out, 404, "not found\n", head)
         }
     }
 
-    private fun sonosIp(req: Request): String? {
-        val ip = req.query["ip"] ?: Sonos.lastIp
-        return if (ip != null && IP_PATTERN.matches(ip)) ip else null
+    // ---- settings and calibration ----------------------------------------------------------------
+
+    private fun settingsRoute(req: Request, out: OutputStream, head: Boolean) {
+        val update = JSONObject()
+        if (req.method == "POST") {
+            if (req.body.isNotBlank()) {
+                try {
+                    val parsed = JSONObject(req.body)
+                    for (key in parsed.keys()) update.put(key, parsed.get(key))
+                } catch (e: JSONException) {
+                    sendJson(out, 400, JSONObject().put("ok", false).put("error", "the body is not a JSON object: ${e.message}"), head)
+                    return
+                }
+            }
+        } else {
+            // a GET may carry changes in the query, for a quick tweak from a browser
+            for ((key, value) in req.query) update.put(key, value)
+        }
+        if (update.length() > 0) {
+            AppLog.add(TAG, "${req.remote} ${req.method} /settings $update")
+            Settings.applyJson(update)
+        }
+        sendJson(out, 200, Settings.toJson(), head)
+    }
+
+    private fun calibrateStart(seconds: Int): JSONObject {
+        val o = JSONObject()
+        if (NativeBridge.loadError != null) {
+            o.put("ok", false)
+            o.put("error", "the native library is not loaded: ${NativeBridge.loadError}")
+            return o
+        }
+        val ok = try {
+            NativeBridge.calibStart(seconds)
+        } catch (t: Throwable) {
+            o.put("error", t.toString())
+            false
+        }
+        o.put("ok", ok)
+        if (ok) {
+            o.put("seconds", seconds)
+            o.put("clicks", "one per second at frame k*44100 from the start, 5 ms Hann-windowed, 0.5 full scale")
+            o.put("living_room", "channel L: 2 kHz, 4 kHz at k%10==0")
+            o.put("kitchen", "channel R: 3 kHz, 6 kHz at k%10==0")
+            o.put("kitchen_state", AppState.kitchen?.state?.label ?: "none")
+            o.put("kitchen_offset_ms", Settings.values.kitchenOffsetMs)
+        } else if (!o.has("error")) {
+            o.put("error", "the audio engine is not running")
+        }
+        return o
     }
 
     // ---- responses -----------------------------------------------------------------------------
@@ -243,6 +329,21 @@ object DebugServer {
     private fun escapeHtml(s: String): String =
         s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
 
+    private fun renderRows(sb: StringBuilder, o: JSONObject, indent: Int) {
+        val keys = o.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val value = o.opt(key)
+            sb.append("<tr><td style=\"padding-left:").append(indent * 14).append("px\">").append(escapeHtml(key)).append("</td><td>")
+            if (value is JSONObject) {
+                sb.append("</td></tr>")
+                renderRows(sb, value, indent + 1)
+            } else {
+                sb.append(escapeHtml(value?.toString() ?: "")).append("</td></tr>")
+            }
+        }
+    }
+
     private fun indexHtml(): String {
         val status = AppState.toJson()
         val sb = StringBuilder()
@@ -252,20 +353,17 @@ object DebugServer {
         sb.append("<title>Whole Flat Audio</title><style>")
         sb.append("body{font:14px/1.45 system-ui,sans-serif;margin:16px;background:#0f1720;color:#e6edf3}")
         sb.append("h1{font-size:20px;margin:0 0 12px}table{border-collapse:collapse}")
-        sb.append("td{padding:2px 14px 2px 0;vertical-align:top}td:first-child{color:#8b98a5}")
+        sb.append("td{padding:1px 14px 1px 0;vertical-align:top}td:first-child{color:#8b98a5}")
         sb.append("pre{background:#0b1118;padding:10px;overflow:auto;font-size:12px;line-height:1.35}")
         sb.append("a{color:#6aa6ff;margin-right:14px}</style></head><body>")
         sb.append("<h1>Whole Flat Audio ").append(escapeHtml(BuildInfo.versionName)).append("</h1><table>")
-        status.keys().forEach { key ->
-            sb.append("<tr><td>").append(escapeHtml(key)).append("</td><td>")
-            sb.append(escapeHtml(status.opt(key)?.toString() ?: "")).append("</td></tr>")
-        }
+        renderRows(sb, status, 0)
         sb.append("</table><p>")
-        for (link in listOf("/status.json", "/log", "/sys", "/net/udp319", "/sonos/discover")) {
+        for (link in listOf("/status.json", "/settings", "/kitchen", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/tv/run")) {
             sb.append("<a href=\"").append(link).append("\">").append(link).append("</a>")
         }
-        sb.append("</p><h2 style=\"font-size:15px\">Log (last 80 lines)</h2><pre>")
-        sb.append(escapeHtml(AppLog.tail(80).joinToString("\n")))
+        sb.append("</p><h2 style=\"font-size:15px\">Log (last 120 lines)</h2><pre>")
+        sb.append(escapeHtml(AppLog.tail(120).joinToString("\n")))
         sb.append("</pre></body></html>")
         return sb.toString()
     }
@@ -279,135 +377,14 @@ object DebugServer {
         o.put("android_release", Build.VERSION.RELEASE)
         o.put("sdk_int", Build.VERSION.SDK_INT)
         o.put("supported_abis", JSONArray(Build.SUPPORTED_ABIS.toList()))
-        o.put("supported_32_bit_abis", JSONArray(Build.SUPPORTED_32_BIT_ABIS.toList()))
-        o.put("supported_64_bit_abis", JSONArray(Build.SUPPORTED_64_BIT_ABIS.toList()))
         o.put("process_is_64_bit", Process.is64Bit())
         o.put("ip", JSONArray(Net.localIps()))
         o.put("uptime_ms", SystemClock.elapsedRealtime())
         o.put("app_version", BuildInfo.versionName)
         o.put("native", AppState.nativeVersion)
+        val runtime = Runtime.getRuntime()
+        o.put("heap_used_mb", (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024))
+        o.put("heap_max_mb", runtime.maxMemory() / (1024 * 1024))
         return o
-    }
-
-    /** Can an unprivileged app bind the PTP ports? Answers whether AirPlay 2 timing is possible without root. */
-    private fun udpProbe(): JSONObject {
-        val result = JSONObject()
-        for (port in intArrayOf(319, 320)) {
-            val entry = JSONObject()
-            try {
-                val socket = DatagramSocket(null as SocketAddress?)
-                try {
-                    socket.reuseAddress = true
-                    socket.bind(InetSocketAddress(port))
-                    entry.put("ok", true)
-                    entry.put("local", socket.localSocketAddress.toString())
-                } finally {
-                    socket.close()
-                }
-            } catch (e: Exception) {
-                entry.put("ok", false)
-                entry.put("error", e.toString())
-            }
-            result.put(port.toString(), entry)
-        }
-        return result
-    }
-
-    // ---- the test signal ----------------------------------------------------------------------
-
-    private fun writeChunk(out: OutputStream, data: ByteArray) {
-        out.write((Integer.toHexString(data.size) + "\r\n").toByteArray(Charsets.US_ASCII))
-        out.write(data)
-        out.write(byteArrayOf(13, 10))
-    }
-
-    /**
-     * Streams the test signal: first the `prebuffer` seconds as fast as the connection takes them,
-     * then paced in real time. Every connection is logged with its headers, byte count and duration.
-     */
-    private fun serveTone(req: Request, client: Socket, out: OutputStream, flac: Boolean) {
-        val prebuffer = (req.query["prebuffer"]?.toDoubleOrNull() ?: 2.0).coerceIn(0.0, 30.0)
-        val kind = if (flac) "flac" else "wav"
-        val head = StringBuilder("HTTP/1.1 200 OK\r\n")
-        head.append("Content-Type: ").append(if (flac) "audio/flac" else "audio/wav").append("\r\n")
-        if (flac) {
-            head.append("Transfer-Encoding: chunked\r\n")
-        } else {
-            head.append("Content-Length: ").append(Wav.TOTAL_BYTES).append("\r\n")
-        }
-        head.append("Accept-Ranges: none\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n")
-        val interesting = listOf("user-agent", "range", "icy-metadata", "connection", "x-sonos-ignore-me")
-        val seen = interesting.mapNotNull { name -> req.headers[name]?.let { "$name: $it" } }
-        AppLog.add(
-            "stream",
-            "${req.remote} ${req.method} ${req.path} prebuffer=${prebuffer}s" +
-                (if (seen.isEmpty()) "" else " [" + seen.joinToString("; ") + "]"),
-        )
-        out.write(head.toString().toByteArray(Charsets.ISO_8859_1))
-        if (req.method == "HEAD") {
-            out.flush()
-            return
-        }
-        client.soTimeout = 0
-
-        val generator = ToneGenerator()
-        val chunkFrames = if (flac) Flac.BLOCK else 882 // 20 ms
-        val pcm = ShortArray(chunkFrames * ToneGenerator.CHANNELS)
-        val wavBytes = ByteArray(chunkFrames * ToneGenerator.CHANNELS * 2)
-        val preFrames = (prebuffer * ToneGenerator.RATE).toLong()
-        val startNs = System.nanoTime()
-        var sentFrames = 0L
-        var bytes = 0L
-        var frameNumber = 0L
-        var lastReport = startNs
-        var ended = "client closed"
-        try {
-            if (flac) {
-                val header = Flac.streamHeader()
-                writeChunk(out, header)
-                bytes += header.size
-            } else {
-                val header = Wav.header()
-                out.write(header)
-                bytes += header.size
-            }
-            out.flush()
-            while (true) {
-                // A chunk is due when real time has caught up with its start, minus the prebuffer.
-                val dueNs = startNs + maxOf(0L, sentFrames - preFrames) * 1_000_000_000L / ToneGenerator.RATE
-                val waitNs = dueNs - System.nanoTime()
-                if (waitNs > 0) Thread.sleep(waitNs / 1_000_000L, (waitNs % 1_000_000L).toInt())
-                generator.fill(pcm, chunkFrames)
-                if (flac) {
-                    val frame = Flac.frame(frameNumber++, pcm)
-                    writeChunk(out, frame)
-                    bytes += frame.size
-                } else {
-                    Wav.pcmBytes(pcm, chunkFrames, wavBytes)
-                    out.write(wavBytes, 0, wavBytes.size)
-                    bytes += wavBytes.size
-                }
-                out.flush()
-                sentFrames += chunkFrames
-                if (!flac && bytes >= Wav.TOTAL_BYTES) {
-                    ended = "end of the declared length"
-                    break
-                }
-                val now = System.nanoTime()
-                if (now - lastReport >= 10_000_000_000L) {
-                    lastReport = now
-                    val elapsed = (now - startNs) / 1_000_000L
-                    val audioMs = sentFrames * 1000L / ToneGenerator.RATE
-                    AppLog.add("stream", "${req.remote} $kind: $bytes bytes, ${elapsed / 1000.0}s elapsed, ${audioMs / 1000.0}s of audio sent")
-                }
-            }
-        } catch (e: IOException) {
-            ended = e.toString()
-        } catch (e: InterruptedException) {
-            ended = "interrupted"
-        } finally {
-            val elapsed = (System.nanoTime() - startNs) / 1_000_000L
-            AppLog.add("stream", "${req.remote} $kind closed after $bytes bytes, $elapsed ms ($ended)")
-        }
     }
 }

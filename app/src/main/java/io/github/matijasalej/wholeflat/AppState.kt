@@ -69,17 +69,16 @@ object AppState {
     /** The same volume as librespot has it, 0..65535, -1 until the first report. */
     @Volatile var volumeRaw: Int = -1
 
-    /** The rooms, for their status; set by the service. */
+    /** The rooms and the TV, for their status; set by the service. */
     @Volatile var livingRoom: LivingRoom? = null
+    @Volatile var kitchen: Kitchen? = null
+    @Volatile var tv: TvControl? = null
 
     @Volatile var network: String = "unknown"
     @Volatile var lastError: String? = null
     @Volatile var lastEventAt: Long = 0
     @Volatile var eventCount: Long = 0
     @Volatile var nativeRestarts: Int = 0
-
-    /** Last result of a Sonos action from the buttons. */
-    @Volatile var lastSonos: String = ""
 
     fun setPosition(ms: Long) {
         positionMs = ms
@@ -115,13 +114,15 @@ object AppState {
         o.put("volume_percent", volumePercent)
         o.put("volume_raw", volumeRaw)
         o.put("living_room", livingRoom?.statusJson() ?: JSONObject.NULL)
+        o.put("kitchen", kitchen?.statusJson() ?: JSONObject.NULL)
+        o.put("tv", tv?.statusJson() ?: JSONObject.NULL)
+        o.put("settings", Settings.toJson())
         o.put("network", network)
         o.put("last_error", lastError ?: JSONObject.NULL)
         o.put("events", eventCount)
         o.put("last_event_age_s", ageSeconds(lastEventAt))
         o.put("native_restarts", nativeRestarts)
         o.put("uptime_s", (SystemClock.elapsedRealtime() - startedAt) / 1000)
-        o.put("last_sonos", lastSonos)
         return o
     }
 
@@ -150,6 +151,15 @@ object AppState {
             sb.append("  stalls ").append(lr.stalls)
             sb.append("  recoveries ").append(lr.recoveries).append("\n")
         }
+        kitchen?.let { k ->
+            val v = Settings.values
+            sb.append("Kitchen   : ").append(k.state.label)
+            if (!v.kitchenEnabled) sb.append("  (switched off)")
+            sb.append("  offset ").append(v.kitchenOffsetMs).append(" ms")
+            sb.append("  rejoins ").append(k.rejoins)
+            k.lastError?.let { sb.append("\n            last problem: ").append(it) }
+            sb.append("\n")
+        }
         sb.append("Network   : ").append(network).append("\n")
         sb.append("Events    : ").append(eventCount)
         val age = ageSeconds(lastEventAt)
@@ -159,7 +169,6 @@ object AppState {
         if (nativeRestarts > 0) sb.append("  restarts ").append(nativeRestarts)
         sb.append("\n")
         lastError?.let { sb.append("Last error: ").append(it).append("\n") }
-        if (lastSonos.isNotEmpty()) sb.append("Sonos     : ").append(lastSonos).append("\n")
         sb.append("Debug page: http://").append(Net.primaryIp() ?: "<tv-ip>").append(":").append(DebugServer.PORT)
         return sb.toString()
     }

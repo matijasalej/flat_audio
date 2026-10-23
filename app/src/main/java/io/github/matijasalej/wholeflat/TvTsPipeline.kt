@@ -776,11 +776,12 @@ class TvTsPipeline(
         private const val TAG = "tvvideo"
 
         /**
-         * The ring holds the last 8 s of the stream (9 Mbit/s is 1.1 MB a second, so 9 MB; it was 12 s and 16 MB, of which 85 % is padding, on a box
-         * whose swap was full); a connection starts at a key picture 1.5 to 2.5 s back and the TV's looks at the stream read from there.
+         * The ring holds the last 6 s of the stream (9 Mbit/s is 1.1 MB a second, so 6.8 MB; it was 12 s and 16 MB, of which 85 % is padding, on a box
+         * whose swap was full); a connection starts at a key picture 1.5 to 3.5 s back (a key picture every 1 or 2 s) and the TV's looks at the
+         * stream read from there.
          */
-        private const val HISTORY_BYTES = 4L shl 20
-        private const val HISTORY_SECONDS = 8L
+        private const val HISTORY_BYTES = 3L shl 20
+        private const val HISTORY_SECONDS = 6L
         const val AUDIO_BITRATE = 192_000
 
         /**

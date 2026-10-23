@@ -115,9 +115,9 @@ class CoverCache(private val download: (String) -> Bitmap? = ::downloadCover) {
         private const val RETRY_NANOS = 60_000_000_000L
         private const val ART_RETRY_NANOS = 5_000_000_000L
 
-        /** The squares the cover is drawn from: twice the size of the footer cover and one and a half times the big cover (see [LyricsLayout]); 1.4 MB at most each. */
-        val SMALL_PX = LyricsLayout.COVER_SIZE.toInt() * 2
-        val BIG_PX = LyricsLayout.BIG_COVER.toInt() * 3 / 2
+        /** The squares the cover is drawn from: one and a half times the footer cover and the size of the big cover (see [LyricsLayout]), 0.8 MB the two. */
+        val SMALL_PX = LyricsLayout.COVER_SIZE.toInt() * 3 / 2
+        val BIG_PX = LyricsLayout.BIG_COVER.toInt()
     }
 }
 

@@ -10,6 +10,7 @@ import io.github.matijasalej.wholeflat.sync.StreamView
 import io.github.matijasalej.wholeflat.sync.SyncController
 import io.github.matijasalej.wholeflat.sync.VolumeCurve
 import org.json.JSONObject
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -86,6 +87,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     private var readingTask: ScheduledFuture<*>? = null
     private var unmuteTask: ScheduledFuture<*>? = null
     private var notPlayingReadings = 0
+    private var lastSummaryReadings = 0
     private val volumeScheduled = AtomicBoolean(false)
 
     /** The speaker was left muted and stopped by us. */
@@ -359,6 +361,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         controller.reset()
         controller.offsetMs = Settings.values.kitchenOffsetMs.toDouble()
         notPlayingReadings = 0
+        lastSummaryReadings = 0
         badPolls = 0
         readingTask?.cancel(false)
         readingTask = control.scheduleWithFixedDelay(
@@ -475,11 +478,25 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val view = StreamView(stream.map, { stream.builder.unappliedBudget() }, { f -> living.timeline.halNanosOfRing(f) })
         val decision = controller.onReading(tMid, p.positionMs, view)
         when (decision) {
-            is SyncController.Decision.Trim -> stream.builder.addTrim(decision.frames)
+            is SyncController.Decision.Trim -> {
+                stream.builder.addTrim(decision.frames)
+                AppLog.add(TAG, "trim ${decision.frames} frames (median error ${fmt(controller.errorMs)} ms)")
+            }
             is SyncController.Decision.Rejoin -> rejoin(decision.reason)
             is SyncController.Decision.Hold -> Unit
         }
+        val n = controller.readings
+        if (n > 0 && n % SUMMARY_EVERY_READINGS == 0 && n != lastSummaryReadings) {
+            lastSummaryReadings = n
+            AppLog.add(
+                TAG,
+                "sync: error ${fmt(controller.errorMs)} ms (last ${fmt(controller.rawErrorMs)}), drift ${fmt(controller.driftPpm)} ppm, " +
+                    "trimmed ${controller.trimmedFrames} frames, re-joins $rejoins, round trip ${fmt(lastRttMs)} ms",
+            )
+        }
     }
+
+    private fun fmt(v: Double): String = if (v.isNaN()) "-" else String.format(Locale.US, "%.1f", v)
 
     /** The measured delay from Play to the first sound, as it came out of the readings, smoothed over the starts. */
     private fun learnLk(s: KitchenSession, observedStartNanos: Long) {
@@ -943,6 +960,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
 
         private const val POLL_PERIOD_MS = 3_000L
         private const val READING_PERIOD_MS = 200L
+        private const val SUMMARY_EVERY_READINGS = 150
         private const val SEARCH_EVERY_NANOS = 10_000_000_000L
         private const val SEARCH_OFFLINE_EVERY_NANOS = 30_000_000_000L
         private const val WS_RECONNECT_NANOS = 3_000_000_000L

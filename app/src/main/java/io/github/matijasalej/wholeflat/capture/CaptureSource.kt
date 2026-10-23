@@ -747,6 +747,15 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
         o.put("generation", feed.generation)
         o.put("clock", feed.clockSource)
         o.put("longest_gap_ms", feed.maxGapMs)
+        // true when Android silences the recording (a background restriction): the capture then reads zeros
+        o.put(
+            "client_silenced",
+            try {
+                attempt?.record?.activeRecordingConfiguration?.isClientSilenced ?: JSONObject.NULL
+            } catch (e: Exception) {
+                JSONObject.NULL
+            },
+        )
         val read = feed.lastChunkNanos
         o.put("last_chunk_age_ms", if (read == 0L) -1L else (System.nanoTime() - read) / 1_000_000L)
         val packages = JSONObject()

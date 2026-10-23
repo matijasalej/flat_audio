@@ -63,4 +63,25 @@ class TvVideoSpecTest {
         assertNotNull(TvVideoSpec.parse("1080p30 cbr 500"))
         assertNotNull(TvVideoSpec.parse("1080p30 cbr 20000"))
     }
+
+    @Test
+    fun theRateOfTheTransportStreamCanBeSetLowForAVideoThatNeedsLittle() {
+        val s = TvVideoSpec.parse("720p30 vbr 2500 mux3500")!!
+        assertEquals(3_500_000, s.muxRate)
+        assertEquals("720p30 vbr 2500 gop1 mux3500", s.text())
+        assertEquals(s, TvVideoSpec.parse(s.text()))
+        // without it the rate is made from the bitrate, as before
+        assertEquals(12_000_000, TvVideoSpec.parse("720p30 vbr 8000")!!.muxRate)
+        assertEquals(9_000_000, TvVideoSpec.DEFAULT.muxRate)
+        assertEquals("1080p30 cbr 6000 gop1", TvVideoSpec.DEFAULT.text())
+    }
+
+    @Test
+    fun aRateOfTheTransportStreamThatCannotCarryTheVideoIsNothing() {
+        assertNull(TvVideoSpec.parse("720p30 vbr 3000 mux3200")) // less than the video plus 400 kbit/s
+        assertNull(TvVideoSpec.parse("720p30 vbr 1000 mux1000"))
+        assertNull(TvVideoSpec.parse("720p30 vbr 1000 mux99999"))
+        assertNull(TvVideoSpec.parse("mux12"))
+        assertNotNull(TvVideoSpec.parse("720p30 vbr 2000 mux2400"))
+    }
 }

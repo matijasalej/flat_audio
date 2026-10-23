@@ -194,4 +194,27 @@ class TsWriterTest {
         assertEquals(120_000, r.pes[TsMuxer.VIDEO_PID]!![0].payload.size)
         assertEquals(40, r.pes[TsMuxer.AUDIO_PID]!!.size)
     }
+
+    @Test
+    fun aLowRateOfTheStreamIsStillConstantAndCarriesAPictureInTheTimeItNeeds() {
+        // 3 Mbit/s: a 60 KB picture takes 160 ms of the stream, the audio goes by meanwhile and the clock is never more than 20 ms apart
+        val mux = TsMuxer(muxRate = 3_000_000)
+        val history = TsHistory()
+        val w = TsWriter(mux, history) { t -> Math.floor(t / 1e9 * mux.slotsPerSecond).toLong() }
+        w.submitVideo(10 * ms, au(60_000), 1_000, true)
+        for (i in 0 until 40) w.submitAudio((20L + i * 23) * ms, au(300), 1_100L + i * 2_070)
+        var t = 0L
+        while (t <= 1_000 * ms) {
+            w.step(t)
+            t += ms
+        }
+        val r = everything(history)
+        assertEquals(emptyList<String>(), r.errors)
+        assertEquals((Math.floor(1_000 * ms / 1e9 * mux.slotsPerSecond).toLong() + 1) * 188, history.endPos)
+        val pcrs = r.packets.filter { it.pcr != null }
+        for (i in 1 until pcrs.size) assertTrue((pcrs[i].pcr!! - pcrs[i - 1].pcr!!) / 27_000.0 <= 20.1)
+        assertEquals(60_000, r.pes[TsMuxer.VIDEO_PID]!![0].payload.size)
+        assertEquals(40, r.pes[TsMuxer.AUDIO_PID]!!.size)
+        assertEquals(0, mux.queuedVideoPackets)
+    }
 }

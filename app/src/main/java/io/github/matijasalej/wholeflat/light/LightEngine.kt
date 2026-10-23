@@ -88,8 +88,8 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
         if (running) return
         running = true
         LightHook.bandShare = options.bandPct / 100.0
-        LightHook.source = { c, p -> frameFor(planner, c, p, true) }
-        LightHook.previewSource = { c, p -> frameFor(previewPlanner, c, p, false) }
+        LightHook.source = { f, c, p -> frameFor(planner, f, c, p, true) }
+        LightHook.previewSource = { f, c, p -> frameFor(previewPlanner, f, c, p, false) }
         worker = thread(name = "wf-lights", isDaemon = true) { loop() }
     }
 
@@ -113,26 +113,25 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
 
     // ---- the picture ----------------------------------------------------------------------------
 
-    private fun frameFor(p: LightPlanner, captureNanos: Long, picture: Picture, live: Boolean): IntArray? {
+    private fun frameFor(p: LightPlanner, captureFrame: Long, captureNanos: Long, picture: Picture, live: Boolean): IntArray? {
         val o = options
         if (!o.mood || picture == Picture.SPLASH) return null
+        // the frame the picture is stamped with; before the stream has its clock, the capture's own
+        val frame = if (captureFrame >= 0) captureFrame else feed.clock.frameAtNanos(captureNanos) ?: return null
         val t = test
         if (t != null && System.nanoTime() < testEndNanos) {
-            if (t.byFrame) {
-                // on the frames of the calibration clicks themselves, with no offset: what is measured is the whole way to the wall
-                val f = feed.clock.frameAtNanos(captureNanos) ?: return null
-                return t.atFrame(f, rate).also { if (live) note(it) }
-            }
+            // on the frames of the calibration clicks themselves, with no offset: what is measured is the whole way to the wall
+            if (t.byFrame) return t.atFrame(frame, rate).also { if (live) note(it) }
             val elapsedMs = (captureNanos - testStartNanos) / 1_000_000L
             if (elapsedMs < 0) return null
             return t.at(elapsedMs).also { if (live) note(it) }
         }
         if (Settings.values.display == "listen") return null
-        val frame = feed.clock.frameAtNanos(captureNanos + o.offsetMs * 1_000_000L) ?: return null
+        val ahead = frame + o.offsetMs.toLong() * rate / 1000
         val variant = if (picture == Picture.LYRICS) LightPlanner.Variant.BAND else LightPlanner.Variant.FULL
         val strength = if (o.tvPulses) LightPlanner.Strength.NONE else LightPlanner.Strength.of(o.strength)
         val out = IntArray(Zones.COUNT)
-        p.frame(frame, analyzer.snapshot, look, strength, variant, out)
+        p.frame(ahead, analyzer.snapshot, look, strength, variant, out)
         if (live) note(out)
         return out
     }

@@ -422,11 +422,14 @@ class TvTsPipeline(
         venc = null
     }
 
+    /** The capture frame the picture of [captureNanos] carries the time of (for the mood lights); -1 before the stream has its clock. */
+    private fun lightFrame(captureNanos: Long): Long = if (::slew.isInitialized) Math.round(slew.frameAt(captureNanos)) else -1L
+
     private fun renderFrame(captureNanos: Long, pic: Picture) {
         val r = renderer ?: return
         val pts = videoPts(captureNanos)
         val scene = if (pic == Picture.BLACK) null else scenes.scene(captureNanos)
-        val stamp = r.render(pic, scene, System.nanoTime(), LightHook.frame(captureNanos, pic))
+        val stamp = r.render(pic, scene, System.nanoTime(), LightHook.frame(lightFrame(captureNanos), captureNanos, pic))
         labels.add(stamp, captureNanos, pts)
         synchronized(drawn) {
             drawn.addLast(Drawn(stamp / 1_000_000L, stamp / 1000L, r.lastRenderMs, wakeLateMs, scene?.positionMs ?: -1L))
@@ -546,7 +549,7 @@ class TvTsPipeline(
             val bmp = Bitmap.createBitmap(LyricsLayout.W / 2, LyricsLayout.H / 2, Bitmap.Config.ARGB_8888)
             synchronized(previewDrawer) {
                 // the drawer scales the 1920 x 1080 design to the canvas it is given
-                previewDrawer.draw(Canvas(bmp), pic, scene, LightHook.preview(c, pic))
+                previewDrawer.draw(Canvas(bmp), pic, scene, LightHook.preview(lightFrame(c), c, pic))
             }
             val out = ByteArrayOutputStream()
             bmp.compress(Bitmap.CompressFormat.JPEG, 82, out)

@@ -12,6 +12,7 @@ import io.github.matijasalej.wholeflat.capture.LagSteer
 import io.github.matijasalej.wholeflat.capture.SourceArbiter
 import io.github.matijasalej.wholeflat.sync.ClickTrack
 import io.github.matijasalej.wholeflat.sync.DayFloor
+import io.github.matijasalej.wholeflat.sync.PausedHere
 import io.github.matijasalej.wholeflat.sync.SyncedHold
 import io.github.matijasalej.wholeflat.sync.KitchenVolume
 import io.github.matijasalej.wholeflat.sync.PlayDelays
@@ -127,12 +128,11 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     private var sonosQuiet = false
 
     /**
-     * The token of our stream that someone paused on the speaker itself during the session that just ended: the
-     * kitchen leaves the speaker alone while that stream is still paused there. A paused stream of ours from an
-     * earlier session or run is nobody's, and does not count.
+     * The stream of ours that someone paused on the speaker itself during the session that just ended: the kitchen leaves the speaker
+     * alone while that stream is still paused there. A paused stream of ours from an earlier session or run is nobody's, and does not
+     * count, and neither does one after a power cycle of the speaker (see [PausedHere]).
      */
-    @Volatile
-    private var pausedOnSpeakerToken: String? = null
+    private val pausedHere = PausedHere()
 
     /** The delay from Play to the first sound, by stream format. */
     private val delays = PlayDelays()
@@ -1605,14 +1605,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         // speaker during the session that just ended (then the kitchen stays quiet until the speaker is stopped or
         // plays). A foreign session that is paused or stopped is free (it is taken over when a stream is set),
         // and so is a paused stream of ours from an earlier session or run.
-        val pausedHere = pausedOnSpeakerToken
-        busyElsewhere = when (kind) {
-            SonosPolicy.Availability.BUSY -> true
-            SonosPolicy.Availability.OURS ->
-                r.transport == "PAUSED_PLAYBACK" && pausedHere != null && SonosPolicy.tokenOf(r.uri) == pausedHere
-            SonosPolicy.Availability.FREE -> false
-        }
-        if (!busyElsewhere) pausedOnSpeakerToken = null
+        busyElsewhere = pausedHere.busy(kind, r.transport, r.uri)
         if (kind == SonosPolicy.Availability.OURS && (r.transport == "PLAYING" || r.transport == "TRANSITIONING")) {
             // a stream of ours from before this run: its server is gone
             AppLog.add(TAG, "stopping a leftover stream of ours")
@@ -1645,7 +1638,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         if (ours && r.transport == "PAUSED_PLAYBACK") {
             AppLog.add(TAG, "the kitchen was paused on the speaker itself, leaving it alone")
             busyElsewhere = true
-            pausedOnSpeakerToken = s.token
+            pausedHere.paused(s.token)
             endSession(s, "paused on the speaker", false)
             state = baseState()
             return
@@ -1659,6 +1652,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
 
     private fun goOffline(why: String) {
         AppLog.add(TAG, "the speaker is offline ($why)")
+        // switched off (its power button pauses first, then it goes): when it is back it is wanted again, whatever it still shows paused
+        if (pausedHere.offline()) AppLog.add(TAG, "the speaker was paused and went off: when it is back the kitchen is free to join again")
         reachable = false
         busyElsewhere = false
         sonosQuiet = false

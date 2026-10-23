@@ -398,6 +398,10 @@ impl DealerShared {
             .expect(DEALER_REQUEST_HANDLERS_POISON_MSG);
 
         if let Some(handler) = handler_map.get(split) {
+            // wholeflat: the app is told which command a controller sent (see user_commands.rs)
+            if request.message_ident.ends_with("/player/command") {
+                crate::user_commands::note(&payload_request.command);
+            }
             handler.handle_request(payload_request, responder);
             return;
         }

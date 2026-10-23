@@ -5,6 +5,10 @@
 #                       (Linux) platform data instead of the Android one
 #   src/http_client.rs  user agent announces the matching desktop platform
 #   src/version.rs      the desktop version is claimed on every host
+#   src/audio_key.rs    after a failed key request the requests go out at least 3 s apart (KeyGate),
+#                       and every outcome is reported to the app (set_observer)
+#   src/user_commands.rs, src/dealer/mod.rs
+#                       the names of the commands a controller sends are reported to the app
 # Cargo.toml: [workspace]/[lints] inheritance replaced by literal values, path deps by git deps.
 [package]
 name = "librespot-core"

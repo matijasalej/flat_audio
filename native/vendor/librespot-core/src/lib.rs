@@ -34,6 +34,7 @@ pub mod spclient;
 pub mod spotify_id;
 pub mod spotify_uri;
 pub mod token;
+pub mod user_commands;
 #[doc(hidden)]
 pub mod util;
 pub mod version;

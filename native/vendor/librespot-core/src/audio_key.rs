@@ -1,9 +1,14 @@
-use std::{collections::HashMap, io::Write, time::Duration};
+use std::{
+    collections::HashMap,
+    io::Write,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
 use bytes::Bytes;
 use thiserror::Error;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
 use crate::{Error, FileId, SpotifyId, packet::PacketType, util::SeqGenerator};
 
@@ -33,6 +38,95 @@ impl From<AudioKeyError> for Error {
             AudioKeyError::Packet(_) => Error::unimplemented(err),
             AudioKeyError::Timeout => Error::aborted(err),
         }
+    }
+}
+
+// wholeflat patch ------------------------------------------------------------------------------
+//
+// Spotify refuses the audio keys of some accounts for a while (librespot issue #1649). A player that
+// answers a refusal by skipping to the next track, or by asking again at once, makes it worse: the
+// requests keep coming. So, after a failed key request, requests are spaced out ([`KeyGate`]) until
+// one succeeds, and every outcome is reported to the app ([`set_observer`]), which holds the track
+// and tries it again with a back-off.
+
+/// After a failed key request, at most one request is started per this much time.
+pub const MIN_GAP_AFTER_ERROR: Duration = Duration::from_secs(3);
+
+/// How a key request ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyOutcome {
+    Granted,
+    /// Spotify answered with an error ("error audio key 0 1"): the key is refused.
+    Refused,
+    /// No answer in time (or the connection went away).
+    TimedOut,
+}
+
+/// The spacing of key requests after an error. Plain state, no clock of its own: the callers pass
+/// the time in, which is what the tests do.
+#[derive(Debug, Default)]
+pub struct KeyGate {
+    errors_in_row: u32,
+    next_start: Option<Instant>,
+}
+
+impl KeyGate {
+    pub const fn new() -> Self {
+        KeyGate {
+            errors_in_row: 0,
+            next_start: None,
+        }
+    }
+
+    /// A request wants to start at `now`. Returns how long it has to wait first: nothing while the
+    /// last request succeeded, else until `MIN_GAP_AFTER_ERROR` after the previous start (requests
+    /// that queue up are lined up one gap apart).
+    pub fn reserve(&mut self, now: Instant) -> Duration {
+        if self.errors_in_row == 0 {
+            return Duration::ZERO;
+        }
+        let start = match self.next_start {
+            Some(t) if t > now => t,
+            _ => now,
+        };
+        self.next_start = Some(start + MIN_GAP_AFTER_ERROR);
+        start - now
+    }
+
+    /// A request ended at `now`.
+    pub fn record(&mut self, outcome: KeyOutcome, now: Instant) {
+        match outcome {
+            KeyOutcome::Granted => {
+                self.errors_in_row = 0;
+                self.next_start = None;
+            }
+            KeyOutcome::Refused | KeyOutcome::TimedOut => {
+                self.errors_in_row += 1;
+                let earliest = now + MIN_GAP_AFTER_ERROR;
+                self.next_start = Some(match self.next_start {
+                    Some(t) if t > earliest => t,
+                    _ => earliest,
+                });
+            }
+        }
+    }
+
+    pub fn errors_in_row(&self) -> u32 {
+        self.errors_in_row
+    }
+}
+
+static GATE: Mutex<KeyGate> = Mutex::new(KeyGate::new());
+static OBSERVER: Mutex<Option<UnboundedSender<KeyOutcome>>> = Mutex::new(None);
+
+/// Reports the outcome of every key request to `tx` (the app's engine). `None` stops it.
+pub fn set_observer(tx: Option<UnboundedSender<KeyOutcome>>) {
+    *OBSERVER.lock().unwrap_or_else(|p| p.into_inner()) = tx;
+}
+
+fn observe(outcome: KeyOutcome) {
+    if let Some(tx) = OBSERVER.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+        let _ = tx.send(outcome);
     }
 }
 
@@ -79,6 +173,36 @@ impl AudioKeyManager {
     }
 
     pub async fn request(&self, track: SpotifyId, file: FileId) -> Result<AudioKey, Error> {
+        // wholeflat: after an error the requests go out one gap apart
+        let wait = GATE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .reserve(Instant::now());
+        if !wait.is_zero() {
+            warn!(
+                "holding back an audio key request for {} ms after an error",
+                wait.as_millis()
+            );
+            tokio::time::sleep(wait).await;
+        }
+
+        let result = self.request_once(track, file).await;
+
+        let outcome = match &result {
+            Ok(_) => KeyOutcome::Granted,
+            Err(e) => match e.error.downcast_ref::<AudioKeyError>() {
+                Some(AudioKeyError::AesKey) => KeyOutcome::Refused,
+                _ => KeyOutcome::TimedOut,
+            },
+        };
+        GATE.lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .record(outcome, Instant::now());
+        observe(outcome);
+        result
+    }
+
+    async fn request_once(&self, track: SpotifyId, file: FileId) -> Result<AudioKey, Error> {
         let (tx, rx) = oneshot::channel();
 
         let seq = self.lock(move |inner| {

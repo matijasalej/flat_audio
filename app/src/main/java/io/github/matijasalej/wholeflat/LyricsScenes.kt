@@ -18,6 +18,7 @@ class LyricsScenes(
     private val lyrics: LyricsRepository,
     private val offsetMs: () -> Int,
     private val fallback: () -> Pair<String, String?>,
+    private val instantScroll: () -> Boolean = { false },
 ) : SceneSource {
     override fun scene(captureNanos: Long): TvScene {
         val np = nowPlaying()
@@ -46,7 +47,7 @@ class LyricsScenes(
         }
         return TvScene(
             np.title!!, np.artist ?: "", cover?.bitmap, cover?.color ?: CoverColor.DEFAULT, lines, status, shifted, np.durationMs,
-            np.key, cover?.small, cover?.big,
+            np.key, cover?.small, cover?.big, instantScroll(),
         )
     }
 }

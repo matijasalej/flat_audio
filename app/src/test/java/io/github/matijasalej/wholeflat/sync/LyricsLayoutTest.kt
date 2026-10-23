@@ -1,6 +1,7 @@
 package io.github.matijasalej.wholeflat.sync
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -131,5 +132,42 @@ class LyricsLayoutTest {
         assertEquals(1720f, LyricsLayout.BAR_X1, 0f)
         assertEquals(940f, LyricsLayout.BAR_Y, 0f)
         assertEquals(6f, LyricsLayout.BAR_H, 0f)
+    }
+
+    @Test
+    fun theInstantScrollNeverMovesALineAndOnlyFadesTheColoursOfTheTwoLinesThatChange() {
+        for (since in listOf(0L, 40L, 75L, 150L, 400L)) {
+            val rows = LyricsLayout.rows(10, 4, since, instant = true)
+            // the lines stand in their final places from the first picture: the active one at the top mark, the next one a line below
+            assertEquals(LyricsLayout.ACTIVE_Y, rows.single { it.index == 4 }.y, 0.001f)
+            assertEquals(LyricsLayout.ACTIVE_Y + LyricsLayout.LINE_H, rows.single { it.index == 5 }.y, 0.001f)
+            assertEquals(LyricsLayout.ACTIVE_Y - LyricsLayout.LINE_H, rows.single { it.index == 3 }.y, 0.001f)
+        }
+        val start = LyricsLayout.rows(10, 4, 0, instant = true)
+        assertEquals(0.0, start.single { it.index == 4 }.fade, 1e-9)
+        assertTrue(start.single { it.index == 3 }.settling)
+        assertEquals(0.0, start.single { it.index == 3 }.fade, 1e-9)
+        val mid = LyricsLayout.rows(10, 4, 75, instant = true)
+        assertEquals(LyricsLayout.ease(0.5), mid.single { it.index == 4 }.fade, 1e-9)
+        assertEquals(LyricsLayout.ease(0.5), mid.single { it.index == 3 }.fade, 1e-9)
+        // after 150 ms both are done: the active line is white and the one before it is plain sung
+        val done = LyricsLayout.rows(10, 4, 150, instant = true)
+        assertEquals(1.0, done.single { it.index == 4 }.fade, 1e-9)
+        assertFalse(done.single { it.index == 3 }.settling)
+        // no other line is settling
+        assertEquals(listOf(3), start.filter { it.settling }.map { it.index })
+    }
+
+    @Test
+    fun theColoursOfTheLinesThatChangeMeetAtWhiteAndTheSungColour() {
+        val colors = LyricsLayout.Colors(CoverColor.rgb(40, 80, 120))
+        val start = LyricsLayout.rows(10, 4, 0, instant = true)
+        val done = LyricsLayout.rows(10, 4, 150, instant = true)
+        assertEquals(colors.white, colors.of(start.single { it.index == 3 }))
+        assertEquals(colors.sung, colors.of(done.single { it.index == 3 }))
+        assertEquals(colors.ahead, colors.of(start.single { it.index == 4 }))
+        assertEquals(colors.white, colors.of(done.single { it.index == 4 }))
+        // the smooth scroll is as it was
+        assertEquals(colors.sung, colors.of(LyricsLayout.rows(10, 4, 0).single { it.index == 3 }))
     }
 }

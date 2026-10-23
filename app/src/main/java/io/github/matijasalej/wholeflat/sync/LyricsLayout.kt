@@ -56,8 +56,14 @@ object LyricsLayout {
     /** How a line is drawn. */
     enum class Role { SUNG, ACTIVE, AHEAD }
 
-    /** A line of the picture: which one, where its top is, how it is drawn, and (for the active line) how far the fade-in is (0 to 1). */
-    class Row(val index: Int, val y: Float, val role: Role, val fade: Double)
+    /** The fade of the colours of the two lines that change in the instant scroll (s). */
+    const val INSTANT_FADE_S = 0.15
+
+    /**
+     * A line of the picture: which one, where its top is, how it is drawn, and (for the active line) how far the fade-in is (0 to 1).
+     * [settling]: the line that was sung until a moment ago (instant scroll only), whose colour goes from white to the sung colour with [fade].
+     */
+    class Row(val index: Int, val y: Float, val role: Role, val fade: Double, val settling: Boolean = false)
 
     /** The ease-out of the scroll and of the fade (a cubic): 0 at 0, 1 at 1. */
     fun ease(u: Double): Double {
@@ -67,10 +73,14 @@ object LyricsLayout {
 
     /**
      * The lines to draw: the ones of the lines that fall between the top and the bottom of the text area, at the positions they have
-     * [sinceActiveMs] after the line [active] began (-1: none has begun, the first waits in the next place; no scroll then).
+     * [sinceActiveMs] after the line [active] began (-1: none has begun, the first waits in the next place; no scroll then). With [instant]
+     * the lines do not move: they stand in their new places at once and only the colours of the two lines that change fade, in
+     * [INSTANT_FADE_S]; a scroll moves every pixel of the text for a third of a second, which is the most the video encoder is asked for
+     * between two key pictures (the TV was seen to conceal the pictures of a scroll with blocks and ghosts).
      */
-    fun rows(lineCount: Int, active: Int, sinceActiveMs: Long): List<Row> {
-        val e = if (active < 0) 1.0 else ease(sinceActiveMs / 1000.0 / SCROLL_S)
+    fun rows(lineCount: Int, active: Int, sinceActiveMs: Long, instant: Boolean = false): List<Row> {
+        val e = if (active < 0 || instant) 1.0 else ease(sinceActiveMs / 1000.0 / SCROLL_S)
+        val f = if (active < 0) 1.0 else if (instant) ease(sinceActiveMs / 1000.0 / INSTANT_FADE_S) else e
         val result = ArrayList<Row>()
         for (j in maxOf(0, active - 2)..minOf(lineCount - 1, active + 5)) {
             val y = ACTIVE_Y + ((j - active) + (1.0 - e)).toFloat() * LINE_H
@@ -80,7 +90,8 @@ object LyricsLayout {
                 j == active -> Role.ACTIVE
                 else -> Role.AHEAD
             }
-            result.add(Row(j, y, role, if (role == Role.ACTIVE) e else 1.0))
+            val settling = instant && role == Role.SUNG && j == active - 1 && f < 1.0
+            result.add(Row(j, y, role, if (role == Role.ACTIVE || settling) f else 1.0, settling))
         }
         return result
     }
@@ -102,6 +113,9 @@ object LyricsLayout {
             Role.ACTIVE -> active(fade)
             Role.AHEAD -> ahead
         }
+
+        /** The colour of a row: a line that has just been sung goes from white to the sung colour. */
+        fun of(row: Row): Int = if (row.settling) CoverColor.mix(white, sung, row.fade) else of(row.role, row.fade)
     }
 
     /** The biggest text size not above [size] (and not below [minSize]) at which [widthAt] says the text is no wider than [maxWidth]. */

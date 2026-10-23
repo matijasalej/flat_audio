@@ -88,6 +88,8 @@ class SettingsValues(
     val tvAutoReanchor: Boolean,
     /** A stream that is made again goes to the transport that is running, with no Stop. Off by default: the TV once timed out on that and went to standby. */
     val tvReanchorRunning: Boolean,
+    /** How the lyrics move on the screen: "smooth" (a scroll of 0.35 s) or "instant" (the lines stand in their new places at once, the colours fade in 150 ms: far fewer motion bits). */
+    val tvScroll: String,
 )
 
 class SettingsModel {
@@ -132,6 +134,7 @@ class SettingsModel {
     var ambilightDarkMenu = ""
     var tvAutoReanchor = false
     var tvReanchorRunning = false
+    var tvScroll = TV_SCROLL_SMOOTH
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
@@ -139,7 +142,7 @@ class SettingsModel {
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
         captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPrerollMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
         backgroundCleanup, ambilightStyle, ambilightMenu, tvPauseMs, tvQuiet, tvAudioOnly, tvMac, tvPositionProbe,
-        ambilightDarkStyle, ambilightDarkAlgorithm, ambilightDarkMenu, tvAutoReanchor, tvReanchorRunning,
+        ambilightDarkStyle, ambilightDarkAlgorithm, ambilightDarkMenu, tvAutoReanchor, tvReanchorRunning, tvScroll,
     )
 
     fun toJson(): JSONObject {
@@ -185,6 +188,7 @@ class SettingsModel {
         o.put(AMBILIGHT_DARK_MENU, ambilightDarkMenu)
         o.put(TV_AUTO_REANCHOR, tvAutoReanchor)
         o.put(TV_REANCHOR_RUNNING, tvReanchorRunning)
+        o.put(TV_SCROLL, tvScroll)
         return o
     }
 
@@ -368,6 +372,10 @@ class SettingsModel {
             val v = bool(json.get(TV_REANCHOR_RUNNING))
             if (v != null && v != tvReanchorRunning) { tvReanchorRunning = v; changed.add(TV_REANCHOR_RUNNING) }
         }
+        if (json.has(TV_SCROLL)) {
+            val v = json.get(TV_SCROLL).toString().trim().lowercase()
+            if ((v == TV_SCROLL_SMOOTH || v == TV_SCROLL_INSTANT) && v != tvScroll) { tvScroll = v; changed.add(TV_SCROLL) }
+        }
         if (json.has(TV_POSITION_PROBE)) {
             val v = bool(json.get(TV_POSITION_PROBE))
             if (v != null && v != tvPositionProbe) { tvPositionProbe = v; changed.add(TV_POSITION_PROBE) }
@@ -433,6 +441,9 @@ class SettingsModel {
         /** With the screen off the Ambilight does not follow a picture: PARTY, in its expert form, lights up (Lumina and FOLLOW_VIDEO give 1 to 6 of 255). */
         const val DEFAULT_AMBILIGHT_DARK_STYLE = "FOLLOW_AUDIO"
         const val DEFAULT_AMBILIGHT_DARK_ALGORITHM = "PARTY"
+        const val TV_SCROLL = "tv_scroll"
+        const val TV_SCROLL_SMOOTH = "smooth"
+        const val TV_SCROLL_INSTANT = "instant"
         const val TV_AUTO_REANCHOR = "tv_auto_reanchor"
         const val TV_REANCHOR_RUNNING = "tv_reanchor_running"
         const val TV_PAUSE_MS = "tv_pause_ms"

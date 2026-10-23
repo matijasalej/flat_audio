@@ -32,6 +32,7 @@ import io.github.matijasalej.wholeflat.source.NativeRingControl
 import io.github.matijasalej.wholeflat.source.SourceBridge
 import io.github.matijasalej.wholeflat.source.SourceStatus
 import io.github.matijasalej.wholeflat.source.TrackInfo
+import io.github.matijasalej.wholeflat.sync.SettingsModel
 import io.github.matijasalej.wholeflat.sync.LyricsRepository
 import io.github.matijasalej.wholeflat.sync.VolumeCurve
 import org.json.JSONObject
@@ -137,6 +138,7 @@ class PlaybackService : Service() {
         tvRenderer.scenes = LyricsScenes(
             { AppState.nowPlaying() }, { MediaWatch.art }, coverCache, lyricsRepository, { Settings.values.lyricsOffsetMs },
             { Pair(AppState.captureTitle?.takeIf { it.isNotBlank() } ?: DEVICE_NAME, AppState.captureArtist) },
+            { Settings.values.tvScroll == SettingsModel.TV_SCROLL_INSTANT },
         )
         synced = SyncedController(this, kitchen, tvRenderer, tv)
         kitchen.onSource = { source ->

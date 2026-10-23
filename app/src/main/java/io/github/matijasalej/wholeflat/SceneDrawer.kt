@@ -117,13 +117,13 @@ class SceneDrawer(context: Context) {
         text.textAlign = Paint.Align.LEFT
         text.textSize = LyricsLayout.LINE_SIZE
         val ascent = -text.ascent() // the lines are placed by the metrics of the full size, also when one is shrunk
-        for (row in LyricsLayout.rows(lines.size, active, since)) {
+        for (row in LyricsLayout.rows(lines.size, active, since, sc.instantScroll)) {
             val s = lines[row.index].text
             if (s.isBlank()) continue
             val (shown, size) = fit(s, lineFace, LyricsLayout.LINE_SIZE, LyricsLayout.LINE_MIN_SIZE, LyricsLayout.LINE_MAX_WIDTH)
             text.typeface = lineFace
             text.textSize = size
-            text.color = colors.of(row.role, row.fade)
+            text.color = colors.of(row)
             canvas.drawText(shown, LyricsLayout.LINE_X, row.y + ascent, text)
         }
         footer(canvas, sc, colors)

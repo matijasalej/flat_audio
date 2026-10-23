@@ -39,6 +39,8 @@ class TvScene(
      */
     val coverSmall: Bitmap? = null,
     val coverBig: Bitmap? = null,
+    /** The lines of the lyrics do not scroll: they stand in their new places at once and only their colours fade (the setting `tv_scroll`). */
+    val instantScroll: Boolean = false,
 )
 
 /** Makes the scene for the picture that goes with the capture time [captureNanos] (System.nanoTime): the picture and the sound of that moment are shown together. */

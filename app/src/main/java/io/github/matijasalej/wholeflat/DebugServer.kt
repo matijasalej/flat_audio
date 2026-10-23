@@ -37,6 +37,9 @@ import kotlin.concurrent.thread
  *   GET  /kitchen/rejoin        restarts the Sonos stream (only the kitchen)
  *   GET  /kitchen/search        looks for Sonos speakers again
  *   GET  /kitchen/select        ?ip=...: use this speaker
+ *   GET  /capture               the capture of the Cast receiver: state, grants, level, activity, media session
+ *   GET  /capture/start         an attempt now, also without the adb grants (the consent dialog then shows on the TV)
+ *   GET  /capture/restart       ends the capture in progress; it starts again by itself
  *   GET  /tv                    the TV's status
  *   GET  /tv/run                runs the wake and screen-off sequence now
  *   GET  /tv/detect             looks for the TV again
@@ -224,6 +227,17 @@ object DebugServer {
                 AppState.kitchen?.select(ip)
                 sendJson(out, 200, JSONObject().put("ok", AppState.kitchen != null).put("ip", ip), head)
             }
+            "/capture" -> sendJson(out, 200, AppState.capture?.statusJson() ?: JSONObject().put("state", "not running"), head)
+            "/capture/start" -> {
+                AppLog.add(TAG, "${req.remote} capture/start")
+                AppState.capture?.startNow()
+                sendJson(out, 200, JSONObject().put("ok", AppState.capture != null), head)
+            }
+            "/capture/restart" -> {
+                AppLog.add(TAG, "${req.remote} capture/restart")
+                AppState.capture?.restart("asked for on the debug page")
+                sendJson(out, 200, JSONObject().put("ok", AppState.capture != null), head)
+            }
             "/tv" -> sendJson(out, 200, AppState.tv?.statusJson() ?: JSONObject().put("state", "not running"), head)
             "/tv/run" -> {
                 AppState.tv?.runNow()
@@ -359,7 +373,7 @@ object DebugServer {
         sb.append("<h1>Whole Flat Audio ").append(escapeHtml(BuildInfo.versionName)).append("</h1><table>")
         renderRows(sb, status, 0)
         sb.append("</table><p>")
-        for (link in listOf("/status.json", "/settings", "/kitchen", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/tv/run")) {
+        for (link in listOf("/status.json", "/settings", "/kitchen", "/capture", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/capture/restart", "/tv/run")) {
             sb.append("<a href=\"").append(link).append("\">").append(link).append("</a>")
         }
         sb.append("</p><h2 style=\"font-size:15px\">Log (last 120 lines)</h2><pre>")

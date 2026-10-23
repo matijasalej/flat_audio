@@ -2,6 +2,7 @@ package io.github.matijasalej.wholeflat
 
 import android.os.SystemClock
 import android.util.Log
+import io.github.matijasalej.wholeflat.capture.CaptureSource
 import io.github.matijasalej.wholeflat.sync.KeyMessage
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -51,8 +52,17 @@ object AppState {
     @Volatile var nativeVersion: String = "-"
     @Volatile var deviceName: String = DEVICE_NAME
 
-    /** Where the music comes from (see source/AudioSource.kt): "librespot" is the only source so far. */
-    @Volatile var source: String = "librespot"
+    /**
+     * Where the music that feeds the speakers comes from (see source/AudioSource.kt): "librespot" (Spotify Connect,
+     * "Whole Flat"), "capture" (what the Cast receiver or the Spotify TV app plays on this box) or "idle".
+     * librespot wins when both play.
+     */
+    @Volatile var source: String = "idle"
+
+    /** The capture source's own state: stopped, idle (running, nothing plays), playing, paused; the track of its media session. */
+    @Volatile var capturePlayback: String = "stopped"
+    @Volatile var captureTitle: String? = null
+    @Volatile var captureArtist: String? = null
 
     /** idle (waiting for a phone to pick the device), connected, lost */
     @Volatile var session: String = "idle"
@@ -77,6 +87,7 @@ object AppState {
     @Volatile var livingRoom: LivingRoom? = null
     @Volatile var kitchen: Kitchen? = null
     @Volatile var tv: TvControl? = null
+    @Volatile var capture: CaptureSource? = null
 
     /**
      * ok, key_refused (Spotify refuses the audio key of this account: the engine holds the track and tries
@@ -195,6 +206,13 @@ object AppState {
         o.put("living_room", livingRoom?.statusJson() ?: JSONObject.NULL)
         o.put("kitchen", kitchen?.statusJson() ?: JSONObject.NULL)
         o.put("tv", tv?.statusJson() ?: JSONObject.NULL)
+        val captureJson = capture?.statusJson()
+        if (captureJson != null) {
+            captureJson.put("playback", capturePlayback)
+            captureJson.put("title", captureTitle ?: JSONObject.NULL)
+            captureJson.put("artist", captureArtist ?: JSONObject.NULL)
+        }
+        o.put("capture", captureJson ?: JSONObject.NULL)
         o.put("settings", Settings.toJson())
         o.put("network", network)
         o.put("last_error", lastError ?: JSONObject.NULL)
@@ -211,13 +229,20 @@ object AppState {
         sb.append("Spotify   : ").append(session)
         sessionUser?.let { sb.append("  as ").append(it) }
         sb.append("\n")
-        sb.append("Playback  : ").append(playback)
-        if (!title.isNullOrEmpty()) {
-            sb.append("  ").append(title)
-            if (!artist.isNullOrEmpty()) sb.append(" - ").append(artist)
+        val captured = source == "capture"
+        sb.append("Source    : ").append(source)
+        if (captured) sb.append("  (what the Cast receiver plays)")
+        sb.append("\n")
+        capture?.let { sb.append("Capture   : ").append(it.summaryText()).append("\n") }
+        val shownTitle = if (captured) captureTitle else title
+        val shownArtist = if (captured) captureArtist else artist
+        sb.append("Playback  : ").append(if (captured) capturePlayback else playback)
+        if (!shownTitle.isNullOrEmpty()) {
+            sb.append("  ").append(shownTitle)
+            if (!shownArtist.isNullOrEmpty()) sb.append(" - ").append(shownArtist)
         }
         sb.append("\n")
-        if (playback != "stopped") {
+        if (playback != "stopped" && !captured) {
             sb.append("Position  : ").append(formatMs(currentPositionMs()))
             if (durationMs > 0) sb.append(" / ").append(formatMs(durationMs))
             sb.append("\n")
@@ -235,6 +260,7 @@ object AppState {
             sb.append("Kitchen   : ").append(k.state.label)
             if (!v.kitchenEnabled) sb.append("  (switched off)")
             sb.append("  offset ").append(v.kitchenOffsetMs).append(" ms")
+            sb.append(k.lagText())
             sb.append("  rejoins ").append(k.rejoins)
             k.lastError?.let { sb.append("\n            last problem: ").append(it) }
             sb.append("\n")

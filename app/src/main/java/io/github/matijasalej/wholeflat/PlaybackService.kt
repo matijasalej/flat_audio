@@ -23,6 +23,10 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.system.Os
 import android.widget.Toast
+import io.github.matijasalej.wholeflat.capture.CaptureFeed
+import io.github.matijasalej.wholeflat.capture.CaptureListener
+import io.github.matijasalej.wholeflat.capture.CaptureSource
+import io.github.matijasalej.wholeflat.capture.SourceArbiter
 import io.github.matijasalej.wholeflat.source.NativeRingControl
 import io.github.matijasalej.wholeflat.source.SourceBridge
 import io.github.matijasalej.wholeflat.source.SourceStatus
@@ -39,7 +43,8 @@ import kotlin.concurrent.thread
  * - the native Spotify Connect engine (librespot, see NativeBridge),
  * - the living room: the AudioTrack pull thread (see LivingRoom),
  * - the event thread: NativeBridge.nextEvent -> status model, log, MediaSession, notification,
- * - the debug HTTP server.
+ * - the debug HTTP server,
+ * - the capture source (the audio of the Cast receiver for the kitchen, see capture/CaptureSource.kt).
  *
  * START_STICKY, and BootReceiver starts it at boot.
  */
@@ -70,6 +75,8 @@ class PlaybackService : Service() {
     private lateinit var livingRoom: LivingRoom
     private lateinit var kitchen: Kitchen
     private lateinit var tv: TvControl
+    private lateinit var captureFeed: CaptureFeed
+    private lateinit var captureSource: CaptureSource
     private var bootThread: Thread? = null
     private var eventThread: Thread? = null
     private val restartTimes = ArrayList<Long>()
@@ -102,9 +109,18 @@ class PlaybackService : Service() {
         tv = TvControl(this)
         livingRoom.coordinator = Conductor(kitchen, tv)
         kitchen.onJoined = { toast("Kitchen connected") }
+        captureFeed = CaptureFeed()
+        captureSource = CaptureSource(this, captureFeed)
+        kitchen.captureFeed = captureFeed
+        kitchen.onSource = { source ->
+            // the Sonos follows the box's music volume while the capture is the source
+            captureSource.setVolumeActive(source == SourceArbiter.Source.CAPTURE)
+            updateNotification()
+        }
         AppState.livingRoom = livingRoom
         AppState.kitchen = kitchen
         AppState.tv = tv
+        AppState.capture = captureSource
         Settings.addListener(settingsListener)
         applyVolume()
         acquireLocks()
@@ -114,6 +130,7 @@ class PlaybackService : Service() {
         kitchen.start()
         tv.start()
         DebugServer.ensureStarted(this)
+        captureSource.start(captureFeed, CaptureEvents())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -144,6 +161,11 @@ class PlaybackService : Service() {
         }
         unregisterNetworkCallback()
         try {
+            if (::captureSource.isInitialized) captureSource.stop()
+        } catch (t: Throwable) {
+            AppLog.error(TAG, "stopping the capture failed", t)
+        }
+        try {
             if (::kitchen.isInitialized) kitchen.stop()
             if (::tv.isInitialized) tv.stop()
         } catch (t: Throwable) {
@@ -157,6 +179,8 @@ class PlaybackService : Service() {
         AppState.livingRoom = null
         AppState.kitchen = null
         AppState.tv = null
+        AppState.capture = null
+        AppState.source = "idle"
         Settings.removeListener(settingsListener)
         try {
             mediaSession?.isActive = false
@@ -437,10 +461,68 @@ class PlaybackService : Service() {
         }
     }
 
+    /**
+     * What the capture source reports: the playing and idle states go to the status, the sound and the
+     * silence to the kitchen, which decides with librespot's state which of the two feeds the speaker.
+     */
+    private inner class CaptureEvents : CaptureListener {
+        override fun onCandidate() = kitchen.captureCandidate()
+
+        override fun onCandidateCancelled() = kitchen.captureCandidateCancelled()
+
+        override fun onIdle() {
+            AppState.capturePlayback = "idle"
+            kitchen.captureIdle()
+            updateNotification()
+        }
+
+        override fun onCaptureRunning(generation: Long) {
+            AppState.capturePlayback = "idle"
+        }
+
+        override fun onCaptureLost(reason: String) {
+            AppState.capturePlayback = "stopped"
+            kitchen.captureLost(reason)
+            updateNotification()
+        }
+
+        override fun onStart() {
+            AppState.capturePlayback = "playing"
+            kitchen.captureStarted()
+            updateNotification()
+        }
+
+        override fun onPause() {
+            AppState.capturePlayback = "paused"
+            updateNotification()
+        }
+
+        override fun onResume() {
+            AppState.capturePlayback = "playing"
+            kitchen.captureStarted()
+            updateNotification()
+        }
+
+        override fun onFlush(positionMs: Long) {}
+
+        override fun onTrack(info: TrackInfo) {
+            AppState.captureTitle = info.title
+            AppState.captureArtist = info.artist
+        }
+
+        /** The box's music volume, as a Connect volume (0.0 to 1.0); the Sonos follows it. */
+        override fun onVolume(volume: Double) {
+            kitchen.onCaptureVolume(Math.round(volume * 65535).toInt())
+        }
+
+        override fun onPosition(positionMs: Long) {}
+    }
+
     // ---- settings and volume -------------------------------------------------------------------
 
     private val settingsListener: (Set<String>) -> Unit = { changed ->
         if (changed.contains("living_fixed_volume")) applyVolume()
+        if (changed.contains("capture_enabled") && ::captureSource.isInitialized) captureSource.wake()
     }
 
     /** The living room plays at full level, unless "living room fixed volume" is off. */
@@ -638,7 +720,10 @@ class PlaybackService : Service() {
                         else -> "waiting for Spotify"
                     },
                 )
-                if (AppState.playback == "playing" || AppState.playback == "paused") {
+                if (AppState.source == "capture") {
+                    sb.append(" | capture ").append(AppState.capturePlayback)
+                    AppState.captureTitle?.let { sb.append(" | ").append(it) }
+                } else if (AppState.playback == "playing" || AppState.playback == "paused") {
                     AppState.title?.let { sb.append(" | ").append(it) }
                 }
                 if (AppState.spotifyState != "ok") sb.append(" | Spotify refuses playback")

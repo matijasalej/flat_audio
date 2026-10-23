@@ -26,7 +26,8 @@ import kotlin.concurrent.thread
 
 /**
  * Plain Views, built in code, for a remote control: a column of focusable rows on the left (toggles,
- * two sliders, the TV address, the test button), the status on the right, refreshed every second.
+ * two sliders, the TV address, the test button), the status on the right (which source plays, the level of
+ * the capture, the kitchen's lag), refreshed every second.
  * Left and right on a slider change its value.
  */
 class MainActivity : Activity() {
@@ -37,6 +38,7 @@ class MainActivity : Activity() {
     private lateinit var startButton: Button
     private lateinit var tvLabel: TextView
     private lateinit var kitchenToggle: Button
+    private lateinit var captureToggle: Button
     private lateinit var fixedVolumeToggle: Button
     private lateinit var screenOffToggle: Button
     private lateinit var wakeToggle: Button
@@ -97,10 +99,12 @@ class MainActivity : Activity() {
         left.addView(startButton)
 
         kitchenToggle = toggle("kitchen_enabled", "Kitchen")
+        captureToggle = toggle("capture_enabled", "Capture of the Cast receiver")
         fixedVolumeToggle = toggle("living_fixed_volume", "Living room fixed volume")
         screenOffToggle = toggle("tv_screen_off", "TV screen off")
         wakeToggle = toggle("tv_wake", "Wake the TV")
         left.addView(kitchenToggle)
+        left.addView(captureToggle)
         left.addView(fixedVolumeToggle)
         left.addView(screenOffToggle)
         left.addView(wakeToggle)
@@ -272,6 +276,7 @@ class MainActivity : Activity() {
     private fun syncControls(force: Boolean = false) {
         val v = Settings.values
         kitchenToggle.text = "Kitchen: " + onOff(v.kitchenEnabled)
+        captureToggle.text = "Capture of the Cast receiver: " + onOff(v.captureEnabled)
         fixedVolumeToggle.text = "Living room fixed volume: " + onOff(v.livingFixedVolume)
         screenOffToggle.text = "TV screen off: " + onOff(v.tvScreenOff)
         wakeToggle.text = "Wake the TV: " + onOff(v.tvWake)

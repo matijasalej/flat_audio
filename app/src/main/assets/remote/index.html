@@ -47,10 +47,27 @@
   .choice[aria-pressed="true"] .what { color: #dbe8ff; }
   .choice[aria-pressed="true"] .tick { border-color: #fff; background: #fff; box-shadow: inset 0 0 0 7px var(--accent); }
   #status { color: var(--muted); font-size: 14px; margin: 12px 4px 0; min-height: 1.35em; }
-  .volume { margin-top: 34px; }
-  .volume .head { display: flex; justify-content: space-between; align-items: baseline; margin: 0 4px 10px; }
-  .volume .head span:first-child { font-size: 15px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
-  #value { font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .volume, .light { margin-top: 34px; }
+  .head { display: flex; justify-content: space-between; align-items: baseline; margin: 0 4px 10px; }
+  .head span:first-child { font-size: 15px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  #value, #lightName { font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  #lightName { font-size: 21px; }
+  .swatches { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px 8px; margin: 4px 0 18px; }
+  .swatch { appearance: none; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 14px; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; gap: 7px; padding: 0; }
+  .swatch .dot { width: 56px; height: 56px; border-radius: 50%; background: var(--c); box-shadow: 0 0 0 2px #0000; transition: box-shadow .15s; }
+  .swatch[data-light="custom"] .dot { background: conic-gradient(#ff4040, #ffd040, #40ff70, #40d0ff, #5050ff, #ff40d0, #ff4040); }
+  .swatch[aria-pressed="true"] { color: var(--text); }
+  .swatch[aria-pressed="true"] .dot { box-shadow: 0 0 0 3px var(--bg), 0 0 0 6px #fff, 0 0 22px var(--c); }
+  .custom { display: grid; gap: 2px; margin: -6px 0 10px; }
+  .custom input[type=range]::-webkit-slider-runnable-track { background: var(--track); height: 14px; border-radius: 7px; }
+  .custom input[type=range]::-moz-range-track { background: var(--track); height: 14px; border-radius: 7px; }
+  .custom input[type=range]::-webkit-slider-thumb { margin-top: -13px; }
+  #hue { --track: linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00); }
+  .off { appearance: none; border: 0; border-radius: 16px; background: var(--card); color: var(--text); font: inherit; font-weight: 600;
+    width: 100%; height: 56px; margin-top: 12px; cursor: pointer; }
+  .off:active { background: var(--card-hi); }
+  .off:disabled { color: var(--muted); cursor: default; }
   .row { display: grid; grid-template-columns: 64px 1fr 64px; gap: 12px; align-items: center; }
   .step {
     appearance: none; border: 0; border-radius: 16px; background: var(--card); color: var(--text);
@@ -93,12 +110,30 @@
       <button class="step" id="up" aria-label="Louder">+</button>
     </div>
   </section>
+
+  <section class="light" aria-label="Mood light">
+    <div class="head"><span>Light</span><span id="lightName">Off</span></div>
+    <div class="swatches" id="swatches" role="group" aria-label="Moods"></div>
+    <div class="custom" id="custom" hidden>
+      <input type="range" id="hue" min="0" max="359" step="1" value="180" aria-label="Colour">
+      <input type="range" id="white" min="0" max="100" step="1" value="85" aria-label="From white to colour">
+    </div>
+    <div class="row">
+      <button class="step" id="dim" aria-label="Dimmer">&minus;</button>
+      <input type="range" id="level" min="10" max="100" step="5" value="80" aria-label="Brightness">
+      <button class="step" id="bright" aria-label="Brighter">+</button>
+    </div>
+    <button class="off" id="lightOff">Light off</button>
+  </section>
 </main>
 <script>
 (function () {
   var $ = function (s) { return document.querySelector(s); };
   var slider = $('#slider'), value = $('#value'), status = $('#status'), notice = $('#notice');
   var dragging = false, lastVolumeSent = 0, online = true;
+  var swatches = $('#swatches'), custom = $('#custom'), hue = $('#hue'), white = $('#white'), level = $('#level'), lightName = $('#lightName');
+  var lightOff = $('#lightOff'), palette = null, labels = { off: 'Off', custom: 'Custom' }, levelDragging = false, colorDragging = false;
+  var lastLevelSent = 0, lastColorSent = 0, customSeen = false;
 
   function get(path) {
     return fetch(path, { cache: 'no-store' }).then(function (r) {
@@ -111,17 +146,81 @@
     var parts = [];
     if (s.tv_text) parts.push(s.tv_text);
     if (s.kitchen_text) parts.push(s.kitchen_text);
+    if (s.light_text) parts.push(s.light_text);
     status.textContent = online ? parts.join(' · ') : 'No connection to the box';
     document.body.classList.toggle('offline', !online);
+  }
+
+  // the colour of hue (degrees) and saturation (0 to 1) at full value, as #rrggbb
+  function hex(h, sat) {
+    var f = function (n) { var k = (n + h / 60) % 6; return 1 - sat * Math.max(0, Math.min(k, 4 - k, 1)); };
+    var to = function (x) { var t = Math.round(x * 255).toString(16); return t.length < 2 ? '0' + t : t; };
+    return '#' + to(f(5)) + to(f(3)) + to(f(1));
+  }
+
+  // #rrggbb as [hue in degrees, saturation 0 to 1]
+  function hueSat(c) {
+    var r = parseInt(c.substr(1, 2), 16) / 255, g = parseInt(c.substr(3, 2), 16) / 255, b = parseInt(c.substr(5, 2), 16) / 255;
+    var max = Math.max(r, g, b), d = max - Math.min(r, g, b), h = 0;
+    if (d) h = max === r ? ((g - b) / d + 6) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    return [Math.round(h * 60) % 360, max ? d / max : 0];
+  }
+
+  function customColor() { return hex(Number(hue.value), Number(white.value) / 100); }
+
+  function paintCustom() {
+    white.style.setProperty('--track', 'linear-gradient(to right, #fff, ' + hex(Number(hue.value), 1) + ')');
+    var dot = swatches.querySelector('[data-light="custom"]');
+    if (dot) dot.style.setProperty('--c', customColor());
+  }
+
+  // the swatches are made once, from the moods the box sends (made again on every poll, they would eat taps)
+  function buildSwatches(list) {
+    palette = list;
+    list.concat([{ key: 'custom', label: 'Custom', color: '#ffffff' }]).forEach(function (m) {
+      labels[m.key] = m.label;
+      var b = document.createElement('button');
+      b.className = 'swatch';
+      b.dataset.light = m.key;
+      b.setAttribute('aria-pressed', 'false');
+      b.style.setProperty('--c', m.color);
+      b.innerHTML = '<span class="dot"></span><span></span>';
+      b.lastChild.textContent = m.label;
+      b.addEventListener('click', function () { pickLight(m.key); });
+      swatches.appendChild(b);
+    });
+    paintCustom();
+  }
+
+  function showLight(key) {
+    swatches.querySelectorAll('.swatch').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.light === key)); });
+    custom.hidden = key !== 'custom';
+    lightName.textContent = labels[key] || 'Off';
+    lightOff.disabled = key === 'off';
   }
 
   function render(s) {
     online = true;
     var lyrics = s.mode === 'lyrics';
     notice.hidden = !lyrics;
+    // a mood chosen after the display has the TV (the last tap wins): no display shows as chosen then
+    var lampFirst = s.light && s.light !== 'off' && s.light_first;
     document.querySelectorAll('.choice').forEach(function (b) {
-      b.setAttribute('aria-pressed', String(!lyrics && b.dataset.display === s.display));
+      b.setAttribute('aria-pressed', String(!lyrics && !lampFirst && b.dataset.display === s.display));
     });
+    if (!palette && s.palette) buildSwatches(s.palette);
+    var listen = $('[data-display="listen"] .what');
+    listen.textContent = s.light && s.light !== 'off' ? 'Screen off, ' + (labels[s.light] || 'mood') + ' light' : 'Screen off, lights off';
+    if (s.light) showLight(s.light);
+    if (!levelDragging && typeof s.light_level === 'number') level.value = s.light_level;
+    // the custom sliders take the stored colour at first, and later only while another light is on (else they are the truth)
+    if (!colorDragging && s.light_color && (!customSeen || s.light !== 'custom')) {
+      customSeen = true;
+      var hs = hueSat(s.light_color);
+      hue.value = hs[0];
+      white.value = Math.round(hs[1] * 100);
+      paintCustom();
+    }
     if (!dragging && typeof s.volume === 'number') {
       slider.value = s.volume;
       value.textContent = s.volume;
@@ -164,6 +263,49 @@
   });
   $('#down').addEventListener('click', function () { dragging = false; sendVolume('-'); });
   $('#up').addEventListener('click', function () { dragging = false; sendVolume('+'); });
+
+  function sendLight(query) {
+    return get('/remote/action?' + query).then(render).catch(function () { online = false; say({}); });
+  }
+
+  function pickLight(key) {
+    showLight(key); // the answer is the new state: the swatch changes at once
+    sendLight('light=' + encodeURIComponent(key));
+  }
+
+  lightOff.addEventListener('click', function () { pickLight('off'); });
+
+  // the brightness and the custom colour follow the finger, not more than five times a second, like the volume
+  level.addEventListener('input', function () {
+    levelDragging = true;
+    var now = Date.now();
+    if (now - lastLevelSent > 200) {
+      lastLevelSent = now;
+      sendLight('level=' + level.value);
+    }
+  });
+  level.addEventListener('change', function () {
+    lastLevelSent = Date.now();
+    sendLight('level=' + level.value).then(function () { levelDragging = false; });
+  });
+  $('#dim').addEventListener('click', function () { levelDragging = false; sendLight('level=-'); });
+  $('#bright').addEventListener('click', function () { levelDragging = false; sendLight('level=%2B'); });
+
+  [hue, white].forEach(function (input) {
+    input.addEventListener('input', function () {
+      colorDragging = true;
+      paintCustom();
+      var now = Date.now();
+      if (now - lastColorSent > 200) {
+        lastColorSent = now;
+        sendLight('color=' + encodeURIComponent(customColor()));
+      }
+    });
+    input.addEventListener('change', function () {
+      lastColorSent = Date.now();
+      sendLight('color=' + encodeURIComponent(customColor())).then(function () { colorDragging = false; });
+    });
+  });
 
   poll();
   setInterval(poll, 1500);

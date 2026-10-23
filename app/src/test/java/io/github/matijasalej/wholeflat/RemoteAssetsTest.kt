@@ -9,8 +9,8 @@ import java.io.File
 
 /**
  * The phone page and what the home screen of the phone needs: the page links the manifest and the icon and says that it is an app, the
- * manifest says where it starts and has its icons, and the icons are PNGs of the sizes that are named. The page has the three displays and the
- * volume of the kitchen and nothing else (no mode buttons, no fine sync: that is on the debug page).
+ * manifest says where it starts and has its icons, and the icons are PNGs of the sizes that are named. The page has the three displays, the
+ * volume of the kitchen and the mood light, and nothing else (no mode buttons, no fine sync: that is on the debug page).
  */
 class RemoteAssetsTest {
     private fun dir(): File {
@@ -41,7 +41,7 @@ class RemoteAssetsTest {
     }
 
     @Test
-    fun thePageHasTheThreeDisplaysAndTheKitchenVolumeAndNothingElse() {
+    fun thePageHasTheThreeDisplaysTheKitchenVolumeAndTheMoodLightAndNothingElse() {
         val html = text("index.html")
         for (d in listOf("listen", "ambilight", "screen")) assertTrue(d, html.contains("""data-display="$d""""))
         assertTrue(html.contains("Listening"))
@@ -49,6 +49,13 @@ class RemoteAssetsTest {
         assertTrue(html.contains("""type="range""""))
         assertTrue(html.contains("/remote/action?display="))
         assertTrue(html.contains("/remote/action?volume="))
+        // the mood light: the moods come from the state of the box (and are made once), a custom colour, the brightness, off
+        assertTrue(html.contains("""id="swatches""""))
+        assertTrue(html.contains("s.palette"))
+        assertTrue(html.contains("'light='"))
+        assertTrue(html.contains("'color='"))
+        assertTrue(html.contains("'level='"))
+        assertTrue(html.contains("""id="lightOff""""))
         // no buttons for the mode, no fine sync, no lyrics: they are not on this page
         assertFalse(html.contains("data-mode"))
         assertFalse(html.contains("mode=synced"))
@@ -56,7 +63,8 @@ class RemoteAssetsTest {
         assertFalse(html.contains("tv_extra"))
         assertFalse(html.contains("lyrics="))
         assertEquals(3, Regex("""class="choice"""").findAll(html).count())
-        assertEquals(1, Regex("""type="range"""").findAll(html).count())
+        // the volume of the kitchen, the brightness, and the two sliders of the custom colour
+        assertEquals(4, Regex("""type="range"""").findAll(html).count())
     }
 
     @Test

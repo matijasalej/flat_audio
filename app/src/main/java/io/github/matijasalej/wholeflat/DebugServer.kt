@@ -53,8 +53,9 @@ import kotlin.concurrent.thread
  *   GET  /tv/last-sessions      the last 10 streams to the TV: every connection with its statistics
  *   GET  /tv/grab               has the TV play the capture now (the mode manager may give it back; set mode=lyrics to test alone)
  *   GET  /tv/release            gives the TV back (it returns to HDMI)
- *   GET  /remote                the phone page: the three displays of the TV (Listening, Ambilight, Screen + Ambilight) and the kitchen volume;
- *                               /remote/state.json its state, /remote/action?display=screen&volume=%2B the presses, /remote/manifest.webmanifest
+ *   GET  /remote                the phone page: the three displays of the TV (Listening, Ambilight, Screen + Ambilight), the kitchen volume and
+ *                               the mood light; /remote/state.json its state, /remote/action?display=screen&volume=%2B&light=cozy&level=60 the
+ *                               presses, /remote/manifest.webmanifest
  *                               and the icons for the home screen
  *   GET  /tune                  the fine tuning of the debug page: ?tv_extra=%2B|-, ?fine=%2B|- (the kitchen against the TV), ?lyrics=%2B|-, ?display=...
  *   GET  /tv/reanchor           restarts the TV's stream now (with its warm-up); `?at=boundary` waits for the next song boundary

@@ -42,7 +42,16 @@ class AmbilightControlTest {
         }
     }
 
-    private fun control(tv: FakeTv, store: MemoryStore) = AmbilightControl(tv, store, { "FOLLOW_AUDIO" }, { "ENERGY_ADAPTIVE_BRIGHTNESS" })
+    private fun control(tv: FakeTv, store: MemoryStore) = AmbilightControl(tv, store)
+
+    /** The style of the music. */
+    private val audio = AmbilightControl.styleJson("FOLLOW_AUDIO", "ENERGY_ADAPTIVE_BRIGHTNESS")
+
+    /** The mood light, Ocean at 80 %. */
+    private val ocean = MoodLight.json("#2f80ff", 80)
+
+    /** The lights for the music (what entering Synced mode was before there was a mood light). */
+    private fun AmbilightControl.enter() = hold(audio)
 
     @Test
     fun enteringSwitchesThePowerOnFirstAndThenSetsTheStyle() {
@@ -169,17 +178,74 @@ class AmbilightControlTest {
     }
 
     @Test
-    fun theStyleCanBeChangedWhileInSyncedMode() {
-        var style = "FOLLOW_AUDIO"
+    fun theStyleCanBeChangedWhileTheLightsAreHeld() {
         val tv = FakeTv()
-        val c = AmbilightControl(tv, MemoryStore(), { style }, { "ENERGY_ADAPTIVE_BRIGHTNESS" })
-        c.restyle() // not in Synced mode: nothing
-        assertTrue(tv.calls.isEmpty())
+        val c = control(tv, MemoryStore())
         c.enter()
         tv.calls.clear()
-        style = "FOLLOW_VIDEO"
-        c.restyle()
+        c.hold(AmbilightControl.styleJson("FOLLOW_VIDEO", "STANDARD"))
         assertEquals(listOf("config FOLLOW_VIDEO"), tv.calls)
+    }
+
+    @Test
+    fun fromTheMusicToTheMoodLightIsOneConfigurationAndTheStateBeforeBothIsKept() {
+        val tv = FakeTv(power = "On", config = """{"styleName":"FOLLOW_COLOR","isExpert":false,"menuSetting":"HOT_LAVA"}""")
+        val store = MemoryStore()
+        val c = control(tv, store)
+        c.hold(audio)
+        tv.calls.clear()
+        c.hold(ocean)
+        assertEquals(listOf("config FOLLOW_COLOR"), tv.calls)
+        assertEquals(ocean, c.held)
+        // a brighter or other colour is again only the configuration
+        tv.calls.clear()
+        c.hold(MoodLight.json("#2f80ff", 40))
+        assertEquals(listOf("config FOLLOW_COLOR"), tv.calls)
+        // what is put back is Hot Lava, from before the music
+        assertEquals("FOLLOW_COLOR", AmbilightControl.styleName(store.saved!!.config))
+        tv.calls.clear()
+        c.leave()
+        assertEquals(listOf("power On", "config FOLLOW_COLOR"), tv.calls)
+        assertEquals("HOT_LAVA", JSONObject(tv.config!!).getString("menuSetting"))
+        assertNull(store.saved)
+    }
+
+    @Test
+    fun theSameConfigurationIsNotSentAgainUnlessForced() {
+        val tv = FakeTv()
+        val c = control(tv, MemoryStore())
+        c.hold(ocean)
+        tv.calls.clear()
+        c.hold(ocean)
+        assertTrue(tv.calls.isEmpty())
+        // forced (a tap on the same mood, the TV back after a time away): the power and the configuration again
+        c.hold(ocean, force = true)
+        assertEquals(listOf("power On", "config FOLLOW_COLOR"), tv.calls)
+    }
+
+    @Test
+    fun aConfigurationTheTvRefusedIsSentAgainWithThePowerFirst() {
+        val tv = FakeTv()
+        val store = MemoryStore()
+        val c = control(tv, store)
+        tv.refuse = true
+        assertTrue(c.hold(ocean))
+        assertNull(c.held)
+        assertFalse(c.lastActionOk)
+        assertTrue("the state before is remembered all the same", store.saved != null)
+        tv.refuse = false
+        tv.calls.clear()
+        c.hold(ocean)
+        assertEquals(listOf("power On", "config FOLLOW_COLOR"), tv.calls)
+        assertEquals(ocean, c.held)
+        assertTrue(c.lastActionOk)
+    }
+
+    @Test
+    fun aDescriptionNamesTheStyleOrTheColour() {
+        assertEquals("FOLLOW_AUDIO ENERGY_ADAPTIVE_BRIGHTNESS", AmbilightControl.describe(audio))
+        assertEquals("colour h153 s208 b204", AmbilightControl.describe(ocean))
+        assertEquals("?", AmbilightControl.describe("not json"))
     }
 
     @Test

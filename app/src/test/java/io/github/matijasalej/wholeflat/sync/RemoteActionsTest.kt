@@ -85,9 +85,49 @@ class RemoteActionsTest {
     fun severalPressesInOneRequestAreAllTakenAndUnknownParametersAreIgnored() {
         val r = parse("display" to "screen", "fine" to "+", "t" to "123456", "volume" to "+", "mode" to "lyrics", "karaoke" to "on")
         // the page's own parameters, and keys the page does not have any more (the mode: it is Synced, whatever the display), are not taken
-        assertEquals(setOf("display", "mode", "kitchen_offset_ms", "kitchen_volume"), r.updates.keys().asSequence().toSet())
+        assertEquals(setOf("display", "mode", "light_first", "kitchen_offset_ms", "kitchen_volume"), r.updates.keys().asSequence().toSet())
         assertEquals("synced", r.updates.getString("mode"))
         assertTrue(r.errors.isEmpty())
+    }
+
+    @Test
+    fun aMoodTakesTheTvAndADisplayGivesItBackEvenTheSameDisplay() {
+        val mood = parse("light" to "Ocean")
+        assertEquals("ocean", mood.updates.getString("light"))
+        assertEquals(true, mood.updates.getBoolean("light_first"))
+        assertEquals(listOf("light Ocean"), mood.notes)
+        // the display that was already chosen hands the TV back to the music all the same
+        assertEquals(false, parse("display" to "listen").updates.getBoolean("light_first"))
+        // off is not a tap on a mood: who has the TV is left as it was
+        val off = parse("light" to "off")
+        assertEquals("off", off.updates.getString("light"))
+        assertFalse(off.updates.has("light_first"))
+        assertEquals(listOf("light: disco"), parse("light" to "disco").errors)
+    }
+
+    @Test
+    fun aColourIsTheCustomMoodLight() {
+        val r = parse("color" to "#FF8800")
+        assertEquals("custom", r.updates.getString("light"))
+        assertEquals("#ff8800", r.updates.getString("light_color"))
+        assertEquals(true, r.updates.getBoolean("light_first"))
+        assertEquals("custom", parse("light" to "custom").updates.getString("light"))
+        val bad = parse("color" to "orange")
+        assertEquals(listOf("color: orange"), bad.errors)
+        assertEquals(0, bad.updates.length())
+    }
+
+    @Test
+    fun theBrightnessMovesTenPercentAPressAndStaysBetweenTenAndAHundred() {
+        val at = RemoteActions.Current("listen", true, 40, 15, 0, 490, lightLevel = 60)
+        assertEquals(70, parse("level" to "+", current = at).updates.getInt("light_level"))
+        assertEquals(50, parse("level" to "-", current = at).updates.getInt("light_level"))
+        assertEquals(35, parse("level" to "35", current = at).updates.getInt("light_level"))
+        assertEquals(100, parse("level" to "+90", current = at).updates.getInt("light_level"))
+        assertEquals(10, parse("level" to "0", current = at).updates.getInt("light_level"))
+        assertEquals(listOf("level: dim"), parse("level" to "dim", current = at).errors)
+        // the brightness alone does not take the TV
+        assertFalse(parse("level" to "+", current = at).updates.has("light_first"))
     }
 
     @Test

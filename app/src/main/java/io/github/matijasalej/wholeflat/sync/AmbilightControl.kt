@@ -23,21 +23,21 @@ interface AmbilightStore {
 }
 
 /**
- * The Ambilight of the TV during Synced mode (the lights follow the audio, the TV being the karaoke screen of the flat). Entering
- * Synced remembers the power and the configuration, switches the power on and **then** sets the style (the other way round the style
- * is overridden by the style that the power-on restores: seen on the TV); leaving puts back what was remembered, and if that was
- * "off" (the power was Off or the style was "OFF") it just switches the power off. The remembered state is stored before anything is
- * changed, so that an app that crashed in Synced mode puts the lights back at its next start ([recover]) instead of leaving them on.
+ * The Ambilight of the TV while this app has it: for the music (the lights follow the audio, the TV being the karaoke screen of the flat)
+ * or for the mood light (one colour, see [MoodLight]). The first [hold] remembers the power and the configuration, switches the power on and
+ * **then** sets the configuration (the other way round the style is overridden by the style that the power-on restores: seen on the TV);
+ * later holds only send a configuration that changed, so going from the music to the mood light keeps what was remembered before either.
+ * [leave] puts back what was remembered, and if that was "off" (the power was Off or the style was "OFF") it just switches the power off.
+ * The remembered state is stored before anything is changed, so that an app that crashed while it had the lights puts them back at its
+ * next start ([recover]) instead of leaving them on.
  *
  * Plain Kotlin behind two small interfaces.
  */
 class AmbilightControl(
     private val api: AmbilightApi,
     private val store: AmbilightStore,
-    private val style: () -> String,
-    private val menuSetting: () -> String,
 ) {
-    /** The state the lights were in before Synced mode: the power ("On" / "Off") and the raw configuration JSON. */
+    /** The state the lights were in before this app took them: the power ("On" / "Off") and the raw configuration JSON. */
     class Saved(val power: String, val config: String)
 
     /** One call of the restore, in order. */
@@ -51,7 +51,12 @@ class AmbilightControl(
     var entered = false
         private set
 
-    /** What was remembered at the last entry (still set while in Synced mode, or after a failed restore), for the status. */
+    /** The configuration the TV took at the last hold; null before it took one (or after it refused one, which is then sent again). */
+    @Volatile
+    var held: String? = null
+        private set
+
+    /** What was remembered at the first hold (still set while the lights are held, or after a failed restore), for the status. */
     @Volatile
     var remembered: Saved? = store.read()
         private set
@@ -64,34 +69,47 @@ class AmbilightControl(
     var lastActionOk = true
         private set
 
-    /** Entering Synced mode: remember, power on, then the style. False if the TV did not answer (nothing was changed or remembered). */
+    /**
+     * The lights are wanted as [json]: the first time, remember and power on, then the configuration; after that the configuration only if it
+     * changed, or anyway with [force] (the power too then, and after a configuration the TV refused). False if the TV did not answer at the
+     * first hold (nothing was changed or remembered).
+     */
     @Synchronized
-    fun enter(): Boolean {
-        if (entered) return true
-        val power = api.power()
-        val config = api.config()
-        if (power == null || config == null) {
-            note("the TV's Ambilight does not answer, left alone", false)
-            return false
+    fun hold(json: String, force: Boolean = false): Boolean {
+        if (entered && json == held && !force) return true
+        var was = ""
+        if (!entered) {
+            val power = api.power()
+            val config = api.config()
+            if (power == null || config == null) {
+                note("the TV's Ambilight does not answer, left alone", false)
+                return false
+            }
+            val saved = remembered ?: Saved(power, config) // a state that an earlier crash left behind is the one to put back
+            remembered = saved
+            store.write(saved)
+            entered = true
+            was = " (was ${saved.power}, ${styleName(saved.config)})"
         }
-        val saved = remembered ?: Saved(power, config) // a state that an earlier crash left behind is the one to put back
-        remembered = saved
-        store.write(saved)
-        val on = api.setPower(true)
-        val set = api.setConfig(styleJson())
-        entered = true
-        note("Ambilight on (was ${saved.power}, ${styleName(saved.config)}), power ${ok(on)}, style ${style()} ${ok(set)}", on && set)
+        // the power before the configuration, whenever the TV may not have taken it: at the first hold, after a refusal, when forced
+        val powerToo = held == null || force
+        val on = if (powerToo) api.setPower(true) else true
+        val set = api.setConfig(json)
+        held = if (on && set) json else null
+        val power = if (powerToo) "power ${ok(on)}, " else ""
+        note("Ambilight ${describe(json)}$was: $power${ok(set)}", on && set)
         return true
     }
 
-    /** Leaving Synced mode (or the app stopping): the remembered state is put back. */
+    /** The lights are not wanted any more (or the app stops): the remembered state is put back. */
     @Synchronized
     fun leave() {
         val saved = remembered
         if (!entered && saved == null) return
         entered = false
+        held = null
         if (saved == null) return
-        restore(saved, "leaving Synced mode")
+        restore(saved, "now that they are not wanted")
     }
 
     /** At the start of the app: lights that a crash left on are put back. */
@@ -100,14 +118,6 @@ class AmbilightControl(
         val saved = remembered ?: return
         if (entered) return
         restore(saved, "after a crash")
-    }
-
-    /** The style setting changed while in Synced mode. */
-    @Synchronized
-    fun restyle() {
-        if (!entered) return
-        val set = api.setConfig(styleJson())
-        note("Ambilight style ${style()} ${ok(set)}", set)
     }
 
     private fun restore(saved: Saved, why: String) {
@@ -123,14 +133,6 @@ class AmbilightControl(
             remembered = null
         }
         note("Ambilight put back $why (power ${saved.power}, ${styleName(saved.config)}): ${ok(allOk)}", allOk)
-    }
-
-    private fun styleJson(): String {
-        val o = JSONObject()
-        o.put("styleName", style())
-        o.put("isExpert", false)
-        o.put("menuSetting", menuSetting())
-        return o.toString()
     }
 
     private fun note(text: String, ok: Boolean) {
@@ -150,11 +152,33 @@ class AmbilightControl(
             return if (off) listOf(Step.Power(false)) else listOf(Step.Power(true), Step.Config(saved.config))
         }
 
+        /** The configuration of one of the TV's own styles (the music's: `FOLLOW_AUDIO` with its `menuSetting`). */
+        fun styleJson(style: String, menuSetting: String): String {
+            val o = JSONObject()
+            o.put("styleName", style)
+            o.put("isExpert", false)
+            o.put("menuSetting", menuSetting)
+            return o.toString()
+        }
+
         /** The `styleName` of a configuration JSON, "" if there is none. */
         fun styleName(config: String): String = try {
             JSONObject(config).optString("styleName", "")
         } catch (e: Exception) {
             ""
+        }
+
+        /** A configuration in a few words for the log: the style and its setting, or the colour of the mood light. */
+        fun describe(config: String): String = try {
+            val o = JSONObject(config)
+            val color = o.optJSONObject("colorSettings")?.optJSONObject("color")
+            if (color != null) {
+                "colour h${color.optInt("hue")} s${color.optInt("saturation")} b${color.optInt("brightness")}"
+            } else {
+                listOf(o.optString("styleName", ""), o.optString("menuSetting", "")).filter { it.isNotEmpty() }.joinToString(" ")
+            }
+        } catch (e: Exception) {
+            "?"
         }
     }
 }

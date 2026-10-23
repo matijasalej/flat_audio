@@ -68,6 +68,13 @@ class SettingsValues(
     /** The Ambilight style in Synced mode (JointSpace `styleName`) and its `menuSetting`. */
     val ambilightStyle: String,
     val ambilightMenu: String,
+    /** The mood light (the Ambilight as a lamp, see [MoodLight]): "off", the key of a mood, or "custom" with [lightColor] ("#rrggbb"). */
+    val light: String,
+    val lightColor: String,
+    /** How bright the mood light is, in percent (10 to 100). */
+    val lightLevel: Int,
+    /** The mood light was chosen after the display, so it has the TV also while the music plays (the last tap wins). */
+    val lightFirst: Boolean,
 )
 
 class SettingsModel {
@@ -101,13 +108,17 @@ class SettingsModel {
     var display = Display.DEFAULT.key
     var ambilightStyle = DEFAULT_AMBILIGHT_STYLE
     var ambilightMenu = DEFAULT_AMBILIGHT_MENU
+    var light = MoodLight.OFF
+    var lightColor = MoodLight.DEFAULT_COLOR
+    var lightLevel = MoodLight.DEFAULT_LEVEL
+    var lightFirst = false
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
         captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPrerollMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
-        ambilightStyle, ambilightMenu,
+        ambilightStyle, ambilightMenu, light, lightColor, lightLevel, lightFirst,
     )
 
     fun toJson(): JSONObject {
@@ -142,6 +153,10 @@ class SettingsModel {
         o.put(DISPLAY, display)
         o.put(AMBILIGHT_STYLE, ambilightStyle)
         o.put(AMBILIGHT_MENU, ambilightMenu)
+        o.put(LIGHT, light)
+        o.put(LIGHT_COLOR, lightColor)
+        o.put(LIGHT_LEVEL, lightLevel)
+        o.put(LIGHT_FIRST, lightFirst)
         return o
     }
 
@@ -282,6 +297,23 @@ class SettingsModel {
             val v = json.get(AMBILIGHT_MENU).toString().trim().uppercase()
             if (STYLE_NAME.matches(v) && v != ambilightMenu) { ambilightMenu = v; changed.add(AMBILIGHT_MENU) }
         }
+        // the mood light: "off", "custom" or a mood; anything else is ignored
+        val newLight = if (json.has(LIGHT)) MoodLight.settingOf(json.get(LIGHT).toString()) else null
+        if (newLight != null && newLight != light) { light = newLight; changed.add(LIGHT) }
+        val newColor = if (json.has(LIGHT_COLOR)) MoodLight.parseColor(json.get(LIGHT_COLOR).toString()) else null
+        if (newColor != null && newColor != lightColor) { lightColor = newColor; changed.add(LIGHT_COLOR) }
+        if (json.has(LIGHT_LEVEL)) {
+            val v = number(json.get(LIGHT_LEVEL))?.coerceIn(MoodLight.MIN_LEVEL, MoodLight.MAX_LEVEL)
+            if (v != null && v != lightLevel) { lightLevel = v; changed.add(LIGHT_LEVEL) }
+        }
+        // the last tap wins: a mood (or a colour) takes the TV from the music, a display gives it back; said outright, it is what is said
+        val first = when {
+            json.has(LIGHT_FIRST) -> bool(json.get(LIGHT_FIRST))
+            (newLight != null && newLight != MoodLight.OFF) || newColor != null -> true
+            json.has(DISPLAY) && Display.of(json.get(DISPLAY).toString()) != null -> false
+            else -> null
+        }
+        if (first != null && first != lightFirst) { lightFirst = first; changed.add(LIGHT_FIRST) }
         return changed
     }
 
@@ -335,6 +367,10 @@ class SettingsModel {
         const val DISPLAY = "display"
         const val AMBILIGHT_STYLE = "ambilight_style"
         const val AMBILIGHT_MENU = "ambilight_menu"
+        const val LIGHT = "light"
+        const val LIGHT_COLOR = "light_color"
+        const val LIGHT_LEVEL = "light_level"
+        const val LIGHT_FIRST = "light_first"
 
         /** The offset is limited to what a Mac calibration could plausibly ask for. */
         const val MAX_OFFSET_MS = 2_000

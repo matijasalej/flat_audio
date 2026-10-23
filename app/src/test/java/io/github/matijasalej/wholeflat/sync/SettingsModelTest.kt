@@ -40,6 +40,10 @@ class SettingsModelTest {
         assertEquals("listen", o.getString("display"))
         assertEquals("FOLLOW_AUDIO", o.getString("ambilight_style"))
         assertEquals("ENERGY_ADAPTIVE_BRIGHTNESS", o.getString("ambilight_menu"))
+        assertEquals("off", o.getString("light"))
+        assertEquals(MoodLight.DEFAULT_COLOR, o.getString("light_color"))
+        assertEquals(80, o.getInt("light_level"))
+        assertEquals(false, o.getBoolean("light_first"))
     }
 
     @Test
@@ -52,7 +56,7 @@ class SettingsModelTest {
                 "capture_enabled", "capture_living_latency_ms", "capture_lead_ms", "kitchen_target_ms", "kitchen_floor_ms",
                 "kitchen_volume", "capture_volume_mirror", "kitchen_format", "kitchen_flac_block",
                 "mode", "tv_latency_ms", "tv_format", "tv_burst_ms", "tv_extra_ms", "tv_preroll_ms", "tv_pcr_lead_ms", "tv_reanchor_min", "tv_render", "tv_video", "lyrics_offset_ms", "display",
-                "ambilight_style", "ambilight_menu",
+                "ambilight_style", "ambilight_menu", "light", "light_color", "light_level", "light_first",
             ),
             keys,
         )
@@ -137,6 +141,60 @@ class SettingsModelTest {
         // not a style name: ignored
         assertTrue(m.applyJson(JSONObject("""{"ambilight_style": "rain bow", "ambilight_menu": ""}""")).isEmpty())
         assertEquals("FOLLOW_VIDEO", m.ambilightStyle)
+    }
+
+    @Test
+    fun theMoodLightIsOffCustomOrAMoodWithAColourAndALevel() {
+        val m = SettingsModel()
+        assertEquals(setOf("light", "light_first"), m.applyJson(JSONObject("""{"light": " Ocean "}""")))
+        assertEquals("ocean", m.values().light)
+        assertEquals(true, m.values().lightFirst)
+        assertTrue(m.applyJson(JSONObject("""{"light": "disco"}""")).isEmpty())
+        assertEquals(setOf("light_color", "light"), m.applyJson(JSONObject("""{"light_color": "FF8800", "light": "custom"}""")))
+        assertEquals("#ff8800", m.lightColor)
+        assertTrue(m.applyJson(JSONObject("""{"light_color": "orange"}""")).isEmpty())
+        assertEquals(setOf("light_level"), m.applyJson(JSONObject("""{"light_level": 55}""")))
+        m.applyJson(JSONObject("""{"light_level": 0}"""))
+        assertEquals(MoodLight.MIN_LEVEL, m.lightLevel)
+        m.applyJson(JSONObject("""{"light_level": 900}"""))
+        assertEquals(MoodLight.MAX_LEVEL, m.values().lightLevel)
+        assertEquals(setOf("light"), m.applyJson(JSONObject("""{"light": "off"}""")))
+        assertEquals("off", m.light)
+    }
+
+    @Test
+    fun theLastTapWinsBetweenTheDisplayAndTheMoodLightWhicheverWayItIsSet() {
+        val m = SettingsModel()
+        m.applyJson(JSONObject("""{"light": "cozy"}"""))
+        assertTrue(m.lightFirst)
+        // a display, also from /settings or the button of the TV app, gives the TV back to the music, even when it is the same display
+        assertEquals(setOf("light_first"), m.applyJson(JSONObject("""{"display": "listen"}""")))
+        assertFalse(m.lightFirst)
+        // a mood again takes it, also the same mood; a display that is not one changes nothing
+        assertEquals(setOf("light_first"), m.applyJson(JSONObject("""{"light": "cozy"}""")))
+        assertTrue(m.applyJson(JSONObject("""{"display": "party"}""")).isEmpty())
+        assertTrue(m.lightFirst)
+        // off and the level do not move it; said outright, it is what is said (the stored settings at a start)
+        assertTrue(m.applyJson(JSONObject("""{"light_level": 80}""")).isEmpty())
+        m.applyJson(JSONObject("""{"light": "off"}"""))
+        assertTrue(m.lightFirst)
+        assertEquals(setOf("display", "light_first"), m.applyJson(JSONObject("""{"display": "screen", "light_first": false}""")))
+        assertTrue(m.applyJson(JSONObject("""{"light": "ocean", "light_first": false}""")).contains("light"))
+        assertFalse(m.lightFirst)
+    }
+
+    @Test
+    fun theMoodLightSurvivesAStoreAndAReload() {
+        val m = SettingsModel()
+        m.applyJson(JSONObject("""{"light": "custom", "light_color": "#123abc", "light_level": 40}"""))
+        m.applyJson(JSONObject("""{"display": "ambilight"}"""))
+        val reloaded = SettingsModel()
+        reloaded.applyJson(m.toJson())
+        assertEquals("custom", reloaded.light)
+        assertEquals("#123abc", reloaded.lightColor)
+        assertEquals(40, reloaded.lightLevel)
+        assertEquals("the stored order of the taps, not the display's rule", false, reloaded.lightFirst)
+        assertEquals("ambilight", reloaded.display)
     }
 
     @Test

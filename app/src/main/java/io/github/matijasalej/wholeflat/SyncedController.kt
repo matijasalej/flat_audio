@@ -1,7 +1,11 @@
 package io.github.matijasalej.wholeflat
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.os.Build
 import android.os.SystemClock
 import io.github.matijasalej.wholeflat.sync.AmbilightControl
 import io.github.matijasalej.wholeflat.sync.AmbilightStore
@@ -10,6 +14,7 @@ import io.github.matijasalej.wholeflat.sync.Foreground
 import io.github.matijasalej.wholeflat.sync.ForegroundPolicy
 import io.github.matijasalej.wholeflat.sync.Mode
 import io.github.matijasalej.wholeflat.sync.ModeManager
+import io.github.matijasalej.wholeflat.sync.MoodLight
 import io.github.matijasalej.wholeflat.sync.TvPresentation
 import org.json.JSONObject
 import java.util.concurrent.ScheduledThreadPoolExecutor
@@ -37,6 +42,12 @@ import java.util.concurrent.TimeUnit
  * afterwards. A screen that this app switched off is switched on again when the TV stops playing our stream. Both
  * the remembered state of the lights and the fact that the screen was switched off are kept in the preferences, so that an app that
  * crashed does not leave the TV dark or lit for ever.
+ *
+ * **The mood light** (the setting `light`, chosen on the phone page, see [MoodLight]) is the Ambilight as a lamp of one colour. It has the
+ * lights and the screen, which it switches off, whenever the music does not, and also while the music plays if it was chosen after the
+ * display (the last tap wins, `light_first`). The picture is left on while someone uses the box (the screen saver was woken with the
+ * remote, a video app was left, the picture was switched on at the TV) or watches a video app. A tap on it wakes a TV in standby; a TV
+ * put in standby while it is on ends it. It stays on until it is switched off: the ten-minute reset is the display's, not the light's.
  */
 class SyncedController(
     private val context: Context,
@@ -63,8 +74,6 @@ class SyncedController(
                 e.apply()
             }
         },
-        { Settings.values.ambilightStyle },
-        { Settings.values.ambilightMenu },
     )
 
     @Volatile
@@ -79,9 +88,54 @@ class SyncedController(
     private var recovered = false
     private var recoverTries = 0
     private var lastRefreshMs = 0L
-    private var lastDisplay = Display.DEFAULT
-    private var lastPresentedMode = Mode.SYNCED
-    private var lastPresentedPlaying = false
+
+    /** What [present] carried out last (the display, the mode, the music, the screen and the lights wanted): a change is carried out at once. */
+    private var lastPresented = ""
+
+    /** What [present] wanted last, for the recovery after a crash, the phone page and the status. */
+    @Volatile
+    private var lastWant: TvPresentation.Want? = null
+
+    /** The mood light switched the screen off (not the music), and when: a picture that comes on by other means is then left on. */
+    private var lampDarkened = false
+    private var screenOffAtMs = 0L
+
+    /** Someone uses the box (woke its screen saver, left a video app, switched the picture on): the mood light leaves the picture on. */
+    @Volatile
+    private var atBox = true
+    private var watchingNow = false
+    private var lastWatchMs = 0L
+    private var lampWasOn = false
+
+    /** The next hold is sent whole, the power and all (a tap on the mood light, the TV back after a time away). */
+    @Volatile
+    private var forceHold = false
+
+    /** A tap on the mood light may wake a TV in standby; until [wakingUntilMs] its standby is that of the wake, not the user's. */
+    @Volatile
+    private var lampWake = false
+    private var wakingUntilMs = 0L
+
+    /** The TV did not answer, or was not on, at the last look (since [awaySinceMs]): lights are not put back until it is on again. */
+    @Volatile
+    private var tvAway = false
+    private var awaySinceMs = 0L
+    private var awayUntilMs = 0L
+
+    @Volatile
+    private var currentTvPower: String? = null
+
+    /** The screen saver of the box starts (nobody is at it) and stops (someone came back with the remote). */
+    private val dreams = object : BroadcastReceiver() {
+        override fun onReceive(c: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_DREAMING_STARTED -> atBox = false
+                Intent.ACTION_DREAMING_STOPPED -> atBox = true
+                else -> return
+            }
+            tickSoon()
+        }
+    }
 
     /** The lights as the TV reports them, read now and then for the status. */
     @Volatile
@@ -110,7 +164,6 @@ class SyncedController(
     private val settingsListener: (Set<String>) -> Unit = { changed ->
         if (changed.any { it in WATCHED }) {
             if (changed.contains("tv_latency_ms") || changed.contains("tv_format") || changed.any { it.startsWith("kitchen_") }) renderer.settingsChanged()
-            if (changed.contains("ambilight_style") || changed.contains("ambilight_menu")) post { ambilight.restyle() }
             tickSoon()
         }
     }
@@ -127,12 +180,19 @@ class SyncedController(
             tickSoon()
         }
         Settings.addListener(settingsListener)
+        listenForDreams()
+        post { atBox = tv.foregroundPackage() != DREAM_PACKAGE } // at the start: nobody is at the box if it dreams
         exec.scheduleWithFixedDelay({ post { tick() } }, 2_000, TICK_MS, TimeUnit.MILLISECONDS)
         AppLog.add(TAG, "Synced mode: started, mode ${Settings.values.mode}")
     }
 
     fun stop() {
         Settings.removeListener(settingsListener)
+        try {
+            context.applicationContext.unregisterReceiver(dreams)
+        } catch (e: Exception) {
+            // not registered
+        }
         try {
             // the lights and the screen are put back before the app is gone
             ambilight.leave()
@@ -161,6 +221,34 @@ class SyncedController(
 
     /** Looks at the state now instead of at the next second. */
     fun tickSoon() = post { tick() }
+
+    /** The broadcasts of the screen saver; without them the mood light leaves the picture on only for a video app. */
+    private fun listenForDreams() {
+        try {
+            val filter = IntentFilter(Intent.ACTION_DREAMING_STARTED)
+            filter.addAction(Intent.ACTION_DREAMING_STOPPED)
+            val app = context.applicationContext
+            if (Build.VERSION.SDK_INT >= 33) {
+                app.registerReceiver(dreams, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                app.registerReceiver(dreams, filter)
+            }
+        } catch (e: Exception) {
+            AppLog.error(TAG, "cannot listen for the screen saver", e)
+        }
+    }
+
+    /** The mood light was chosen on the phone, or chosen again: it takes the picture now, is sent whole, and may wake a TV in standby. */
+    fun lightTapped() {
+        if (Settings.values.light == MoodLight.OFF) return
+        atBox = false
+        forceHold = true
+        lampWake = true
+        tickSoon()
+    }
+
+    /** Who has the lights now (for the phone page): null before the first step. */
+    fun lightsNow(): TvPresentation.Lights? = lastWant?.lights
 
     private fun nowMs(): Long = SystemClock.elapsedRealtime()
 
@@ -341,21 +429,39 @@ class SyncedController(
     private fun present(mode: Mode, playing: Boolean, source: String, now: Long) {
         val v = Settings.values
         val display = Display.of(v.display) ?: Display.DEFAULT
+        val lampColor = MoodLight.colorOf(v.light, v.lightColor)
+        if (lampColor == null) {
+            lampWasOn = false
+        } else if (!lampWasOn) {
+            // a light that comes on looks afresh at what is in front: a video app left while it was off is not someone at the box now
+            lampWasOn = true
+            lastWatchMs = 0L
+            watchingNow = false
+        }
+        // (whether a video app is in front first: leaving one is someone at the box, in this same step)
+        val lamp = if (lampColor == null) null else watching(now).let { w -> TvPresentation.Lamp(v.lightFirst, atBox, w) }
+        val want = TvPresentation.want(mode, playing, display, source, screenOffByUs, lamp)
+        lastWant = want
+        val wanted = when (want.lights) {
+            TvPresentation.Lights.MOOD -> MoodLight.json(lampColor ?: MoodLight.DEFAULT_COLOR, v.lightLevel)
+            TvPresentation.Lights.MUSIC -> AmbilightControl.styleJson(v.ambilightStyle, v.ambilightMenu)
+            TvPresentation.Lights.NONE -> null
+        }
         // a change that the user asked for is carried out at once, not at the next try of the retry interval
-        if (display != lastDisplay || mode != lastPresentedMode || playing != lastPresentedPlaying) {
-            lastDisplay = display
-            lastPresentedMode = mode
-            lastPresentedPlaying = playing
+        val presented = "${display.key} ${mode.key} $playing ${want.screen} $wanted"
+        if (presented != lastPresented) {
+            lastPresented = presented
             lastScreenTryMs = 0L
             lastLightsTryMs = 0L
         }
-        val want = TvPresentation.want(mode, playing, display, source, screenOffByUs)
+        val lampScreen = lamp != null && !(mode == Mode.SYNCED && playing)
         when (want.screen) {
             TvPresentation.Screen.OFF -> if (!screenOffByUs && now - lastScreenTryMs > RETRY_MS) {
                 lastScreenTryMs = now
                 if (tv.setScreen(false)) {
                     setScreenOffByUs(true)
-                    screenAction = "off (Synced mode, no lyrics on the TV)"
+                    screenOffAtMs = now
+                    screenAction = if (lampScreen) "off (the mood light)" else "off (Synced mode, no lyrics on the TV)"
                 } else {
                     screenAction = "off: the TV refused"
                 }
@@ -371,19 +477,80 @@ class SyncedController(
             }
             TvPresentation.Screen.LEAVE -> Unit
         }
-        if (want.lights) {
-            if (!ambilight.entered && now - lastLightsTryMs > RETRY_MS) {
+        lampDarkened = lampScreen && want.screen == TvPresentation.Screen.OFF
+        if (wanted != null) {
+            val force = forceHold
+            if ((!ambilight.entered || ambilight.held != wanted || force) && now - lastLightsTryMs > RETRY_MS) {
                 lastLightsTryMs = now
-                ambilight.enter()
+                if (want.lights == TvPresentation.Lights.MOOD && (!ambilight.entered || force) && !tvOnForTheLamp(now)) return
+                forceHold = false
+                ambilight.hold(wanted, force)
                 lightsAction = ambilight.lastAction
                 AppLog.add(TAG, lightsAction)
             }
-        } else if ((ambilight.entered || ambilight.remembered != null) && now - lastLightsTryMs > RETRY_MS) {
+        } else if ((ambilight.entered || ambilight.remembered != null) && !tvAway && now - lastLightsTryMs > RETRY_MS) {
+            // (a TV that is away gets its lights back when it is on again)
             lastLightsTryMs = now
             ambilight.leave()
             lightsAction = ambilight.lastAction
             AppLog.add(TAG, lightsAction)
         }
+    }
+
+    /** A video app is in front (looked up every few seconds, and only while the mood light is on); leaving one is someone at the box. */
+    private fun watching(now: Long): Boolean {
+        if (now - lastWatchMs < WATCH_EVERY_MS) return watchingNow
+        lastWatchMs = now
+        val w = foreground(now, force = false) == Foreground.VIDEO_APP
+        if (watchingNow && !w) atBox = true
+        watchingNow = w
+        return w
+    }
+
+    /**
+     * The mood light needs the TV on. A TV in standby is woken when the mood light was just chosen (on a thread of its own: the wake takes
+     * up to 15 s, and the steps go on meanwhile); one in standby that nobody asked to wake was switched off by the user, and the mood light
+     * ends. False while the TV is not on: the hold waits.
+     */
+    private fun tvOnForTheLamp(now: Long): Boolean {
+        val power = tv.powerState()
+        currentTvPower = power
+        if (power == "On") return true
+        if (power == null) {
+            lightsAction = "the mood light waits: the TV does not answer"
+            return false
+        }
+        if (lampWake) {
+            lampWake = false
+            wakingUntilMs = now + WAKE_WINDOW_MS
+            lightsAction = "the mood light wakes the TV (it was $power)"
+            AppLog.add(TAG, lightsAction)
+            val waker = Thread({
+                try {
+                    tv.ensureOn()
+                } catch (t: Throwable) {
+                    AppLog.error(TAG, "waking the TV for the mood light failed", t)
+                }
+                post {
+                    lastLightsTryMs = 0L
+                    lastScreenTryMs = 0L
+                    tick()
+                }
+            }, "wf-lamp-wake")
+            waker.isDaemon = true
+            waker.start()
+            return false
+        }
+        if (now >= wakingUntilMs) endLamp("the TV is in standby ($power)")
+        return false
+    }
+
+    /** The mood light is switched off by the app (the TV was switched off): the lights are put back once the TV is on again. */
+    private fun endLamp(why: String) {
+        if (Settings.values.light == MoodLight.OFF) return
+        lightsAction = "the mood light ended: $why"
+        AppLog.add(TAG, lightsAction)
+        Settings.set("light", MoodLight.OFF)
     }
 
     private fun setScreenOffByUs(off: Boolean) {
@@ -402,6 +569,12 @@ class SyncedController(
             recovered = true
             return
         }
+        // lights or a dark screen that this run wants (the mood light, kept in the settings) are taken over as they are, not put back
+        val w = lastWant
+        if (w != null && (w.lights != TvPresentation.Lights.NONE || w.screen == TvPresentation.Screen.OFF)) {
+            recovered = true
+            return
+        }
         if (ambilight.entered || renderer.state == TvRenderer.State.PLAYING) return // this run is using them
         recoverTries++
         if (ambilight.remembered != null) {
@@ -416,14 +589,40 @@ class SyncedController(
     }
 
     private fun refreshCurrent(now: Long) {
-        if (now - lastRefreshMs < CURRENT_EVERY_MS) return
-        // the TV is asked only when its lights matter (an unreachable TV would hold the step up for the length of two time-outs)
-        val inUse = ambilight.entered || ambilight.remembered != null || renderer.state == TvRenderer.State.PLAYING || currentReadAtMs == 0L
+        if (now - lastRefreshMs < CURRENT_EVERY_MS || now < awayUntilMs) return
+        val lampOn = Settings.values.light != MoodLight.OFF
+        // the TV is asked only when its lights matter (an unreachable TV would hold the step up for the length of its time-outs)
+        val inUse = lampOn || ambilight.entered || ambilight.remembered != null || renderer.state == TvRenderer.State.PLAYING || currentReadAtMs == 0L
         if (!inUse || tv.currentIp() == null) return
         lastRefreshMs = now
+        // the power first, and the rest only from a TV that is on; one that does not answer is asked again in a minute
+        val power = tv.powerState()
+        currentTvPower = power
+        if (power != "On") {
+            currentReadAtMs = now
+            if (!tvAway) awaySinceMs = now
+            tvAway = true
+            if (power == null) awayUntilMs = now + AWAY_RETRY_MS
+            if (lampOn && now >= wakingUntilMs) {
+                if (power != null) {
+                    endLamp("the TV was put in standby ($power)")
+                } else if (now - awaySinceMs > LAMP_AWAY_END_MS) {
+                    endLamp("the TV has not answered for ${LAMP_AWAY_END_MS / 60_000} min")
+                }
+            }
+            return
+        }
+        if (tvAway && ambilight.entered) forceHold = true // back after a time away: what the lights hold is sent again, the power and all
+        tvAway = false
         currentPower = tv.ambilight.power()
         currentConfig = tv.ambilight.config()
         currentReadAtMs = now
+        // a picture that the mood light switched off and that is on now was switched on at the TV: someone is there, it is left on
+        if (lampDarkened && screenOffByUs && now - screenOffAtMs > SCREEN_SETTLE_MS && tv.screenState() == "On") {
+            atBox = true
+            setScreenOffByUs(false)
+            AppLog.add(TAG, "the picture was switched on at the TV while the mood light had it off: it is left on")
+        }
     }
 
     // ---- status ----------------------------------------------------------------------------------
@@ -446,6 +645,7 @@ class SyncedController(
         o.put("inputs", lastInputs)
         val screen = JSONObject()
         screen.put("off_by_us", screenOffByUs)
+        screen.put("off_for_the_mood_light", lampDarkened)
         screen.put("last_action", screenAction.ifEmpty { JSONObject.NULL })
         o.put("screen", screen)
         val a = JSONObject()
@@ -460,6 +660,16 @@ class SyncedController(
         a.put("current_age_s", if (currentReadAtMs == 0L) -1L else (nowMs() - currentReadAtMs) / 1000)
         a.put("last_action", ambilight.lastAction.ifEmpty { JSONObject.NULL })
         a.put("last_action_ok", ambilight.lastActionOk)
+        a.put("lights", lastWant?.lights?.name?.lowercase() ?: JSONObject.NULL)
+        a.put("held", ambilight.held?.let { AmbilightControl.describe(it) } ?: JSONObject.NULL)
+        a.put("light", v.light)
+        a.put("light_color", MoodLight.colorOf(v.light, v.lightColor) ?: JSONObject.NULL)
+        a.put("light_level", v.lightLevel)
+        a.put("light_first", v.lightFirst)
+        a.put("at_box", atBox)
+        a.put("watching", watchingNow)
+        a.put("tv_power", currentTvPower ?: JSONObject.NULL)
+        a.put("lights_action", lightsAction.ifEmpty { JSONObject.NULL })
         o.put("ambilight", a)
         o.put("renderer", renderer.statusJson())
         return o
@@ -486,6 +696,22 @@ class SyncedController(
         private const val REANCHOR_SILENCE_MS = 2_000L
         private const val SILENT_NOT_PLAYING_MS = 600_000L
 
+        /** How long a wake of the TV for the mood light may take before its standby counts as the user's (ms). */
+        private const val WAKE_WINDOW_MS = 25_000L
+
+        /** A TV that does not answer is asked again after this long (ms); the mood light ends when it has not answered for this long (ms). */
+        private const val AWAY_RETRY_MS = 60_000L
+        private const val LAMP_AWAY_END_MS = 600_000L
+
+        /** A picture that the mood light switched off is looked at only after this long (just after, the TV may still say "On") (ms). */
+        private const val SCREEN_SETTLE_MS = 15_000L
+
+        /** How often the mood light asks whether a video app is in front (ms): the usage events are not cheap. */
+        private const val WATCH_EVERY_MS = 5_000L
+
+        /** The screen saver of Google TV. */
+        private const val DREAM_PACKAGE = "com.google.android.apps.tv.dreamx"
+
         private const val AMBI_POWER = "ambi_power"
         private const val AMBI_CONFIG = "ambi_config"
         private const val SCREEN_OFF_KEY = "screen_off_by_us"
@@ -493,7 +719,7 @@ class SyncedController(
         /** The settings that make the controller look again at once. */
         private val WATCHED = setOf(
             "mode", "display", "tv_format", "tv_latency_ms", "tv_extra_ms", "kitchen_offset_ms", "kitchen_target_ms", "kitchen_floor_ms",
-            "ambilight_style", "ambilight_menu", "tv_reanchor_min",
+            "ambilight_style", "ambilight_menu", "tv_reanchor_min", "light", "light_color", "light_level", "light_first",
         )
     }
 }

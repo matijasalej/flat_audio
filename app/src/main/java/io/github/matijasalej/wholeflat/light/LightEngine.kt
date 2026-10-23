@@ -103,12 +103,26 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
         tvExec.shutdownNow()
     }
 
-    /** The TV's style for the app's Ambilight control: null while `lights` is `tv` (the app's own setting is used then). */
+    private var tvKey: String? = null
+    private var tvJson: String? = null
+
+    /**
+     * The TV's style for the app's Ambilight control: null while `lights` is `tv` (the app's own setting is used then). The same string
+     * until the song, its class (a section) or the cover's colours change, not with every small drift of the tint: the control sends a
+     * configuration whenever it differs from the one the TV holds, and the TV's server is slow.
+     */
+    @Synchronized
     fun tvConfig(): String? {
         val o = options
         if (!o.mood) return null
-        if (Settings.values.mode != "lyrics") return NativeStyles.plain(o.syncedStyle)
-        return NativeStyles.forLook(look, classAt(analyzer.snapshot), o.nativeMono, o.nativeDuo, o.nativeMulti)
+        val lyrics = Settings.values.mode == "lyrics"
+        val cls = classAt(analyzer.snapshot)
+        val key = if (!lyrics) "synced|${o.syncedStyle}" else "lyrics|$trackKey|${cls.key}|${huesKey != null}|${o.nativeMono}|${o.nativeDuo}|${o.nativeMulti}"
+        if (key != tvKey) {
+            tvJson = if (!lyrics) NativeStyles.plain(o.syncedStyle) else NativeStyles.forLook(look, cls, o.nativeMono, o.nativeDuo, o.nativeMulti)
+            tvKey = key
+        }
+        return tvJson
     }
 
     // ---- the picture ----------------------------------------------------------------------------
@@ -289,12 +303,7 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
      * through the app's Ambilight control. Not for every small drift of the tint: the TV's server is slow and the style is a whole call.
      */
     private fun restyleIfNeeded(now: Long) {
-        val o = options
-        val want = when {
-            !o.mood -> null
-            Settings.values.mode != "lyrics" -> "synced|${o.syncedStyle}"
-            else -> "lyrics|$trackKey|${classAt(analyzer.snapshot).key}|${huesKey != null}"
-        } ?: return
+        val want = tvConfig() ?: return
         if (want == nativeSent || now - lastRestyleNanos < 1_000_000_000L) return
         val first = nativeSent == null
         nativeSent = want

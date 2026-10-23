@@ -2,6 +2,7 @@ package io.github.matijasalej.wholeflat
 
 import android.os.SystemClock
 import android.util.Log
+import io.github.matijasalej.wholeflat.sync.KeyMessage
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
@@ -50,6 +51,9 @@ object AppState {
     @Volatile var nativeVersion: String = "-"
     @Volatile var deviceName: String = DEVICE_NAME
 
+    /** Where the music comes from (see source/AudioSource.kt): "librespot" is the only source so far. */
+    @Volatile var source: String = "librespot"
+
     /** idle (waiting for a phone to pick the device), connected, lost */
     @Volatile var session: String = "idle"
     @Volatile var sessionUser: String? = null
@@ -74,6 +78,22 @@ object AppState {
     @Volatile var kitchen: Kitchen? = null
     @Volatile var tv: TvControl? = null
 
+    /**
+     * ok, key_refused (Spotify refuses the audio key of this account: the engine holds the track and tries
+     * again with a back-off) or key_gave_up (it kept refusing for 30 minutes: press play on the phone).
+     */
+    @Volatile var spotifyState: String = "ok"
+
+    /** Refusals in the current episode, and since the app started. */
+    @Volatile var keyCount: Int = 0
+    @Volatile var keyTotal: Long = 0
+
+    /** The engine's phase: ok, waiting, retrying, user_paused, gave_up. */
+    @Volatile var keyPhase: String = "ok"
+
+    /** [SystemClock.elapsedRealtime] of the next try, 0 if none is scheduled. */
+    @Volatile var keyRetryAt: Long = 0
+
     @Volatile var network: String = "unknown"
     @Volatile var lastError: String? = null
     @Volatile var lastEventAt: Long = 0
@@ -94,6 +114,39 @@ object AppState {
         }
     }
 
+    /** Seconds until the next try of a refused track (rounded up), -1 if none is scheduled. */
+    fun retryInSeconds(): Long {
+        val at = keyRetryAt
+        if (at == 0L || spotifyState == "ok") return -1
+        val left = at - SystemClock.elapsedRealtime()
+        return if (left <= 0) 0 else (left + 999) / 1000
+    }
+
+    /** From the fields of a key_* event of the engine. */
+    fun updateKey(fields: JSONObject) {
+        val phase = fields.optString("phase", "ok")
+        keyPhase = phase
+        keyCount = fields.optInt("count", 0)
+        keyTotal = fields.optLong("total", keyTotal)
+        val retryIn = fields.optLong("retry_in_s", -1)
+        keyRetryAt = if (retryIn >= 0 && phase == "waiting") SystemClock.elapsedRealtime() + retryIn * 1000 else 0
+        spotifyState = when (phase) {
+            "ok" -> "ok"
+            "gave_up" -> "key_gave_up"
+            else -> "key_refused"
+        }
+    }
+
+    fun clearKey() {
+        spotifyState = "ok"
+        keyPhase = "ok"
+        keyCount = 0
+        keyRetryAt = 0
+    }
+
+    /** The explanation for the screen when Spotify refuses playback, null when all is well. */
+    fun keyMessage(): String? = KeyMessage.text(spotifyState, keyPhase, retryInSeconds(), keyCount)
+
     private fun ageSeconds(at: Long): Long =
         if (at == 0L) -1 else (SystemClock.elapsedRealtime() - at) / 1000
 
@@ -101,10 +154,22 @@ object AppState {
         val o = JSONObject()
         o.put("service", service)
         o.put("device_name", deviceName)
+        o.put("source", source)
         o.put("app_version", BuildInfo.versionName)
         o.put("native", nativeVersion)
         o.put("session", session)
         o.put("session_user", sessionUser ?: JSONObject.NULL)
+        o.put("spotify_state", spotifyState)
+        o.put("retry_in_s", retryInSeconds())
+        o.put("count", keyCount)
+        val key = JSONObject()
+        key.put("phase", keyPhase)
+        key.put("refusals", keyCount)
+        key.put("refusals_total", keyTotal)
+        key.put("retry_in_s", retryInSeconds())
+        key.put("message", keyMessage() ?: JSONObject.NULL)
+        o.put("spotify_key", key)
+        o.put("storage", Storage.toJson())
         o.put("playback", playback)
         o.put("title", title ?: JSONObject.NULL)
         o.put("artist", artist ?: JSONObject.NULL)
@@ -128,6 +193,7 @@ object AppState {
 
     fun toText(): String {
         val sb = StringBuilder()
+        keyMessage()?.let { sb.append(">>> ").append(it).append("\n\n") }
         sb.append("Service   : ").append(service).append("  (").append(deviceName).append(")\n")
         sb.append("Spotify   : ").append(session)
         sessionUser?.let { sb.append("  as ").append(it) }
@@ -161,6 +227,7 @@ object AppState {
             sb.append("\n")
         }
         sb.append("Network   : ").append(network).append("\n")
+        sb.append("Storage   : ").append(Storage.text()).append("\n")
         sb.append("Events    : ").append(eventCount)
         val age = ageSeconds(lastEventAt)
         if (age >= 0) sb.append("  (last ").append(age).append(" s ago)")

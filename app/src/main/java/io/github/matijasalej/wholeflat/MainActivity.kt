@@ -58,6 +58,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         BuildInfo.init(this)
         Settings.init(this)
+        Storage.init(this)
         window.decorView.setBackgroundColor(BACKGROUND)
 
         val root = LinearLayout(this).apply {

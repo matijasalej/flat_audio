@@ -23,8 +23,13 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.system.Os
 import android.widget.Toast
+import io.github.matijasalej.wholeflat.source.NativeRingControl
+import io.github.matijasalej.wholeflat.source.SourceBridge
+import io.github.matijasalej.wholeflat.source.SourceStatus
+import io.github.matijasalej.wholeflat.source.TrackInfo
 import io.github.matijasalej.wholeflat.sync.VolumeCurve
 import org.json.JSONObject
+import java.io.File
 import kotlin.concurrent.thread
 
 /**
@@ -91,6 +96,7 @@ class PlaybackService : Service() {
         }
         AppState.service = "starting"
         Settings.init(this)
+        Storage.init(this)
         livingRoom = LivingRoom(this)
         kitchen = Kitchen(this, livingRoom)
         tv = TvControl(this)
@@ -188,11 +194,26 @@ class PlaybackService : Service() {
             } catch (e: Exception) {
                 AppLog.error(TAG, "cannot set TMPDIR", e)
             }
+            removeOldAudioCache()
             startNative()
         } catch (t: Throwable) {
             AppLog.error(TAG, "start failed", t)
             AppState.service = "error"
             AppState.lastError = "start: $t"
+        }
+    }
+
+    /** The first builds kept up to 256 MB of audio in the cache; there is no audio cache any more. */
+    private fun removeOldAudioCache() {
+        try {
+            val old = File(cacheDir, "audio")
+            if (old.exists()) {
+                val bytes = Storage.sizeOf(old)
+                old.deleteRecursively()
+                AppLog.add(TAG, "removed the old audio cache (${bytes / (1024 * 1024)} MB)")
+            }
+        } catch (e: Exception) {
+            AppLog.error(TAG, "cannot remove the old audio cache", e)
         }
     }
 
@@ -370,6 +391,51 @@ class PlaybackService : Service() {
         }
     }
 
+    // ---- a second source ----------------------------------------------------------------------
+
+    /**
+     * The plug for a source other than librespot (see source/AudioSource.kt): a source gets this as its
+     * sink and its listener, and what it reports lands in the same status that the engine's events fill.
+     * Nothing uses it yet.
+     */
+    val sourceBridge: SourceBridge by lazy { SourceBridge(NativeRingControl, SourceReports()) }
+
+    private inner class SourceReports : SourceStatus {
+        override fun trackChanged(info: TrackInfo) {
+            AppState.title = info.title
+            AppState.artist = info.artist
+            AppState.trackUri = info.uri
+            AppState.durationMs = info.durationMs
+            publishMetadata()
+            updateNotification()
+        }
+
+        override fun playbackChanged(state: String, positionMs: Long) {
+            AppState.playback = state
+            if (positionMs >= 0) AppState.setPosition(positionMs)
+            publishSession(
+                when (state) {
+                    "playing" -> PlaybackState.STATE_PLAYING
+                    "paused" -> PlaybackState.STATE_PAUSED
+                    else -> PlaybackState.STATE_STOPPED
+                },
+            )
+            updateNotification()
+        }
+
+        override fun positionChanged(positionMs: Long) {
+            AppState.setPosition(positionMs)
+        }
+
+        override fun volumeChanged(volume: Double) {
+            val raw = Math.round(volume * 65535).toInt()
+            AppState.volumeRaw = raw
+            AppState.volumePercent = Math.round(volume * 100).toInt()
+            applyVolume()
+            if (::kitchen.isInitialized) kitchen.onVolume(raw)
+        }
+    }
+
     // ---- settings and volume -------------------------------------------------------------------
 
     private val settingsListener: (Set<String>) -> Unit = { changed ->
@@ -461,6 +527,29 @@ class PlaybackService : Service() {
                 )
             }
             "unavailable" -> AppState.lastError = "track unavailable: ${o.optString("track_id")}"
+            // Spotify refuses the audio key; the engine holds the track and tries again (see keyguard.rs)
+            "key_refused", "key_user" -> {
+                AppState.updateKey(o)
+                AppLog.add("spotify", AppState.keyMessage() ?: "audio key events")
+            }
+            "key_retry" -> {
+                AppState.updateKey(o)
+                AppLog.add("spotify", "trying the track again (refusal ${AppState.keyCount})")
+            }
+            "key_gave_up" -> {
+                AppState.updateKey(o)
+                AppLog.add("spotify", AppState.keyMessage() ?: "gave up")
+            }
+            "key_recovered" -> {
+                AppLog.add("spotify", "the audio key was granted again after ${o.optInt("refusals")} refusals")
+                AppState.keyTotal = o.optLong("total", AppState.keyTotal)
+                AppState.clearKey()
+            }
+            "key_reset" -> {
+                AppState.keyTotal = o.optLong("total", AppState.keyTotal)
+                AppState.clearKey()
+            }
+            "audio_key" -> AppLog.add("spotify", "audio key request: ${o.optString("outcome")}")
             "track_changed" -> {
                 AppState.title = o.optString("title").ifEmpty { null }
                 AppState.artist = o.optString("artists").ifEmpty { null }
@@ -551,6 +640,7 @@ class PlaybackService : Service() {
                 if (AppState.playback == "playing" || AppState.playback == "paused") {
                     AppState.title?.let { sb.append(" | ").append(it) }
                 }
+                if (AppState.spotifyState != "ok") sb.append(" | Spotify refuses playback")
                 if (::kitchen.isInitialized && Settings.values.kitchenEnabled) {
                     sb.append(" | kitchen ").append(kitchen.state.label)
                 }

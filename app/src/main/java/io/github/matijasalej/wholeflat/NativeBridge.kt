@@ -66,6 +66,25 @@ object NativeBridge {
     @JvmStatic
     external fun kRead(cursor: Long, epoch: Long, buf: ShortArray, maxFrames: Int, timeoutMs: Int, meta: LongArray): Int
 
+    /** A source on the Kotlin side (see source/AudioSource.kt): playback begins or resumes. */
+    @JvmStatic
+    external fun sourceStart()
+
+    /** A source on the Kotlin side: playback pauses. */
+    @JvmStatic
+    external fun sourcePause()
+
+    /** A source on the Kotlin side: the audio jumps (a seek or a skip). */
+    @JvmStatic
+    external fun sourceFlush()
+
+    /**
+     * A source on the Kotlin side writes [frames] stereo frames of [sampleRate] Hz from [buf]. Returns
+     * the frames taken, -1 if the engine is closed or not running, -2 if the ring does not take that rate.
+     */
+    @JvmStatic
+    external fun sourceWrite(buf: ShortArray, frames: Int, sampleRate: Int): Int
+
     /** Starts the calibration click track as a start event through the ring. */
     @JvmStatic
     external fun calibStart(seconds: Int): Boolean

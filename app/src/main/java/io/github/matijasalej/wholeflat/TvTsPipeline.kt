@@ -11,8 +11,11 @@ import io.github.matijasalej.wholeflat.sync.ClickTrack
 import io.github.matijasalej.wholeflat.sync.FrameLabels
 import io.github.matijasalej.wholeflat.sync.FrameTimes
 import io.github.matijasalej.wholeflat.sync.H264
+import io.github.matijasalej.wholeflat.sync.LateVideoGate
+import io.github.matijasalej.wholeflat.sync.Lateness
 import io.github.matijasalej.wholeflat.sync.LyricsLayout
 import io.github.matijasalej.wholeflat.sync.Picture
+import io.github.matijasalej.wholeflat.sync.SceneFade
 import io.github.matijasalej.wholeflat.sync.SlewClock
 import io.github.matijasalej.wholeflat.sync.TsFeed
 import io.github.matijasalej.wholeflat.sync.TsHistory
@@ -37,16 +40,23 @@ import java.util.concurrent.locks.LockSupport
  * slot, which follows the capture clock: the slot that is due at a time is the one that goes with the capture frame of that time less the
  * hold, and the PCR of a slot is what the position in the stream says, a lead (700 ms, as ffmpeg writes it) behind the PTS of what is sent then.
  * The pictures are drawn at 30 per second on the wall clock, each labelled with the capture time whose lyric state it shows (its drawing
- * time less the hold plus what the encoder needs), so the line that is sung in the sound is the line that is lit in the picture. The
- * hold is fixed for the life of the stream: the TV's player follows the PTS and PCR of what it was given, so a hold that moves would
- * move the picture and the sound against the other room.
+ * time less the hold plus the [VIDEO_BUDGET_NANOS] the encoder is given), so the line that is sung in the sound is the line that is lit in
+ * the picture. The hold is fixed for the life of the stream: the TV's player follows the PTS and PCR of what it was given, so a hold that
+ * moves would move the picture and the sound against the other room.
+ *
+ * **Video never holds up the sound.** The audio, the clock and the padding go out on the slot clock whatever the video does; a picture
+ * is written when it is due, which is half a second after it was drawn (the budget of a slow encoder), and one that still comes later
+ * than the TV could take it is dropped with what refers to it, up to the next key picture ([LateVideoGate]); a TV that is given a
+ * picture after its time has been seen to freeze and to move its sound against the other room. The change of track is a cross-fade
+ * ([SceneFade]), not a cut, so that the encoder is never asked for a picture that is new in every pixel.
  *
  * **The warm-up.** Until [goLive] the stream carries the splash and silence, and an IDR picture every 200 ms (a static picture costs
  * nothing), so that the connections the TV makes while it settles can start where the policy says whatever the moment. [goLive]
  * switches the audio at a block boundary and the picture at an IDR, both at the capture time of the first music block.
  *
  * Threads: audio (feeds the AAC encoder at due time), video (draws and owns the video encoder), writer (muxes in order of due time
- * into the ring), and the output threads of the two encoders.
+ * into the ring), a watch (which only tells when the app was kept from running), and the output threads of the two encoders. The threads
+ * of the stream run at the priority of an audio thread ([ThreadBoost]).
  */
 class TvTsPipeline(
     private val context: Context,
@@ -57,6 +67,11 @@ class TvTsPipeline(
     /** Whether the screen shows the lyrics (the display "Screen + Ambilight"); else the picture is black. */
     private val showLyrics: () -> Boolean,
     private val params: () -> Params,
+    /**
+     * The stream carries the audio alone (the setting `tv_audio_only` while the screen is off): no encoder, no drawing, no video PID; the clock
+     * is on the audio, every table of the stream is a place to start, and the rate and the PCR lead are those of the video stream.
+     */
+    val audioOnly: Boolean = false,
 ) : TsFeed {
     class Params(val burstMs: Int, val pcrLeadMs: Int, val render: String, val video: TvVideoSpec = TvVideoSpec.DEFAULT)
 
@@ -69,8 +84,20 @@ class TvTsPipeline(
 
     override val history = TsHistory(maxOf(HISTORY_BYTES, spec.muxRate / 8L * 14), HISTORY_NANOS)
     private val rate = feed.rate
-    private val mux = TsMuxer(muxRate = spec.muxRate)
+    private val mux = TsMuxer(pcrPid = if (audioOnly) TsMuxer.AUDIO_PID else TsMuxer.VIDEO_PID, muxRate = spec.muxRate, hasVideo = !audioOnly)
     private val writer = TsWriter(mux, history) { t -> slotOf(t) }
+
+    /** Lets a picture into the stream only while it can still reach the TV in time: the PCR lead less [GATE_ROOM_MS]. */
+    private val gate = LateVideoGate(spec.muxRate, maxOf(MIN_GATE_MS, params().pcrLeadMs - GATE_ROOM_MS) * 1_000_000L)
+
+    init {
+        writer.gate = gate
+    }
+
+    private val fade = SceneFade<TvScene>()
+    private val writerLate = Lateness(50.0)
+    private val watchLate = Lateness(100.0)
+    private var lastKeyAsk = 0L
 
     @Volatile
     private var running = false
@@ -102,6 +129,7 @@ class TvTsPipeline(
     private var renderer: LyricsRenderer? = null
     private var lastVideoPts = Long.MIN_VALUE
     private var lastVideoPtsOut = Long.MIN_VALUE
+    private var lastVideoDue = Long.MIN_VALUE
     private val labels = FrameLabels()
     private val startLatch = CountDownLatch(1)
 
@@ -113,6 +141,8 @@ class TvTsPipeline(
         private set
 
     private val threads = ArrayList<Thread>()
+
+    private enum class Boost { NONE, URGENT, DISPLAY }
 
     // what the status says
     @Volatile
@@ -139,6 +169,8 @@ class TvTsPipeline(
      * Null before the stream has started.
      */
     fun frameTimes(): FrameTimes? = if (::slew.isInitialized) slew else null
+
+    override val streamBitsPerSecond: Int get() = spec.muxRate
 
     override fun requestSync() {
         venc?.requestSync()
@@ -170,9 +202,10 @@ class TvTsPipeline(
         }
         aenc = audio
         running = true
-        threads.add(thread("wf-ts-writer") { writerLoop() })
-        threads.add(thread("wf-ts-audio") { audioLoop() })
-        threads.add(thread("wf-ts-video") { videoLoop() })
+        threads.add(thread("wf-ts-writer", Boost.URGENT) { writerLoop() })
+        threads.add(thread("wf-ts-audio", Boost.URGENT) { audioLoop() })
+        if (audioOnly) startLatch.countDown() else threads.add(thread("wf-ts-video", Boost.DISPLAY) { videoLoop() })
+        threads.add(thread("wf-ts-watch") { watchLoop() })
         if (!startLatch.await(START_WAIT_S, TimeUnit.SECONDS)) startError = startError ?: "the video encoder did not start in $START_WAIT_S s"
         val err = startError
         if (err != null) {
@@ -181,8 +214,8 @@ class TvTsPipeline(
         }
         AppLog.add(
             TAG,
-            "the lyrics video runs: ${venc?.name} (${venc?.profile}), render ${renderer?.path?.key}, ${audio.name}, hold ${holdNanos / 1_000_000L} ms, " +
-                "PCR lead ${p.pcrLeadMs} ms, new connections start ${p.burstMs} ms behind live, first audio frame $f0",
+            (if (audioOnly) "the audio-only stream runs: ${audio.name}, ${spec.muxRate / 1000} kbit/s of stream, " else "the lyrics video runs: ${venc?.name} (${venc?.profile}), render ${renderer?.path?.key}, ${audio.name}, ") +
+                "hold ${holdNanos / 1_000_000L} ms, PCR lead ${p.pcrLeadMs} ms, new connections start ${p.burstMs} ms behind live, first audio frame $f0",
         )
         return null
     }
@@ -210,7 +243,12 @@ class TvTsPipeline(
         AppLog.add(TAG, "the lyrics video stopped: ${lastStats.ifEmpty { "no statistics" }}")
     }
 
-    private fun thread(name: String, body: () -> Unit): Thread = Thread({
+    private fun thread(name: String, boost: Boost = Boost.NONE, body: () -> Unit): Thread = Thread({
+        when (boost) {
+            Boost.URGENT -> ThreadBoost.urgent()
+            Boost.DISPLAY -> ThreadBoost.display()
+            Boost.NONE -> Unit
+        }
         try {
             body()
         } catch (t: Throwable) {
@@ -363,9 +401,15 @@ class TvTsPipeline(
                     n += skipped + 1
                     continue
                 }
-                val c = w - holdNanos + VIDEO_LATENCY_NANOS
+                val c = w - holdNanos + VIDEO_BUDGET_NANOS
                 val liveNow = c >= liveFromNanos
                 val pic = TvPicture.choose(warming = !liveNow, lyrics = showLyrics())
+                if (gate.waitingForKey && now - lastKeyAsk >= KEY_ASK_EVERY_NANOS) {
+                    // pictures were dropped for being late and the ones after them refer to them: the TV needs a key picture to go on from
+                    lastKeyAsk = now
+                    venc?.requestSync()
+                    syncRequestsForPicture.incrementAndGet()
+                }
                 if (liveNow && !wasLive) {
                     wasLive = true
                     venc?.requestSync() // the music begins with a key picture
@@ -407,7 +451,7 @@ class TvTsPipeline(
         val r = LyricsRenderer(context, surface, path, spec.width, spec.height)
         renderer = r
         // the first picture proves that the way works: the splash, as the stream begins
-        renderFrame(System.nanoTime() - holdNanos + VIDEO_LATENCY_NANOS, Picture.SPLASH)
+        renderFrame(System.nanoTime() - holdNanos + VIDEO_BUDGET_NANOS, Picture.SPLASH)
     }
 
     private fun stopVideoChain() {
@@ -425,7 +469,17 @@ class TvTsPipeline(
         val r = renderer ?: return
         val pts = videoPts(captureNanos)
         val scene = if (pic == Picture.BLACK) null else scenes.scene(captureNanos)
-        val stamp = r.render(pic, scene, System.nanoTime())
+        var from: TvScene? = null
+        var alpha = 1f
+        if (pic == Picture.LYRICS && scene != null) {
+            // a new track comes in over the old one in about a second instead of replacing it in one picture
+            val step = fade.step(scene.key, scene, captureNanos)
+            from = step.from
+            alpha = step.alpha
+        } else {
+            fade.reset()
+        }
+        val stamp = r.render(pic, scene, System.nanoTime(), from, alpha)
         labels.add(stamp, captureNanos, pts)
         synchronized(drawn) {
             drawn.addLast(Drawn(stamp / 1_000_000L, stamp / 1000L, r.lastRenderMs, wakeLateMs, scene?.positionMs ?: -1L))
@@ -467,13 +521,15 @@ class TvTsPipeline(
             pts = label.second
             due = label.first + holdNanos
         } else {
-            // a picture that was not drawn by us (the encoder repeated one): it follows the last
+            // a picture that was not drawn by us (the encoder repeated one): it follows the last, in the stream and in its time (the
+            // pictures wait for their time, so "now" would put it ahead of the one it repeats)
             unlabeledFrames.incrementAndGet()
             pts = (if (lastVideoPtsOut == Long.MIN_VALUE) PTS_BASE else lastVideoPtsOut) + spec.frameTicks
-            due = System.nanoTime()
+            due = if (lastVideoDue == Long.MIN_VALUE) System.nanoTime() else lastVideoDue + frameNanos
         }
         if (pts <= lastVideoPtsOut) return // never two pictures with one time
         lastVideoPtsOut = pts
+        lastVideoDue = due
         val isKey = key || H264.isKey(au)
         val unit = H264.accessUnit(au, 0, au.size, venc?.parameterSets, isKey)
         writer.submitVideo(due, unit, pts, isKey)
@@ -490,8 +546,10 @@ class TvTsPipeline(
         var lastShort = 0L
         var starvedPeriods = 0
         var lastSlewNanos = 0L
+        var expectedWake = 0L
         while (running) {
             val now = System.nanoTime()
+            if (expectedWake != 0L) writerLate.note((now - expectedWake) / 1e6)
             if (now - lastSlewNanos >= 250_000_000L) {
                 lastSlewNanos = now
                 slew.update(now - holdNanos, feed.clock.frameAtNanosExact(now - holdNanos))
@@ -501,6 +559,11 @@ class TvTsPipeline(
                 val seconds = (now - lastLog) / 1e9
                 val s = writer.takeStats()
                 val frames = venc?.framesOut ?: 0L
+                val period = venc?.takePeriod()
+                val encodeAvg = period?.first ?: 0.0
+                val encodeMax = period?.second ?: 0.0
+                lastEncodeAvg = encodeAvg
+                lastEncodeMax = encodeMax
                 lastStats = String.format(
                     java.util.Locale.US,
                     "video %.1f fps, the encoder gave %.0f kbit/s, the stream %.0f kbit/s of which %.0f %% padding, a picture takes %.1f ms to draw (%s) " +
@@ -509,11 +572,12 @@ class TvTsPipeline(
                         "clock %.2f ms from the plain count, %s",
                     (frames - lastFrames) / seconds, ((venc?.bytesOut ?: 0L) - lastEncoded) * 8 / seconds / 1000.0,
                     (writer.bytes - lastBytes) * 8 / seconds / 1000.0, (mux.nullPackets - lastNulls) * 100.0 / maxOf(1L, (writer.bytes - lastBytes) / TsMuxer.PACKET),
-                    renderer?.averageRenderMs ?: 0.0, renderer?.path?.key ?: "-", venc?.latencyAvgMs ?: 0.0, venc?.latencyMaxMs ?: 0.0,
+                    renderer?.averageRenderMs ?: 0.0, renderer?.path?.key ?: "-", encodeAvg, encodeMax,
                     s.audioLateAvgMs, s.audioLateMaxMs, s.videoLateAvgMs, s.videoLateMaxMs, s.queued, writer.packetsWaiting, writer.videoPacketsWaiting,
                     history.heldBytes / 1024, shortBlocks.get(), unlabeledFrames.get(), skippedFrames.get(), slew.adjustMs, if (live) "live" else "warming up",
                 )
                 AppLog.add(TAG, lastStats)
+                noteHeldUp(s)
                 // A stream whose clock runs ahead of the capture's (the capture slower than the system clock by more than the clock follows)
                 // meets frames that do not exist yet, block after block. A hiccup of the capture is a few blocks; this is the stream starved.
                 val shortNow = shortBlocks.get()
@@ -530,16 +594,84 @@ class TvTsPipeline(
                 lastNulls = mux.nullPackets
             }
             val wait = next - System.nanoTime()
-            if (wait > 0) LockSupport.parkNanos(minOf(wait, 5_000_000L))
+            if (wait > 0) {
+                val park = minOf(wait, 5_000_000L)
+                expectedWake = System.nanoTime() + park
+                LockSupport.parkNanos(park)
+            } else {
+                expectedWake = 0L
+            }
         }
     }
+
+    @Volatile
+    private var lastEncodeAvg = 0.0
+
+    @Volatile
+    private var lastEncodeMax = 0.0
+
+    @Volatile
+    private var heldUp = ""
+
+    /**
+     * Says in the log, when a period (5 s) had a sign of it, that the stream was held up and what was seen: the writer waking up late (and
+     * making up the slots that passed), the app kept from running by the system, pictures dropped for being late, and the state of the box.
+     */
+    private fun noteHeldUp(s: TsWriter.Stats) {
+        val wl = writerLate.take()
+        val wt = watchLate.take()
+        if (wl.over == 0 && wt.over == 0 && s.videoDropped == 0 && s.maxStepSlots <= HELD_UP_SLOTS) return
+        heldUp = String.format(
+            java.util.Locale.US,
+            "the writer woke up %.0f ms late at most (%d times over 50 ms) and made up %d slots (%.0f ms of stream) in one step at most; the app was kept " +
+                "from running for %.0f ms at most (%d times over 100 ms); %d pictures were dropped for being late (%d times so far); %s",
+            wl.maxMs, wl.over, s.maxStepSlots, s.maxStepSlots * 1000.0 / mux.slotsPerSecond, wt.maxMs, wt.over, s.videoDropped, gate.episodes, BoxStats.brief(),
+        )
+        AppLog.add(TAG, "WARNING the stream was held up in the last 5 s: $heldUp")
+    }
+
+    // ---- the watch -------------------------------------------------------------------------------
+
+    /**
+     * Sleeps 20 ms at a time at the normal priority and tells when a sleep took much longer: the system did not run this app for that long
+     * (a busy box, memory being reclaimed, the garbage collector). If the encoder's pictures and the writes to the TV are late at the same
+     * moment as this, it was the box and not the stream.
+     */
+    private fun watchLoop() {
+        var prev = System.nanoTime()
+        var lastLog = 0L
+        var gc0 = BoxStats.blockingGc()
+        while (running) {
+            LockSupport.parkNanos(WATCH_TICK_NANOS)
+            val now = System.nanoTime()
+            val lateMs = (now - prev - WATCH_TICK_NANOS) / 1e6
+            prev = now
+            watchLate.note(lateMs)
+            if (lateMs >= STALL_LOG_MS && now - lastLog > 1_000_000_000L) {
+                lastLog = now
+                val gc1 = BoxStats.blockingGc()
+                val gc = if (gc0 != null && gc1 != null) ", the garbage collector held the app up ${gc1.first - gc0.first} times for ${gc1.second - gc0.second} ms since the last stall" else ""
+                gc0 = gc1
+                AppLog.add(TAG, "WARNING this app was not run by the system for ${lateMs.toLong()} ms (a sleep of 20 ms took ${lateMs.toLong() + 20} ms): ${BoxStats.brief()}$gc")
+            }
+        }
+    }
+
+    /** The state of the stream in a line, for the warning the connection to the TV writes when the data it gave was old (see `KitchenStream`). */
+    override fun health(): String = String.format(
+        java.util.Locale.US,
+        "encoder %.0f ms per picture on average and %.0f at most in the last 5 s, %d pictures skipped, %d dropped as too late (%d times, %d sent more than 150 ms late); " +
+            "the writer woke up %.0f ms late at worst, the app was kept from running for %.0f ms at worst; %s",
+        lastEncodeAvg, lastEncodeMax, skippedFrames.get(), gate.dropped, gate.episodes, gate.sentLate, writerLate.worstMs, watchLate.worstMs, BoxStats.brief(),
+    )
 
     // ---- what the status and the debug pages want ------------------------------------------------
 
     /** A small JPEG of what the picture shows now (a fresh drawing of the scene, on a smaller canvas), for `/tv/preview.jpg`. */
     fun previewJpeg(): ByteArray? {
+        if (audioOnly) return null
         return try {
-            val c = System.nanoTime() - holdNanos + VIDEO_LATENCY_NANOS
+            val c = System.nanoTime() - holdNanos + VIDEO_BUDGET_NANOS
             val pic = picture
             val scene = if (pic == Picture.BLACK) null else scenes.scene(c)
             val bmp = Bitmap.createBitmap(LyricsLayout.W / 2, LyricsLayout.H / 2, Bitmap.Config.ARGB_8888)
@@ -567,6 +699,7 @@ class TvTsPipeline(
         o.put("live", live)
         o.put("picture", picture.key)
         o.put("video_spec", spec.text())
+        o.put("audio_only", audioOnly)
         o.put("video_encoder", v?.name ?: JSONObject.NULL)
         o.put("video_profile", v?.profile ?: JSONObject.NULL)
         o.put("audio_encoder", aenc?.name ?: JSONObject.NULL)
@@ -587,6 +720,16 @@ class TvTsPipeline(
         o.put("unlabeled_pictures", unlabeledFrames.get())
         o.put("encoder_clock_offset_ms", if (labels.learnedOffset) labels.epochOffsetNanos / 1_000_000L else 0L)
         o.put("skipped_pictures", skippedFrames.get())
+        o.put("video_budget_ms", VIDEO_BUDGET_NANOS / 1_000_000L)
+        o.put("video_dropped", gate.dropped)
+        o.put("video_dropped_late", gate.droppedLate)
+        o.put("video_dropped_following", gate.droppedBroken)
+        o.put("video_drop_episodes", gate.episodes)
+        o.put("video_sent_late", gate.sentLate)
+        o.put("video_waiting_for_key", gate.waitingForKey)
+        o.put("writer_late_ms_worst", Math.round(writerLate.worstMs * 10.0) / 10.0)
+        o.put("app_not_run_ms_worst", Math.round(watchLate.worstMs * 10.0) / 10.0)
+        o.put("held_up", heldUp.ifEmpty { JSONObject.NULL })
         o.put("ring_kb", history.heldBytes / 1024)
         o.put("ring_key_units", history.keyUnits)
         o.put("queued", writer.queued)
@@ -627,11 +770,32 @@ class TvTsPipeline(
         /** The time to start the encoders in: the first audio block is due this long after the start. */
         private const val START_DELAY_NANOS = 150_000_000L
 
-        /** What the encoder is taken to need from the drawing of a picture to its bytes (ns); the pictures are labelled with it counted in, the measured value is in the status. */
-        private const val VIDEO_LATENCY_NANOS = 100_000_000L
+        /**
+         * What the encoder is given from the drawing of a picture to the moment it is due in the stream (ns). A picture drawn at time w is
+         * labelled with the capture time w - hold + this, so it is due at w + this; the encoder gave its bytes 25 to 30 ms after the drawing
+         * on most pictures and 150 to 850 ms after it on the key pictures and when the box was busy, and a picture that is not there by its time
+         * is dropped (see [LateVideoGate]). With 100 ms every slow picture was late; with half a second only a stall of the encoder is. The
+         * price is that what the picture shows of the track (the cover, the title) comes about 0.3 s after the sound of it (the position in the
+         * track is counted for the time of the sound, and goes with it exactly).
+         */
+        private const val VIDEO_BUDGET_NANOS = 500_000_000L
         private const val WARMUP_IDR_EVERY_NANOS = 200_000_000L
         private const val STATS_EVERY_NANOS = 5_000_000_000L
         private const val RECENT_DRAWN = 600
+
+        /** A picture must have ended this much (ms) before the PCR lead is used up at the TV; and the least time the gate allows whatever the lead. */
+        private const val GATE_ROOM_MS = 150L
+        private const val MIN_GATE_MS = 200L
+
+        /** While the stream waits for a key picture after a drop, the encoder is asked for one at most this often. */
+        private const val KEY_ASK_EVERY_NANOS = 300_000_000L
+
+        /** The watch sleeps this long and tells when it slept much longer (the app was kept from running); a stall this long (ms) is put in the log. */
+        private const val WATCH_TICK_NANOS = 20_000_000L
+        private const val STALL_LOG_MS = 150.0
+
+        /** A step of the writer that made up more slots than this (about 100 ms of the stream at 9 Mbit/s) is put in the log with the others. */
+        private const val HELD_UP_SLOTS = 600L
 
         /** Short audio blocks in one statistics period (5 s, about 215 blocks) that mean the stream has run out of frames. */
         private const val STARVED_BLOCKS = 40

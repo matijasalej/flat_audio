@@ -39,7 +39,10 @@ class DueQueue<T> {
  * time of its picture or sound plus the hold of the stream); when that moment comes it goes into the muxer, which sends it at the rate of
  * the stream, and the slots that have come by ([slotOf] says how many) are emitted into the ring that the connections of the TV read from.
  * The stream is constant in rate: what is not picture or sound is padding. What is due but late is queued at once; how late is counted.
- * Thread safe as far as [submitAudio] and [submitVideo] may be called while another thread calls [step]. Plain Kotlin.
+ * **Nothing here waits for video**: the slots go out on the clock whether a picture has come or not, audio goes before video in the
+ * slots, and a picture that comes so late that it could not reach the TV before its time is dropped by the [gate] (with what depends on
+ * it, up to the next key picture), not sent late. Thread safe as far as [submitAudio] and [submitVideo] may be called while another thread
+ * calls [step]. Plain Kotlin.
  */
 class TsWriter(private val mux: TsMuxer, private val history: TsHistory, private val slotOf: (Long) -> Long) {
     private sealed class Item {
@@ -58,6 +61,10 @@ class TsWriter(private val mux: TsMuxer, private val history: TsHistory, private
         val audioCount: Int,
         val videoCount: Int,
         val queued: Int,
+        /** Pictures the gate did not let into the stream in the period. */
+        val videoDropped: Int = 0,
+        /** The most slots one step emitted in the period (a step that comes late emits what passed meanwhile, 6 per ms at 9 Mbit/s). */
+        val maxStepSlots: Long = 0,
     )
 
     private var audioLateSum = 0.0
@@ -66,6 +73,12 @@ class TsWriter(private val mux: TsMuxer, private val history: TsHistory, private
     private var videoLateSum = 0.0
     private var videoLateMax = 0.0
     private var videoCount = 0
+    private var videoDroppedPeriod = 0
+    private var maxStepSlotsPeriod = 0L
+
+    /** Lets a late picture through or not (see [LateVideoGate]); null: every picture goes into the stream. */
+    @Volatile
+    var gate: LateVideoGate? = null
 
     @Volatile
     var keyUnits = 0L
@@ -94,8 +107,14 @@ class TsWriter(private val mux: TsMuxer, private val history: TsHistory, private
                 val lateMs = maxOf(0L, nowNanos - due) / 1e6
                 when (item) {
                     is Item.Video -> {
-                        mux.queueVideo(item.au, item.pts90, item.key)
-                        noteLate(false, lateMs)
+                        val g = gate
+                        val verdict = g?.judge(item.key, nowNanos - due, item.au.size, mux.queuedVideoPackets * TsMuxer.PACKET.toLong())
+                        if (verdict == null || verdict == LateVideoGate.Verdict.SEND) {
+                            mux.queueVideo(item.au, item.pts90, item.key)
+                            noteLate(false, lateMs)
+                        } else {
+                            noteDropped()
+                        }
                     }
                     is Item.Audio -> {
                         mux.queueAudio(item.adts, item.pts90)
@@ -104,10 +123,12 @@ class TsWriter(private val mux: TsMuxer, private val history: TsHistory, private
                 }
             }
             val slot = slotOf(nowNanos)
+            val firstSlot = mux.nextSlotToEmit
             while (mux.nextSlotToEmit <= slot) {
                 val upTo = minOf(slot, mux.nextSlotToEmit + CHUNK_SLOTS - 1)
                 put(mux.emit(upTo), nowNanos)
             }
+            noteStep(mux.nextSlotToEmit - firstSlot)
         }
         val next = queue.nextDue()
         return if (next == null) nowNanos + maxWaitNanos else minOf(next, nowNanos + maxWaitNanos)
@@ -143,14 +164,26 @@ class TsWriter(private val mux: TsMuxer, private val history: TsHistory, private
         }
     }
 
+    @Synchronized
+    private fun noteDropped() {
+        videoDroppedPeriod++
+    }
+
+    @Synchronized
+    private fun noteStep(slots: Long) {
+        if (slots > maxStepSlotsPeriod) maxStepSlotsPeriod = slots
+    }
+
     /** The lateness statistics since the last call (and a fresh start of them). */
     @Synchronized
     fun takeStats(): Stats {
         val s = Stats(
             if (audioCount == 0) 0.0 else audioLateSum / audioCount, audioLateMax,
             if (videoCount == 0) 0.0 else videoLateSum / videoCount, videoLateMax,
-            audioCount, videoCount, queue.size,
+            audioCount, videoCount, queue.size, videoDroppedPeriod, maxStepSlotsPeriod,
         )
+        videoDroppedPeriod = 0
+        maxStepSlotsPeriod = 0L
         audioLateSum = 0.0
         audioLateMax = 0.0
         audioCount = 0

@@ -44,6 +44,9 @@ class LyricsScenes(
                 null
             }
         }
-        return TvScene(np.title!!, np.artist ?: "", cover?.bitmap, cover?.color ?: CoverColor.DEFAULT, lines, status, shifted, np.durationMs)
+        return TvScene(
+            np.title!!, np.artist ?: "", cover?.bitmap, cover?.color ?: CoverColor.DEFAULT, lines, status, shifted, np.durationMs,
+            np.key, cover?.small, cover?.big,
+        )
     }
 }

@@ -104,6 +104,7 @@ class TvAudioEncoder(private val rate: Int, private val bitrate: Int, private va
     }
 
     private fun drainLoop(c: MediaCodec) {
+        ThreadBoost.urgent()
         val info = MediaCodec.BufferInfo()
         try {
             while (running) {

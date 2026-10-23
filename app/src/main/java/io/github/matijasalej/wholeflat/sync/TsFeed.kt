@@ -13,4 +13,10 @@ interface TsFeed {
 
     /** Asks the encoder for an IDR picture as soon as it can. */
     fun requestSync()
+
+    /** The rate of the stream (bit/s): the send buffer of a connection holds so many milliseconds of it. */
+    val streamBitsPerSecond: Int get() = 9_000_000
+
+    /** The state of the stream in a line (the encoder, the writer, the box), for the log lines that tell the TV was given old data. */
+    fun health(): String = ""
 }

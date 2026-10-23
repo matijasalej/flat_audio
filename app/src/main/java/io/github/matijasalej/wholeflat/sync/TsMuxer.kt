@@ -33,6 +33,11 @@ class TsMuxer(
     val muxRate: Int = MUX_RATE,
     pcrEveryMs: Int = 20,
     psiEveryMs: Int = 100,
+    /**
+     * False: a stream of the audio alone (the screen of the TV is off): the PMT lists the audio only and the caller puts the PCR on the audio
+     * PID (`pcrPid = AUDIO_PID`). There are no key pictures then, so every PAT of the periodic tables (every 100 ms) is a place to start at.
+     */
+    val hasVideo: Boolean = true,
 ) {
     /**
      * The packets of the slots that were emitted: whole 188 byte packets, one for each slot from [firstSlot] on, and the byte offsets
@@ -185,11 +190,11 @@ class TsMuxer(
             return false
         }
         if (n >= nextTablesSlot) {
-            tablesForKey = false
+            tablesForKey = !hasVideo
             nextTablesSlot = n + psiEverySlots
             tablesStage = 2
             writeTable(pat, 0, dest, off)
-            return false
+            return !hasVideo
         }
         // 3. audio goes before video
         val audio = audioQueue.pollFirst()
@@ -300,7 +305,7 @@ class TsMuxer(
     }
 
     private fun pmtSection(): ByteArray {
-        val s = ByteArray(12 + 2 * 5 + 4)
+        val s = ByteArray(12 + (if (hasVideo) 2 else 1) * 5 + 4)
         s[0] = 0x02 // table id: PMT
         s[1] = 0xB0.toByte()
         s[2] = (s.size - 3).toByte()
@@ -314,11 +319,13 @@ class TsMuxer(
         s[10] = 0xF0.toByte() // program info length 0
         s[11] = 0x00
         var at = 12
-        s[at++] = 0x1B // AVC video
-        s[at++] = (0xE0 or (videoPid shr 8)).toByte()
-        s[at++] = videoPid.toByte()
-        s[at++] = 0xF0.toByte()
-        s[at++] = 0x00
+        if (hasVideo) {
+            s[at++] = 0x1B // AVC video
+            s[at++] = (0xE0 or (videoPid shr 8)).toByte()
+            s[at++] = videoPid.toByte()
+            s[at++] = 0xF0.toByte()
+            s[at++] = 0x00
+        }
         s[at++] = 0x0F // AAC with ADTS
         s[at++] = (0xE0 or (audioPid shr 8)).toByte()
         s[at++] = audioPid.toByte()

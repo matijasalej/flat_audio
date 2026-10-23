@@ -36,11 +36,13 @@ class TvTsServeTest {
     @Before
     fun setUp() {
         KitchenStreams.log = { logs.add(it) }
+        KitchenStreams.tsBurstNanos = 0L
     }
 
     @After
     fun tearDown() {
         KitchenStreams.log = {}
+        KitchenStreams.tsBurstNanos = 3_000_000_000L
     }
 
     private class FakeConn : ClientConn {
@@ -51,6 +53,10 @@ class TvTsServeTest {
 
         @Volatile
         var sendBuffer = 0
+
+        /** A TV that reads slowly: every write takes this long (ms). */
+        @Volatile
+        var writeDelayMs = 0L
 
         @Volatile
         var peerHow = ""
@@ -63,6 +69,7 @@ class TvTsServeTest {
 
             override fun write(b: ByteArray, off: Int, len: Int) {
                 failWith?.let { throw it }
+                if (writeDelayMs > 0) Thread.sleep(writeDelayMs)
                 writes.add(b.copyOfRange(off, off + len))
             }
         }
@@ -95,6 +102,9 @@ class TvTsServeTest {
 
     private class Feed(var lead: Long) : TsFeed {
         override val history = TsHistory()
+
+        override fun health(): String = "HEALTH-OF-THE-STREAM"
+
         val syncRequests = AtomicInteger()
 
         @Volatile
@@ -450,5 +460,66 @@ class TvTsServeTest {
         serveAsync(s, "GET", conn).join(5_000)
         assertNotNull(s.record!!.connections()[0].reason)
         assertEquals(0, s.streamCount)
+    }
+
+    // ---- a TV that pauses ---------------------------------------------------------------------------
+
+    @Test
+    fun aWriteThatBlocksLongInTheSteadyStateIsAPauseOfTheTvAndTheStreamIsSuspect() {
+        val feed = Feed(0)
+        feed.history.append(unit(1), System.nanoTime() - 100 * ms, true)
+        val s = tsSession(feed)
+        s.tvPauseMs = 100
+        val conn = FakeConn()
+        serveAsync(s, "GET", conn)
+        waitUntil { conn.writes.isNotEmpty() }
+        assertFalse(s.suspect)
+        conn.writeDelayMs = 150
+        feed.history.append(unit(2), System.nanoTime(), false)
+        waitUntil { s.tvPauses >= 1 }
+        assertTrue(s.suspect)
+        assertTrue("last pause ${s.lastTvPauseMs}", s.lastTvPauseMs >= 140.0)
+        assertTrue(s.tvPausedMs >= 140.0)
+        waitUntil { logs.any { it.contains("the TV did not read for") && it.contains("suspect") } }
+        conn.writeDelayMs = 0
+        conn.peerCloses()
+    }
+
+    @Test
+    fun withTheWatchSwitchedOffAPauseIsNotCounted() {
+        val feed = Feed(0)
+        feed.history.append(unit(1), System.nanoTime() - 100 * ms, true)
+        val s = tsSession(feed)
+        s.tvPauseMs = 0
+        val conn = FakeConn()
+        serveAsync(s, "GET", conn)
+        waitUntil { conn.writes.isNotEmpty() }
+        conn.writeDelayMs = 150
+        feed.history.append(unit(2), System.nanoTime(), false)
+        waitUntil { conn.writes.size >= 2 }
+        assertEquals(0, s.tvPauses)
+        assertFalse(s.suspect)
+        conn.writeDelayMs = 0
+        conn.peerCloses()
+    }
+
+    @Test
+    fun dataThatWasOldWhenItWasWrittenIsWarnedAboutWithTheHealthOfTheStream() {
+        val feed = Feed(0)
+        feed.history.append(unit(1), System.nanoTime() - 100 * ms, true)
+        val s = tsSession(feed)
+        s.statsEveryMs = 50
+        val conn = FakeConn()
+        serveAsync(s, "GET", conn)
+        waitUntil { conn.writes.isNotEmpty() }
+        // a unit that has been in the ring for 800 ms when the connection takes it
+        feed.history.append(unit(2), System.nanoTime() - 800 * ms, false)
+        waitUntil { conn.writes.size >= 2 }
+        Thread.sleep(80)
+        feed.history.append(unit(3), System.nanoTime() - 800 * ms, false)
+        waitUntil { logs.any { it.contains("WARNING") && it.contains("ms old") && it.contains("HEALTH-OF-THE-STREAM") } }
+        assertTrue(s.lateDeliveries >= 1)
+        assertTrue(s.worstBehindMs >= 700.0)
+        conn.peerCloses()
     }
 }

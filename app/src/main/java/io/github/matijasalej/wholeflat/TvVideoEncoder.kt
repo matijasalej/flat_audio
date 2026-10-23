@@ -79,6 +79,19 @@ class TvVideoEncoder(
     private var latencySum = 0.0
     private var latencyCount = 0L
     private var lastSlowLogNanos = 0L
+    private var periodSum = 0.0
+    private var periodCount = 0L
+    private var periodMax = 0.0
+
+    /** The average and the worst latency (ms) of the pictures since the last call (and a fresh start of them). */
+    @Synchronized
+    fun takePeriod(): Pair<Double, Double> {
+        val r = Pair(if (periodCount == 0L) 0.0 else periodSum / periodCount, periodMax)
+        periodSum = 0.0
+        periodCount = 0L
+        periodMax = 0.0
+        return r
+    }
 
     /** What the encoder gave for each of the last pictures, for a look at a scroll: when it came (ms of System.nanoTime), the time of the picture (us), its size, whether it is a key picture, and the time from the picture to its bytes (ms). */
     private class Out(val wallMs: Long, val ptsUs: Long, val bytes: Int, val key: Boolean, val latencyMs: Double)
@@ -193,6 +206,7 @@ class TvVideoEncoder(
     }
 
     private fun drainLoop(c: MediaCodec) {
+        ThreadBoost.urgent()
         val info = MediaCodec.BufferInfo()
         try {
             while (running) {
@@ -237,9 +251,13 @@ class TvVideoEncoder(
         }
     }
 
+    @Synchronized
     private fun noteLatency(ms: Double) {
         // a timestamp that is not the time of the picture (a repeated one) gives a nonsense: only plausible ones count
         if (ms < -50 || ms > 2_000) return
+        periodSum += ms
+        periodCount++
+        if (ms > periodMax) periodMax = ms
         latencyMs = ms
         if (ms > latencyMaxMs) latencyMaxMs = ms
         latencySum += ms

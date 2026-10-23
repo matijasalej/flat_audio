@@ -31,6 +31,14 @@ class TvScene(
     val positionMs: Long,
     /** Length of the track (ms), negative if it is not known. */
     val durationMs: Long,
+    /** What tells this track from another: a change of it is a new track, which the picture fades to. Empty: no track. */
+    val key: String = "",
+    /**
+     * The cover cut square and scaled to twice the size it is drawn at, for the footer and for the big cover: made once, away from the thread
+     * that draws (null: the drawer makes the square from [cover] itself).
+     */
+    val coverSmall: Bitmap? = null,
+    val coverBig: Bitmap? = null,
 )
 
 /** Makes the scene for the picture that goes with the capture time [captureNanos] (System.nanoTime): the picture and the sound of that moment are shown together. */

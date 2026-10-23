@@ -217,4 +217,114 @@ class TsWriterTest {
         assertEquals(40, r.pes[TsMuxer.AUDIO_PID]!!.size)
         assertEquals(0, mux.queuedVideoPackets)
     }
+
+    // ---- video that comes after its time ---------------------------------------------------------
+
+    /** A writer with the gate on, stepped every millisecond from [from] to [to] (ms), with the audio of 23 ms frames. */
+    private fun run(w: TsWriter, from: Long, to: Long, audio: Boolean = true) {
+        var t = from * ms
+        while (t <= to * ms) {
+            if (audio && t % (23 * ms) == 0L) w.submitAudio(t, au(300), 90_000 + t / ms * 90)
+            w.step(t)
+            t += ms
+        }
+    }
+
+    private fun gated(): Triple<TsHistory, TsWriter, LateVideoGate> {
+        val (_, history, w) = setup()
+        val gate = LateVideoGate(9_000_000)
+        w.gate = gate
+        return Triple(history, w, gate)
+    }
+
+    @Test
+    fun aPictureThatComesTooLateIsDroppedAndTheAudioAndTheClockGoOnAsIfItWasNeverExpected() {
+        val (history, w, gate) = gated()
+        run(w, 0, 899)
+        // due at 110 ms, but the encoder gave it at 900 ms: 790 ms late
+        w.submitVideo(110 * ms, au(20_000), 10_000, true)
+        run(w, 900, 1_200)
+        val r = everything(history)
+        assertEquals(emptyList<String>(), r.errors)
+        assertNull("no picture reached the stream", r.pes[TsMuxer.VIDEO_PID])
+        // the audio came on every one of its slots: 23 ms apart over 1.2 s
+        assertTrue("audio frames ${r.pes[TsMuxer.AUDIO_PID]!!.size}", r.pes[TsMuxer.AUDIO_PID]!!.size >= 50)
+        val pcrs = r.packets.filter { it.pcr != null }
+        for (i in 1 until pcrs.size) assertTrue((pcrs[i].pcr!! - pcrs[i - 1].pcr!!) / 27_000.0 <= 20.1)
+        assertEquals((slotOf(1_200 * ms) + 1) * 188, history.endPos)
+        assertEquals(1L, gate.dropped)
+        assertTrue(gate.waitingForKey)
+        assertEquals(1, w.takeStats().videoDropped)
+    }
+
+    @Test
+    fun theStreamIsTheSameWhateverTheVideoDoesAudioPcrAndPaddingAreNotAffected() {
+        // the same second with no picture at all, with a picture on time and with a picture a second late
+        fun stream(video: (TsWriter) -> Unit): TsReader {
+            val (history, w, _) = gated()
+            video(w)
+            run(w, 0, 1_000)
+            return everything(history)
+        }
+        val none = stream { }
+        val onTime = stream { it.submitVideo(100 * ms, au(30_000), 9_000, true) }
+        val late = stream { it.submitVideo(0, au(30_000), 9_000, true) } // due at 0, written at its first step: on time
+        fun audioOf(r: TsReader) = r.pes[TsMuxer.AUDIO_PID]!!.map { it.pts to it.payload.size }
+        assertEquals(audioOf(none), audioOf(onTime))
+        assertEquals(audioOf(none), audioOf(late))
+        assertEquals(none.packets.count { it.pcr != null }, onTime.packets.count { it.pcr != null })
+        assertNull(none.pes[TsMuxer.VIDEO_PID])
+        assertEquals(1, onTime.pes[TsMuxer.VIDEO_PID]!!.size)
+    }
+
+    @Test
+    fun theFollowingPicturesAreDroppedUntilAKeyPictureThatIsInTimeAndThenTheVideoGoesOn() {
+        val (history, w, gate) = gated()
+        // a key picture 700 ms late, then three pictures on time that refer to it, then a key picture on time, then two more
+        run(w, 0, 800)
+        w.submitVideo(100 * ms, au(20_000), 9_000, true) // 700 ms late
+        w.submitVideo(800 * ms, au(2_000), 72_000, false)
+        w.submitVideo(833 * ms, au(2_000), 75_000, false)
+        w.submitVideo(866 * ms, au(2_000), 78_000, false)
+        w.step(800 * ms)
+        assertTrue(gate.waitingForKey)
+        w.submitVideo(900 * ms, au(12_000), 81_000, true)
+        w.submitVideo(933 * ms, au(1_500), 84_000, false)
+        w.submitVideo(966 * ms, au(1_500), 87_000, false)
+        run(w, 801, 1_300)
+        val r = everything(history)
+        assertEquals(emptyList<String>(), r.errors)
+        val video = r.pes[TsMuxer.VIDEO_PID]!!
+        assertEquals(listOf(81_000L, 84_000L, 87_000L), video.map { it.pts })
+        assertEquals(false, gate.waitingForKey)
+        assertEquals(4L, gate.dropped)
+        assertEquals(1L, gate.droppedLate)
+        assertEquals(3L, gate.droppedBroken)
+        assertEquals(1L, gate.episodes)
+    }
+
+    @Test
+    fun aPictureThatIsLateButStillInTimeIsSentAndCounted() {
+        val (history, w, gate) = gated()
+        run(w, 0, 300)
+        w.submitVideo(100 * ms, au(8_000), 9_000, true) // 200 ms late, 8 KB takes 8 ms
+        run(w, 301, 600)
+        val r = everything(history)
+        assertEquals(1, r.pes[TsMuxer.VIDEO_PID]!!.size)
+        assertEquals(1L, gate.sentLate)
+        assertEquals(0L, gate.dropped)
+        assertEquals(1, w.takeStats().videoCount)
+    }
+
+    @Test
+    fun theStepsThatCameLateAreCountedByTheSlotsTheyHadToMakeUp() {
+        val (_, _, w) = setup()
+        w.step(100 * ms)
+        w.takeStats()
+        w.step(110 * ms)
+        w.step(900 * ms) // the writer slept 790 ms
+        val s = w.takeStats()
+        assertTrue("slots at once ${s.maxStepSlots}", s.maxStepSlots in 4_700L..4_760L)
+        assertEquals(0L, w.takeStats().maxStepSlots)
+    }
 }

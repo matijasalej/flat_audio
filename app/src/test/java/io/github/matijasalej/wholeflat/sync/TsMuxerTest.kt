@@ -351,4 +351,32 @@ class TsMuxerTest {
         assertEquals(100L, m.packets)
         assertFalse(m.queuedPackets > 0)
     }
+
+    @Test
+    fun aStreamOfTheAudioAloneHasNoVideoInTheTablesTheClockOnTheAudioAndAPlaceToStartEveryHundredMilliseconds() {
+        val m = TsMuxer(pcrPid = TsMuxer.AUDIO_PID, hasVideo = false)
+        for (i in 0 until 60) m.queueAudio(ByteArray(300) { (it + 1).toByte() }, 90_000L + i * 2_070L)
+        var keys = 0
+        val out = java.io.ByteArrayOutputStream()
+        var slot = 0L
+        while (slot < 6_000) {
+            val e = m.emit(slot + 599)
+            keys += e.keyOffsets.size
+            out.write(e.bytes)
+            slot += 600
+        }
+        val r = TsReader(out.toByteArray())
+        assertEquals(emptyList<String>(), r.errors)
+        assertEquals(null, r.pes[TsMuxer.VIDEO_PID])
+        assertEquals(60, r.pes[TsMuxer.AUDIO_PID]!!.size)
+        // the tables name the audio only, and the clock is on its PID
+        val pmt = r.packets.first { it.pid == TsMuxer.PMT_PID }.payload
+        assertEquals(0x0F, pmt[1 + 12].toInt() and 0xFF)
+        assertEquals(TsMuxer.AUDIO_PID, ((pmt[1 + 8].toInt() and 0x1F) shl 8) or (pmt[1 + 9].toInt() and 0xFF))
+        assertTrue(r.packets.filter { it.pcr != null }.all { it.pid == TsMuxer.AUDIO_PID })
+        // about ten places to start in a second of the stream, each the PAT
+        assertTrue("places $keys", keys in 9..11)
+        val pcrs = r.packets.filter { it.pcr != null }
+        for (i in 1 until pcrs.size) assertTrue((pcrs[i].pcr!! - pcrs[i - 1].pcr!!) / 27_000.0 <= 20.1)
+    }
 }

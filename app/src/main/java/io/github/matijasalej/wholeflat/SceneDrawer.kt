@@ -38,8 +38,11 @@ class SceneDrawer(context: Context) {
     private var coverScaled: Bitmap? = null
     private var coverScaledSize = 0
 
-    /** Draws [picture] with what is known of the track in [scene]. */
-    fun draw(canvas: Canvas, picture: Picture, scene: TvScene?) {
+    /**
+     * Draws [picture] with what is known of the track in [scene]. With [fadeFrom] (the last picture of the track before) and a [fadeAlpha]
+     * under 1 the lyrics picture is the old scene with the new one blended over it, which is how the track changes in the TV's stream.
+     */
+    fun draw(canvas: Canvas, picture: Picture, scene: TvScene?, fadeFrom: TvScene? = null, fadeAlpha: Float = 1f) {
         // the design is made for 1920 x 1080; a smaller picture (the setting `tv_video`) is the same design on a smaller canvas
         val scale = canvas.width.toFloat() / LyricsLayout.W
         val scaled = canvas.width > 0 && Math.abs(scale - 1f) > 0.001f
@@ -51,7 +54,11 @@ class SceneDrawer(context: Context) {
             when (picture) {
                 Picture.BLACK -> canvas.drawColor(Color.BLACK)
                 Picture.SPLASH -> splash(canvas, scene?.background ?: CoverColor.DEFAULT)
-                Picture.LYRICS -> if (scene == null) splash(canvas, CoverColor.DEFAULT) else lyrics(canvas, scene)
+                Picture.LYRICS -> when {
+                    scene == null -> splash(canvas, CoverColor.DEFAULT)
+                    fadeFrom != null && fadeAlpha < 0.999f -> fade(canvas, fadeFrom, scene, fadeAlpha)
+                    else -> lyrics(canvas, scene)
+                }
             }
         } finally {
             if (scaled) canvas.restore()
@@ -69,6 +76,28 @@ class SceneDrawer(context: Context) {
         val y = LyricsLayout.H / 2f - (text.ascent() + text.descent()) / 2f
         canvas.drawText("Whole Flat", LyricsLayout.W / 2f, y, text)
         text.textAlign = Paint.Align.LEFT
+    }
+
+    // ---- the change of track ---------------------------------------------------------------------
+
+    /** The old scene as it was, and the new one over it with [alpha] of its strength (each scene fills the picture, so the layer is opaque inside). */
+    private fun fade(canvas: Canvas, from: TvScene, to: TvScene, alpha: Float) {
+        lyrics(canvas, from)
+        // a canvas that will not make the layer gets the new scene as it is: a problem of the fade is never a problem of the stream
+        val layer = try {
+            canvas.saveLayerAlpha(0f, 0f, LyricsLayout.W.toFloat(), LyricsLayout.H.toFloat(), (alpha.coerceIn(0f, 1f) * 255f).toInt())
+        } catch (t: Throwable) {
+            -1
+        }
+        if (layer < 0) {
+            lyrics(canvas, to)
+            return
+        }
+        try {
+            lyrics(canvas, to)
+        } finally {
+            canvas.restoreToCount(layer)
+        }
     }
 
     // ---- the lyrics ------------------------------------------------------------------------------
@@ -101,7 +130,7 @@ class SceneDrawer(context: Context) {
     }
 
     private fun footer(canvas: Canvas, sc: TvScene, colors: LyricsLayout.Colors) {
-        drawCover(canvas, sc.cover, LyricsLayout.COVER_X, LyricsLayout.COVER_Y, LyricsLayout.COVER_SIZE, colors)
+        drawCover(canvas, sc.cover, sc.coverSmall, LyricsLayout.COVER_X, LyricsLayout.COVER_Y, LyricsLayout.COVER_SIZE, colors)
         text.textAlign = Paint.Align.LEFT
         drawText(canvas, sc.title, titleFace, LyricsLayout.TITLE_SIZE, LyricsLayout.TITLE_X, LyricsLayout.TITLE_Y, Color.WHITE, LyricsLayout.TEXT_MAX_WIDTH)
         drawText(canvas, sc.artist, bodyFace, LyricsLayout.ARTIST_SIZE, LyricsLayout.TITLE_X, LyricsLayout.ARTIST_Y, colors.secondary, LyricsLayout.TEXT_MAX_WIDTH)
@@ -126,7 +155,7 @@ class SceneDrawer(context: Context) {
 
     private fun noLyrics(canvas: Canvas, sc: TvScene, colors: LyricsLayout.Colors) {
         val cx = LyricsLayout.W / 2f
-        drawCover(canvas, sc.cover, cx - LyricsLayout.BIG_COVER / 2f, LyricsLayout.BIG_COVER_Y, LyricsLayout.BIG_COVER, colors)
+        drawCover(canvas, sc.cover, sc.coverBig, cx - LyricsLayout.BIG_COVER / 2f, LyricsLayout.BIG_COVER_Y, LyricsLayout.BIG_COVER, colors)
         text.textAlign = Paint.Align.CENTER
         drawText(canvas, sc.title, lineFace, LyricsLayout.BIG_TITLE_SIZE, cx, LyricsLayout.BIG_TITLE_Y, Color.WHITE, LyricsLayout.BIG_TEXT_MAX_WIDTH)
         drawText(canvas, sc.artist, bodyFace, LyricsLayout.BIG_ARTIST_SIZE, cx, LyricsLayout.BIG_ARTIST_Y, colors.secondary, LyricsLayout.BIG_TEXT_MAX_WIDTH)
@@ -150,8 +179,13 @@ class SceneDrawer(context: Context) {
         canvas.drawText(shown, x, top + ascent, text)
     }
 
-    private fun drawCover(canvas: Canvas, cover: Bitmap?, x: Float, y: Float, size: Float, colors: LyricsLayout.Colors) {
+    /** The cover in the square at [x], [y]: from the square made for it ([prepared], away from this thread) if there is one, else from [cover] itself. */
+    private fun drawCover(canvas: Canvas, cover: Bitmap?, prepared: Bitmap?, x: Float, y: Float, size: Float, colors: LyricsLayout.Colors) {
         rect.set(x, y, x + size, y + size)
+        if (prepared != null && !prepared.isRecycled) {
+            canvas.drawBitmap(prepared, null, rect, bitmapPaint)
+            return
+        }
         if (cover == null || cover.isRecycled) {
             shape.style = Paint.Style.FILL
             shape.color = colors.track

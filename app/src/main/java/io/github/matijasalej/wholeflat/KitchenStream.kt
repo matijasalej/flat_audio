@@ -168,6 +168,60 @@ class KitchenSession(
      */
     fun liveBacklogMs(): Double = tsBacklogs.lastEntry()?.value ?: Double.NaN
 
+    /**
+     * A write to the TV that blocks for this long (ms) in the steady state of its connection means the TV did not read for that long: its
+     * player paused or stalled by itself (a pause like that has been seen to leave the picture frozen and the sound later than the other
+     * room afterwards). 0: not watched (the Sonos's streams).
+     */
+    @Volatile
+    var tvPauseMs = 0
+
+    /** The pauses of the TV seen on the connection it plays: how many, how long in all (ms), the latest, and when it was (System.nanoTime). */
+    @Volatile
+    var tvPauses = 0
+        private set
+
+    @Volatile
+    var tvPausedMs = 0.0
+        private set
+
+    @Volatile
+    var lastTvPauseMs = 0.0
+        private set
+
+    @Volatile
+    var lastTvPauseNanos = 0L
+        private set
+
+    /** Statistics periods in which the TV was given data more than 300 ms old, and the oldest data seen (ms). */
+    @Volatile
+    var lateDeliveries = 0
+        private set
+
+    @Volatile
+    var worstBehindMs = 0.0
+        private set
+
+    /** The stream is suspect: its TV paused, so its sound may be later than the other room's. It stays so until the stream is made again. */
+    val suspect: Boolean get() = tvPauses > 0
+
+    @Synchronized
+    fun noteTvPause(ms: Double, nowNanos: Long) {
+        tvPauses++
+        tvPausedMs += ms
+        lastTvPauseMs = ms
+        lastTvPauseNanos = nowNanos
+    }
+
+    @Synchronized
+    fun noteLateDelivery(behindMs: Double) {
+        lateDeliveries++
+        if (behindMs > worstBehindMs) worstBehindMs = behindMs
+    }
+
+    /** Whether connection [id] is the one the TV plays (the newest that is open): the others are looks it takes at the stream and are dropped. */
+    fun isNewestTsConnection(id: Int): Boolean = tsBacklogs.isEmpty() || tsBacklogs.lastKey() == id
+
     /** The statistics of a connection are put in the log every this many ms (0: not). */
     @Volatile
     var statsEveryMs = 0L
@@ -454,6 +508,16 @@ object KitchenStreams {
 
     /** One write of a transport stream carries at most this much (the burst at the start goes out in pieces of it). */
     private const val TS_MAX_WRITE_BYTES = 256 * 1024
+
+    /** The first seconds of a connection are the catching up of the burst: its writes block while the TV reads the 1.5 s it was given at once (the tests shorten it). */
+    @Volatile
+    var tsBurstNanos = 3_000_000_000L
+
+    /** Data older than this (ms) when it was written to the TV is put in the log as a warning, with the state of the stream. */
+    private const val TS_BEHIND_WARN_MS = 300.0
+
+    /** What the TV's socket holds of the stream before a write blocks (ms): the send buffer over the rate of the stream, doubled by the system. */
+    private fun sendBufferMs(session: KitchenSession): Double = 2.0 * session.sendBufferBytes * 8 * 1000.0 / (session.ts?.streamBitsPerSecond ?: 9_000_000)
 
     /**
      * The frames between two trims of a stream (a trim is one frame dropped or repeated): 10 ms for Spotify's, which is up to
@@ -798,6 +862,8 @@ object KitchenStreams {
      * started, how much it was given at once, how fast it read and how far behind the newest data it was.
      */
     private fun streamTs(session: KitchenSession, remote: String, userAgent: String, conn: ClientConn, range: String) {
+        // this thread has to run within milliseconds of the data being there: the TV takes a gap of a second for a break in the stream
+        ThreadBoost.urgent()
         val out = conn.out
         val began = System.nanoTime()
         val count = session.nextConnectionId()
@@ -826,6 +892,7 @@ object KitchenStreams {
         var intervalBlockedMs = 0.0
         var intervalBlockedMax = 0.0
         var intervalBehindMax = 0.0
+        var intervalWaitedMax = 0.0
         try {
             if (session.sendBufferBytes > 0) conn.limitSendBuffer(session.sendBufferBytes)
             val feedSource = session.ts
@@ -892,6 +959,7 @@ object KitchenStreams {
                         val t1 = System.nanoTime()
                         pos = r.next
                         val blockedMs = (t1 - t0) / 1e6
+                        val waitedMs = (t0 - r.lastNanos) / 1e6
                         val behindMs = (t1 - r.lastNanos) / 1e6
                         bytes += r.bytes.size
                         writes++
@@ -900,6 +968,19 @@ object KitchenStreams {
                         if (blockedMs > blockedMax) blockedMax = blockedMs
                         // how far behind the newest data the connection was is counted after the burst (the first 3 s are the catching up)
                         if (t1 - began > 3_000_000_000L && behindMs > behindMax) behindMax = behindMs
+                        if (t1 - began > tsBurstNanos) {
+                            if (waitedMs > intervalWaitedMax) intervalWaitedMax = waitedMs
+                            // a write that blocks long after the burst: the TV did not read (the send buffer holds only about 60 to 110 ms of the stream)
+                            if (session.tvPauseMs > 0 && blockedMs >= session.tvPauseMs && session.isNewestTsConnection(connectionId)) {
+                                session.noteTvPause(blockedMs, t1)
+                                log(
+                                    "WARNING conn $connectionId: the TV did not read for ${"%.0f".format(java.util.Locale.US, blockedMs)} ms (a write blocked that long; " +
+                                        "the TV's buffer held about ${"%.0f".format(java.util.Locale.US, sendBufferMs(session))} ms more before that): its player paused or stalled. " +
+                                        "If its picture and sound were held that long (pause ${session.tvPauses}, ${"%.0f".format(java.util.Locale.US, session.tvPausedMs)} ms in all) " +
+                                        "the kitchen is now that much ahead of it; the stream is marked suspect and is made again at the next change of song",
+                                )
+                            }
+                        }
                         if (rec != null) {
                             if (rec.firstByteMs < 0) rec.firstByteMs = session.record?.ms(t1) ?: 0L
                             rec.bytes = bytes
@@ -921,8 +1002,19 @@ object KitchenStreams {
                                         "(${"%.0f".format(java.util.Locale.US, intervalBytes * 8 / seconds / 1000.0)} kbit/s), a write blocked " +
                                         "${"%.1f".format(java.util.Locale.US, intervalBlockedMs / maxOf(1, intervalWrites))} ms on average and " +
                                         "${"%.1f".format(java.util.Locale.US, intervalBlockedMax)} ms at most, the data written was up to " +
-                                        "${"%.0f".format(java.util.Locale.US, intervalBehindMax)} ms old",
+                                        "${"%.0f".format(java.util.Locale.US, intervalBehindMax)} ms old (it had waited up to " +
+                                        "${"%.0f".format(java.util.Locale.US, intervalWaitedMax)} ms in the ring when this thread took it)",
                                 )
+                                if (intervalBehindMax > TS_BEHIND_WARN_MS && t1 - began > tsBurstNanos) {
+                                    session.noteLateDelivery(intervalBehindMax)
+                                    log(
+                                        "WARNING conn $connectionId: the TV was given data up to ${"%.0f".format(java.util.Locale.US, intervalBehindMax)} ms old in the last " +
+                                            "${"%.1f".format(java.util.Locale.US, seconds)} s. Up to ${"%.0f".format(java.util.Locale.US, intervalWaitedMax)} ms of it was spent before this thread " +
+                                            "took the data (the system did not run it), up to ${"%.0f".format(java.util.Locale.US, intervalBlockedMax)} ms in a write (the TV did not read). " +
+                                            feedSource.health(),
+                                    )
+                                }
+                                intervalWaitedMax = 0.0
                                 intervalStart = t1
                                 intervalBytes = 0
                                 intervalWrites = 0

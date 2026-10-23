@@ -21,6 +21,12 @@ class SettingsValues(
     val captureLeadMs: Int,
     /** The lag the kitchen is brought to in capture mode (ms after the capture); -1: it is left where it locked. */
     val kitchenTargetMs: Int,
+    /** The lowest lag the kitchen is brought to in capture mode (ms after the capture); an underrun can only raise it. */
+    val kitchenFloorMs: Int,
+    /** The volume of the Sonos in capture mode (0 to 100, set from the phone page); -1: the app leaves it alone. */
+    val kitchenVolume: Int,
+    /** Whether the Sonos follows the music volume of this box (the phone's Cast volume); off where Cast changes nothing. */
+    val captureVolumeMirror: Boolean,
     /** The format of the stream to the Sonos: "auto", "flac" or "wav" (see [StreamFormat]). */
     val kitchenFormat: String,
     /** The block size of the FLAC stream: 4096, 1152 or 576 frames. */
@@ -38,14 +44,18 @@ class SettingsModel {
     var captureEnabled = true
     var captureLivingLatencyMs = 0
     var captureLeadMs = DEFAULT_CAPTURE_LEAD_MS
-    var kitchenTargetMs = NO_TARGET
+    var kitchenTargetMs = DEFAULT_KITCHEN_TARGET_MS
+    var kitchenFloorMs = DEFAULT_KITCHEN_FLOOR_MS
+    var kitchenVolume = NO_VOLUME
+    var captureVolumeMirror = false
     var kitchenFormat = StreamFormat.AUTO
     var kitchenFlacBlock = Flac.BLOCK
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
-        captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFormat, kitchenFlacBlock,
+        captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
+        captureVolumeMirror, kitchenFormat, kitchenFlacBlock,
     )
 
     fun toJson(): JSONObject {
@@ -61,6 +71,9 @@ class SettingsModel {
         o.put(CAPTURE_LIVING_LATENCY_MS, captureLivingLatencyMs)
         o.put(CAPTURE_LEAD_MS, captureLeadMs)
         o.put(KITCHEN_TARGET_MS, kitchenTargetMs)
+        o.put(KITCHEN_FLOOR_MS, kitchenFloorMs)
+        o.put(KITCHEN_VOLUME, kitchenVolume)
+        o.put(CAPTURE_VOLUME_MIRROR, captureVolumeMirror)
         o.put(KITCHEN_FORMAT, kitchenFormat)
         o.put(KITCHEN_FLAC_BLOCK, kitchenFlacBlock)
         return o
@@ -116,6 +129,20 @@ class SettingsModel {
             val v = if (raw == JSONObject.NULL || off(raw)) NO_TARGET else number(raw)?.let { if (it < 0) NO_TARGET else it.coerceAtMost(MAX_KITCHEN_TARGET_MS) }
             if (v != null && v != kitchenTargetMs) { kitchenTargetMs = v; changed.add(KITCHEN_TARGET_MS) }
         }
+        if (json.has(KITCHEN_FLOOR_MS)) {
+            val v = number(json.get(KITCHEN_FLOOR_MS))?.coerceIn(MIN_KITCHEN_FLOOR_MS, MAX_KITCHEN_TARGET_MS)
+            if (v != null && v != kitchenFloorMs) { kitchenFloorMs = v; changed.add(KITCHEN_FLOOR_MS) }
+        }
+        if (json.has(KITCHEN_VOLUME)) {
+            // 0 to 100; below 0, "off", "none", an empty text or null: the app leaves the Sonos volume alone
+            val raw = json.get(KITCHEN_VOLUME)
+            val v = if (raw == JSONObject.NULL || off(raw)) NO_VOLUME else number(raw)?.let { if (it < 0) NO_VOLUME else it.coerceAtMost(MAX_KITCHEN_VOLUME) }
+            if (v != null && v != kitchenVolume) { kitchenVolume = v; changed.add(KITCHEN_VOLUME) }
+        }
+        if (json.has(CAPTURE_VOLUME_MIRROR)) {
+            val v = bool(json.get(CAPTURE_VOLUME_MIRROR))
+            if (v != null && v != captureVolumeMirror) { captureVolumeMirror = v; changed.add(CAPTURE_VOLUME_MIRROR) }
+        }
         if (json.has(KITCHEN_FORMAT)) {
             // anything but "auto", "flac" or "wav" is ignored
             val v = StreamFormat.settingOf(json.get(KITCHEN_FORMAT).toString())
@@ -160,6 +187,9 @@ class SettingsModel {
         const val CAPTURE_LIVING_LATENCY_MS = "capture_living_latency_ms"
         const val CAPTURE_LEAD_MS = "capture_lead_ms"
         const val KITCHEN_TARGET_MS = "kitchen_target_ms"
+        const val KITCHEN_FLOOR_MS = "kitchen_floor_ms"
+        const val KITCHEN_VOLUME = "kitchen_volume"
+        const val CAPTURE_VOLUME_MIRROR = "capture_volume_mirror"
         const val KITCHEN_FORMAT = "kitchen_format"
         const val KITCHEN_FLAC_BLOCK = "kitchen_flac_block"
 
@@ -171,13 +201,25 @@ class SettingsModel {
         const val MAX_CAPTURE_LATENCY_MS = 1_000
 
         /** Audio sent to the Sonos ahead when a captured stream starts (ms): less is a smaller lag, more is steadier. */
-        const val DEFAULT_CAPTURE_LEAD_MS = 150
+        const val DEFAULT_CAPTURE_LEAD_MS = 80
         const val MIN_CAPTURE_LEAD_MS = 10
         const val MAX_CAPTURE_LEAD_MS = 3_000
 
         /** `kitchen_target_ms` when the kitchen is not brought to a lag (it stays where it locked). */
         const val NO_TARGET = -1
         const val MAX_KITCHEN_TARGET_MS = 3_000
+
+        /**
+         * Measured on the device (23 Oct, WAV): the Sonos is clean down to a lag of 316 ms after the capture and stutters at 306,
+         * and a fresh start followed by one descent to 322 is clean. The floor is the lowest lag that is ever aimed for.
+         */
+        const val DEFAULT_KITCHEN_TARGET_MS = 322
+        const val DEFAULT_KITCHEN_FLOOR_MS = 316
+        const val MIN_KITCHEN_FLOOR_MS = 100
+
+        /** `kitchen_volume` when the app leaves the volume of the Sonos alone. */
+        const val NO_VOLUME = -1
+        const val MAX_KITCHEN_VOLUME = 100
 
         /**
          * The version of the stored settings. 2: the default of `kitchen_format` became "auto", but every change of

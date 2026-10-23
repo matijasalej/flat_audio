@@ -19,8 +19,11 @@ class SettingsModelTest {
         assertEquals("", o.getString("tv_ip"))
         assertEquals(true, o.getBoolean("capture_enabled"))
         assertEquals(0, o.getInt("capture_living_latency_ms"))
-        assertEquals(150, o.getInt("capture_lead_ms"))
-        assertEquals(-1, o.getInt("kitchen_target_ms"))
+        assertEquals(80, o.getInt("capture_lead_ms"))
+        assertEquals(322, o.getInt("kitchen_target_ms"))
+        assertEquals(316, o.getInt("kitchen_floor_ms"))
+        assertEquals(-1, o.getInt("kitchen_volume"))
+        assertEquals(false, o.getBoolean("capture_volume_mirror"))
         assertEquals("auto", o.getString("kitchen_format"))
         assertEquals(4096, o.getInt("kitchen_flac_block"))
     }
@@ -32,8 +35,8 @@ class SettingsModelTest {
             setOf(
                 "kitchen_enabled", "kitchen_offset_ms", "kitchen_balance", "living_fixed_volume",
                 "tv_screen_off", "tv_wake", "tv_ip",
-                "capture_enabled", "capture_living_latency_ms", "capture_lead_ms", "kitchen_target_ms",
-                "kitchen_format", "kitchen_flac_block",
+                "capture_enabled", "capture_living_latency_ms", "capture_lead_ms", "kitchen_target_ms", "kitchen_floor_ms",
+                "kitchen_volume", "capture_volume_mirror", "kitchen_format", "kitchen_flac_block",
             ),
             keys,
         )
@@ -71,9 +74,9 @@ class SettingsModelTest {
     }
 
     @Test
-    fun theTargetLagIsOffByDefaultAndTakesNumbersFromZeroUp() {
+    fun theTargetLagIs322ByDefaultAndTakesNumbersFromZeroUp() {
         val m = SettingsModel()
-        assertEquals(-1, m.kitchenTargetMs)
+        assertEquals(322, m.kitchenTargetMs)
         assertEquals(setOf("kitchen_target_ms"), m.applyJson(JSONObject("""{"kitchen_target_ms": 240}""")))
         assertEquals(240, m.values().kitchenTargetMs)
         assertEquals(setOf("kitchen_target_ms"), m.applyJson(JSONObject("""{"kitchen_target_ms": "250.4"}""")))
@@ -92,6 +95,47 @@ class SettingsModelTest {
         m.applyJson(JSONObject("""{"kitchen_target_ms": 300}"""))
         assertTrue(m.applyJson(JSONObject("""{"kitchen_target_ms": "soon"}""")).isEmpty())
         assertEquals(300, m.kitchenTargetMs)
+    }
+
+    @Test
+    fun theFloorIsAtLeastTheLeastLagAndAtMostTheTargetRange() {
+        val m = SettingsModel()
+        assertEquals(316, m.values().kitchenFloorMs)
+        assertEquals(setOf("kitchen_floor_ms"), m.applyJson(JSONObject("""{"kitchen_floor_ms": 330}""")))
+        assertEquals(330, m.kitchenFloorMs)
+        m.applyJson(JSONObject("""{"kitchen_floor_ms": 20}"""))
+        assertEquals(SettingsModel.MIN_KITCHEN_FLOOR_MS, m.kitchenFloorMs)
+        m.applyJson(JSONObject("""{"kitchen_floor_ms": 99999}"""))
+        assertEquals(SettingsModel.MAX_KITCHEN_TARGET_MS, m.kitchenFloorMs)
+        assertTrue(m.applyJson(JSONObject("""{"kitchen_floor_ms": "low"}""")).isEmpty())
+    }
+
+    @Test
+    fun theKitchenVolumeIsAPercentOrOff() {
+        val m = SettingsModel()
+        assertEquals(-1, m.kitchenVolume)
+        assertEquals(setOf("kitchen_volume"), m.applyJson(JSONObject("""{"kitchen_volume": 35}""")))
+        assertEquals(35, m.values().kitchenVolume)
+        m.applyJson(JSONObject("""{"kitchen_volume": 250}"""))
+        assertEquals(100, m.kitchenVolume)
+        m.applyJson(JSONObject("""{"kitchen_volume": "0"}"""))
+        assertEquals(0, m.kitchenVolume)
+        for (off in listOf("-5", "\"off\"", "\"\"", "null")) {
+            m.applyJson(JSONObject("""{"kitchen_volume": 40}"""))
+            assertEquals(setOf("kitchen_volume"), m.applyJson(JSONObject("""{"kitchen_volume": $off}""")))
+            assertEquals("for $off", -1, m.kitchenVolume)
+        }
+        m.applyJson(JSONObject("""{"kitchen_volume": 40}"""))
+        assertTrue(m.applyJson(JSONObject("""{"kitchen_volume": "loud"}""")).isEmpty())
+        assertEquals(40, m.kitchenVolume)
+    }
+
+    @Test
+    fun theMirrorOfTheBoxsMusicVolumeIsOffByDefault() {
+        val m = SettingsModel()
+        assertEquals(false, m.captureVolumeMirror)
+        assertEquals(setOf("capture_volume_mirror"), m.applyJson(JSONObject("""{"capture_volume_mirror": "on"}""")))
+        assertTrue(m.values().captureVolumeMirror)
     }
 
     @Test
@@ -130,12 +174,14 @@ class SettingsModelTest {
     @Test
     fun theStreamFormatSettingsSurviveAStoreAndAReload() {
         val m = SettingsModel()
-        m.applyJson(JSONObject("""{"kitchen_format": "wav", "kitchen_flac_block": 1152, "kitchen_target_ms": 240}"""))
+        m.applyJson(JSONObject("""{"kitchen_format": "wav", "kitchen_flac_block": 1152, "kitchen_target_ms": 240, "kitchen_floor_ms": 300, "kitchen_volume": 33}"""))
         val reloaded = SettingsModel()
         reloaded.applyJson(m.toJson())
         assertEquals("wav", reloaded.kitchenFormat)
         assertEquals(1152, reloaded.kitchenFlacBlock)
         assertEquals(240, reloaded.kitchenTargetMs)
+        assertEquals(300, reloaded.kitchenFloorMs)
+        assertEquals(33, reloaded.kitchenVolume)
     }
 
     @Test

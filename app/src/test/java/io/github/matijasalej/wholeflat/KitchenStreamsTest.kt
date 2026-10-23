@@ -17,6 +17,22 @@ class KitchenStreamsTest {
         assertNull(KitchenStreams.tokenOf("/status.json"))
         assertNull(KitchenStreams.tokenOf("/k/../etc.flac"))
         assertNull(KitchenStreams.tokenOf("/x/abc.flac"))
+        // a WAV stream has its own extension
+        assertEquals("1a2b3c4d5e6f", KitchenStreams.tokenOf("/k/1a2b3c4d5e6f.wav"))
+        assertNull(KitchenStreams.tokenOf("/k/.wav"))
+        assertNull(KitchenStreams.tokenOf("/k/abc.mp3"))
+    }
+
+    @Test
+    fun theWavResponseSaysItsLengthAndTheFlacOneDoesNot() {
+        val wav = KitchenStreams.responseHead(io.github.matijasalej.wholeflat.sync.StreamFormat.WAV)
+        assertTrue(wav.startsWith("HTTP/1.1 200 OK\r\n"))
+        assertTrue(wav.contains("Content-Type: audio/wav\r\n"))
+        assertTrue(wav.contains("Content-Length: 2147479596\r\n"))
+        assertTrue(wav.contains("Accept-Ranges: none\r\n"))
+        assertTrue(wav.contains("Connection: close\r\n"))
+        assertTrue(wav.endsWith("\r\n\r\n"))
+        assertEquals(KitchenStreams.RESPONSE_HEAD, KitchenStreams.responseHead(io.github.matijasalej.wholeflat.sync.StreamFormat.FLAC))
     }
 
     @Test

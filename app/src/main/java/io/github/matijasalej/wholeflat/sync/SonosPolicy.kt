@@ -26,7 +26,7 @@ object SonosPolicy {
 
     const val STREAM_PATH = "/k/"
 
-    fun isOurUri(uri: String): Boolean = uri.contains(STREAM_PATH) && uri.contains(".flac")
+    fun isOurUri(uri: String): Boolean = uri.contains(STREAM_PATH) && StreamFormat.values().any { uri.contains("." + it.ext) }
 
     fun classify(transportState: String, trackUri: String): Availability {
         if (isOurUri(trackUri)) return Availability.OURS
@@ -52,12 +52,12 @@ object SonosPolicy {
         return "x-rincon-queue:$id#0"
     }
 
-    /** The token of our stream in a track URI (`.../k/<token>.flac`), or null. */
+    /** The token of our stream in a track URI (`.../k/<token>.flac` or `.wav`), or null. */
     fun tokenOf(uri: String): String? {
         val start = uri.indexOf(STREAM_PATH)
         if (start < 0) return null
         val rest = uri.substring(start + STREAM_PATH.length)
-        val end = rest.indexOf(".flac")
-        return if (end <= 0) null else rest.substring(0, end)
+        val end = StreamFormat.values().map { rest.indexOf("." + it.ext) }.filter { it > 0 }.minOrNull() ?: return null
+        return rest.substring(0, end)
     }
 }

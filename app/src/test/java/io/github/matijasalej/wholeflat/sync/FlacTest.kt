@@ -112,6 +112,51 @@ class FlacTest {
         Flac.streamHeader(12_345)
     }
 
+    private fun pcmOf(blockSize: Int, seed: Int) = ShortArray(blockSize * 2) { i -> ((i * 37 + seed * 1_001) % 65_536 - 32_768).toShort() }
+
+    @Test
+    fun smallerBlocksAreNamedInTheStreamInfoAndInEveryFrame() {
+        // the codes of the frame header: 576 = 0010, 1152 = 0011, 4096 = 1100
+        for ((size, code) in listOf(576 to 0x2, 1152 to 0x3, 4096 to 0xC)) {
+            val h = Flac.streamHeader(44_100, size)
+            assertEquals(42, h.size)
+            assertEquals("min block size $size", size, ByteBuffer.wrap(h, 8, 2).short.toInt() and 0xFFFF)
+            assertEquals("max block size $size", size, ByteBuffer.wrap(h, 10, 2).short.toInt() and 0xFFFF)
+            val frame = Flac.frame(9, pcmOf(size, 4), 44_100, size)
+            assertEquals("frame of $size", 6 + 2 * (1 + size * 2) + 2, frame.size)
+            assertEquals("block size code and 44.1 kHz", (code shl 4) or 0x9, u8(frame[2]))
+            assertEquals("header crc", crc8(frame, 0, 5), u8(frame[5]))
+            val crc = crc16(frame, 0, frame.size - 2)
+            assertEquals(crc shr 8, u8(frame[frame.size - 2]))
+            assertEquals(crc and 0xFF, u8(frame[frame.size - 1]))
+        }
+    }
+
+    @Test
+    fun theSamplesOfASmallBlockAreInTheSamePlaces() {
+        val size = 1152
+        val p = pcmOf(size, 5)
+        val frame = Flac.frame(0, p, 44_100, size)
+        for (i in 0 until size) {
+            val left = ((u8(frame[7 + 2 * i]) shl 8) or u8(frame[8 + 2 * i])).toShort()
+            assertEquals("left $i", p[2 * i], left)
+            val right = ((u8(frame[8 + 2 * size + 2 * i]) shl 8) or u8(frame[9 + 2 * size + 2 * i])).toShort()
+            assertEquals("right $i", p[2 * i + 1], right)
+        }
+        assertEquals("the right subframe starts after the left one", 0x02, u8(frame[7 + 2 * size]))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun aBlockSizeWithoutACodeIsRefused() {
+        Flac.streamHeader(44_100, 1000)
+    }
+
+    @Test
+    fun theDefaultBlockIsStill4096() {
+        assertArrayEquals(Flac.streamHeader(44_100, 4096), Flac.streamHeader())
+        assertEquals(Flac.frame(1, pcm(1)).size, Flac.frame(1, pcm(1), 44_100, 4096).size)
+    }
+
     @Test
     fun frameNumbersAreCodedLikeUtf8() {
         val numbers = intArrayOf(0, 1, 127, 128, 2047, 2048, 55_295, 57_344, 65_535, 65_536, 130_000, 1_114_111)

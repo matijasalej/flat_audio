@@ -184,7 +184,7 @@ object DebugServer {
                 sendText(out, 404, "no kitchen\n", head)
                 return
             }
-            KitchenStreams.serve(kitchen, kitchenToken, req.method, req.remote, req.headers["user-agent"] ?: "", SocketConn(client, out))
+            KitchenStreams.serve(kitchen, kitchenToken, req.method, req.remote, req.headers["user-agent"] ?: "", SocketConn(client, out), req.headers["range"] ?: "")
             return
         }
         if (req.method != "GET" && !head && !(req.method == "POST" && req.path == "/settings")) {

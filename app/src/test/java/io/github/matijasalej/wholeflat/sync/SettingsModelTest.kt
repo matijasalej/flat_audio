@@ -20,19 +20,65 @@ class SettingsModelTest {
         assertEquals(true, o.getBoolean("capture_enabled"))
         assertEquals(0, o.getInt("capture_living_latency_ms"))
         assertEquals(150, o.getInt("capture_lead_ms"))
+        assertEquals("flac", o.getString("kitchen_format"))
+        assertEquals(4096, o.getInt("kitchen_flac_block"))
     }
 
     @Test
-    fun theJsonHasTheSevenKeysTheMacToolReadsAndTheThreeOfTheCaptureMode() {
+    fun theJsonHasTheSevenKeysTheMacToolReadsTheThreeOfTheCaptureModeAndTheTwoOfTheStreamFormat() {
         val keys = SettingsModel().toJson().keys().asSequence().toSet()
         assertEquals(
             setOf(
                 "kitchen_enabled", "kitchen_offset_ms", "kitchen_balance", "living_fixed_volume",
                 "tv_screen_off", "tv_wake", "tv_ip",
                 "capture_enabled", "capture_living_latency_ms", "capture_lead_ms",
+                "kitchen_format", "kitchen_flac_block",
             ),
             keys,
         )
+    }
+
+    @Test
+    fun theStreamFormatTakesFlacOrWavInAnyCaseAndIgnoresTheRest() {
+        val m = SettingsModel()
+        assertEquals(setOf("kitchen_format"), m.applyJson(JSONObject("""{"kitchen_format": "wav"}""")))
+        assertEquals("wav", m.kitchenFormat)
+        assertEquals("wav", m.values().kitchenFormat)
+        assertEquals(setOf("kitchen_format"), m.applyJson(JSONObject("""{"kitchen_format": " FLAC "}""")))
+        assertEquals("flac", m.kitchenFormat)
+        // not a format: nothing changes
+        assertTrue(m.applyJson(JSONObject("""{"kitchen_format": "mp3"}""")).isEmpty())
+        assertTrue(m.applyJson(JSONObject("""{"kitchen_format": ""}""")).isEmpty())
+        assertTrue(m.applyJson(JSONObject("""{"kitchen_format": 3}""")).isEmpty())
+        assertEquals("flac", m.kitchenFormat)
+        // the same again is no change
+        assertTrue(m.applyJson(JSONObject("""{"kitchen_format": "flac"}""")).isEmpty())
+    }
+
+    @Test
+    fun theFlacBlockTakesTheThreeMeasuredSizesAsNumbersOrText() {
+        val m = SettingsModel()
+        assertEquals(setOf("kitchen_flac_block"), m.applyJson(JSONObject("""{"kitchen_flac_block": 1152}""")))
+        assertEquals(1152, m.kitchenFlacBlock)
+        assertEquals(setOf("kitchen_flac_block"), m.applyJson(JSONObject("""{"kitchen_flac_block": "576"}""")))
+        assertEquals(576, m.values().kitchenFlacBlock)
+        assertEquals(setOf("kitchen_flac_block"), m.applyJson(JSONObject("""{"kitchen_flac_block": 4096.0}""")))
+        assertEquals(4096, m.kitchenFlacBlock)
+        // another size is not taken, nor is a word
+        assertTrue(m.applyJson(JSONObject("""{"kitchen_flac_block": 1000}""")).isEmpty())
+        assertTrue(m.applyJson(JSONObject("""{"kitchen_flac_block": 0}""")).isEmpty())
+        assertTrue(m.applyJson(JSONObject("""{"kitchen_flac_block": "big"}""")).isEmpty())
+        assertEquals(4096, m.kitchenFlacBlock)
+    }
+
+    @Test
+    fun theStreamFormatSettingsSurviveAStoreAndAReload() {
+        val m = SettingsModel()
+        m.applyJson(JSONObject("""{"kitchen_format": "wav", "kitchen_flac_block": 1152}"""))
+        val reloaded = SettingsModel()
+        reloaded.applyJson(m.toJson())
+        assertEquals("wav", reloaded.kitchenFormat)
+        assertEquals(1152, reloaded.kitchenFlacBlock)
     }
 
     @Test

@@ -24,6 +24,9 @@ class ConnRecord(
     val startMs: Long,
 ) {
     @Volatile var firstByteMs = -1L
+
+    /** The Range header of the request, if it had one (the Sonos has not asked for a range so far). */
+    @Volatile var range = ""
     @Volatile var endMs = -1L
     @Volatile var bytes = 0L
     @Volatile var blocks = 0L
@@ -41,6 +44,7 @@ class ConnRecord(
         o.put("remote", remote)
         o.put("user_agent", userAgent)
         o.put("armed", armed)
+        if (range.isNotEmpty()) o.put("range", range)
         o.put("start_ms", startMs)
         o.put("first_byte_ms", if (firstByteMs < 0) JSONObject.NULL else firstByteMs)
         if (endMs < 0) {

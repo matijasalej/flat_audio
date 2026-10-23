@@ -19,6 +19,10 @@ class SettingsValues(
     val captureEnabled: Boolean,
     val captureLivingLatencyMs: Int,
     val captureLeadMs: Int,
+    /** The format of the stream to the Sonos: "flac" or "wav" (see [StreamFormat]). */
+    val kitchenFormat: String,
+    /** The block size of the FLAC stream: 4096, 1152 or 576 frames. */
+    val kitchenFlacBlock: Int,
 )
 
 class SettingsModel {
@@ -32,11 +36,13 @@ class SettingsModel {
     var captureEnabled = true
     var captureLivingLatencyMs = 0
     var captureLeadMs = DEFAULT_CAPTURE_LEAD_MS
+    var kitchenFormat = StreamFormat.FLAC.key
+    var kitchenFlacBlock = Flac.BLOCK
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
-        captureEnabled, captureLivingLatencyMs, captureLeadMs,
+        captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenFormat, kitchenFlacBlock,
     )
 
     fun toJson(): JSONObject {
@@ -51,6 +57,8 @@ class SettingsModel {
         o.put(CAPTURE_ENABLED, captureEnabled)
         o.put(CAPTURE_LIVING_LATENCY_MS, captureLivingLatencyMs)
         o.put(CAPTURE_LEAD_MS, captureLeadMs)
+        o.put(KITCHEN_FORMAT, kitchenFormat)
+        o.put(KITCHEN_FLAC_BLOCK, kitchenFlacBlock)
         return o
     }
 
@@ -98,6 +106,16 @@ class SettingsModel {
             val v = number(json.get(CAPTURE_LEAD_MS))?.coerceIn(MIN_CAPTURE_LEAD_MS, MAX_CAPTURE_LEAD_MS)
             if (v != null && v != captureLeadMs) { captureLeadMs = v; changed.add(CAPTURE_LEAD_MS) }
         }
+        if (json.has(KITCHEN_FORMAT)) {
+            // anything but "flac" or "wav" is ignored
+            val v = StreamFormat.of(json.get(KITCHEN_FORMAT).toString())?.key
+            if (v != null && v != kitchenFormat) { kitchenFormat = v; changed.add(KITCHEN_FORMAT) }
+        }
+        if (json.has(KITCHEN_FLAC_BLOCK)) {
+            // only the block sizes that were measured are taken: 4096, 1152 or 576
+            val v = number(json.get(KITCHEN_FLAC_BLOCK))
+            if (v != null && v in StreamFormat.FLAC_BLOCKS && v != kitchenFlacBlock) { kitchenFlacBlock = v; changed.add(KITCHEN_FLAC_BLOCK) }
+        }
         return changed
     }
 
@@ -129,6 +147,8 @@ class SettingsModel {
         const val CAPTURE_ENABLED = "capture_enabled"
         const val CAPTURE_LIVING_LATENCY_MS = "capture_living_latency_ms"
         const val CAPTURE_LEAD_MS = "capture_lead_ms"
+        const val KITCHEN_FORMAT = "kitchen_format"
+        const val KITCHEN_FLAC_BLOCK = "kitchen_flac_block"
 
         /** The offset is limited to what a Mac calibration could plausibly ask for. */
         const val MAX_OFFSET_MS = 2_000

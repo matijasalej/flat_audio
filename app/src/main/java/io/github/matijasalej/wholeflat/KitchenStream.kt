@@ -8,6 +8,8 @@ import io.github.matijasalej.wholeflat.sync.KitchenMap
 import io.github.matijasalej.wholeflat.sync.SessionClock
 import io.github.matijasalej.wholeflat.sync.SessionRecord
 import io.github.matijasalej.wholeflat.sync.StreamBuilder
+import io.github.matijasalej.wholeflat.sync.StreamFormat
+import io.github.matijasalej.wholeflat.sync.Wav
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.OutputStream
@@ -41,8 +43,14 @@ class KitchenSession(
     val channels: StreamBuilder.ChannelMode,
     val capture: CaptureFeed? = null,
     val captureGeneration: Long = 0L,
+    /** The format of the stream (the setting `kitchen_format` when the session was made), and the block of a FLAC one. */
+    val format: StreamFormat = StreamFormat.FLAC,
+    val flacBlock: Int = Flac.BLOCK,
 ) {
     val isCapture: Boolean get() = capture != null
+
+    /** Frames per block of the stream: the FLAC block, or the small chunk of a WAV stream, which has no block structure. */
+    val blockFrames: Int get() = if (format == StreamFormat.WAV) StreamFormat.WAV_CHUNK_FRAMES else flacBlock
 
     /** The sample rate of the stream: the ring's 44.1 kHz, or the capture's. */
     val rate: Int get() = capture?.rate ?: RING_RATE
@@ -249,9 +257,10 @@ class SocketConn(private val socket: Socket, override val out: OutputStream) : C
 }
 
 /**
- * The HTTP side of the kitchen stream (`GET /k/<token>.flac`), made after the stream server of the Sonos
- * spikes, which the Sonos plays from: headers as they found it likes them (FLAC without a length, no
- * ranges, connection close), the STREAMINFO header and one verbatim FLAC frame per 4096 frames.
+ * The HTTP side of the kitchen stream (`GET /k/<token>.flac` or `.wav`), made after the stream server of the Sonos
+ * spikes, which the Sonos plays from: headers as they found it likes them (FLAC without a length, WAV with the
+ * length its header claims, no ranges, connection close), then for FLAC the STREAMINFO header and one verbatim
+ * frame per block (4096, 1152 or 576 frames), for WAV the RIFF header and the samples in chunks of 10 ms.
  *
  * - **Every connection is for itself.** Each GET is served from the first frame of the stream until the
  *   Sonos closes it or the session ends; a connection is never closed because a newer one came, and a probe
@@ -275,6 +284,7 @@ object KitchenStreams {
     /** One write never carries more than this (a burst of frames is cut here). */
     private const val MAX_WRITE_BYTES = 512 * 1024
 
+    /** The headers of a FLAC stream: no Content-Length, no chunking, the stream ends by closing the connection. */
     const val RESPONSE_HEAD = "HTTP/1.1 200 OK\r\n" +
         "Content-Type: audio/flac\r\n" +
         "Accept-Ranges: none\r\n" +
@@ -282,6 +292,19 @@ object KitchenStreams {
         "Connection: close\r\n" +
         "transferMode.dlna.org: Streaming\r\n" +
         "Server: WholeFlat\r\n\r\n"
+
+    /** The headers of a WAV stream: as the spikes' server sent them, with the length that the RIFF header claims. */
+    const val RESPONSE_HEAD_WAV = "HTTP/1.1 200 OK\r\n" +
+        "Content-Type: audio/wav\r\n" +
+        "Content-Length: ${Wav.CONTENT_LENGTH}\r\n" +
+        "Accept-Ranges: none\r\n" +
+        "Cache-Control: no-cache, no-store\r\n" +
+        "Connection: close\r\n" +
+        "transferMode.dlna.org: Streaming\r\n" +
+        "Server: WholeFlat\r\n\r\n"
+
+    /** The headers of a stream of [format]; the same for a GET and a HEAD. */
+    fun responseHead(format: StreamFormat): String = if (format == StreamFormat.WAV) RESPONSE_HEAD_WAV else RESPONSE_HEAD
 
     /** Where the log lines go (the tests collect them). */
     @Volatile
@@ -291,14 +314,15 @@ object KitchenStreams {
     @Volatile
     var ringFrames: (Long) -> FrameSource = { epoch -> RingFrameSource(epoch) }
 
-    /** The token of a `/k/<token>.flac` path, or null. */
+    /** The token of a `/k/<token>.flac` (or `.wav`) path, or null. */
     fun tokenOf(path: String): String? {
-        if (!path.startsWith("/k/") || !path.endsWith(".flac")) return null
-        val token = path.substring(3, path.length - 5)
+        if (!path.startsWith("/k/")) return null
+        val format = StreamFormat.ofPath(path) ?: return null
+        val token = path.substring(3, path.length - 1 - format.ext.length)
         return if (token.isNotEmpty() && token.all { it.isLetterOrDigit() }) token else null
     }
 
-    fun serve(host: StreamHost, token: String, method: String, remote: String, userAgent: String, conn: ClientConn) {
+    fun serve(host: StreamHost, token: String, method: String, remote: String, userAgent: String, conn: ClientConn, range: String = "") {
         val out = conn.out
         val session = host.sessionFor(token)
         if (session == null) {
@@ -314,21 +338,22 @@ object KitchenStreams {
         if (method == "HEAD") {
             // the headers of a GET and nothing else; no session or stream state is touched
             val rec = session.record?.openConnection("HEAD", remote, userAgent, session.armed, System.nanoTime())
+            rec?.range = range
             try {
-                out.write(RESPONSE_HEAD.toByteArray(Charsets.ISO_8859_1))
+                out.write(responseHead(session.format).toByteArray(Charsets.ISO_8859_1))
                 out.flush()
                 rec?.let { session.record?.closeConnection(it, System.nanoTime(), "server", "HEAD answered") }
             } catch (e: IOException) {
                 rec?.let { session.record?.closeConnection(it, System.nanoTime(), "peer", "peer: " + e.message) }
                 throw e
             }
-            log("$remote HEAD session ${session.token} [$userAgent]")
+            log("$remote HEAD session ${session.token}${if (range.isNotEmpty()) " Range: $range" else ""} [$userAgent]")
             return
         }
         conn.prepareForStream()
         session.addConn(conn)
         try {
-            stream(host, session, remote, userAgent, conn)
+            stream(host, session, remote, userAgent, conn, range)
         } finally {
             session.removeConn(conn)
         }
@@ -353,8 +378,10 @@ object KitchenStreams {
         }
     }
 
-    private fun stream(host: StreamHost, session: KitchenSession, remote: String, userAgent: String, conn: ClientConn) {
+    private fun stream(host: StreamHost, session: KitchenSession, remote: String, userAgent: String, conn: ClientConn, range: String) {
         val out = conn.out
+        val format = session.format
+        val blockFrames = session.blockFrames
         val armed = session.armed
         val startFrame = session.startRingFrame
         val capture = session.capture
@@ -362,6 +389,7 @@ object KitchenStreams {
         val began = System.nanoTime()
         val count = session.nextConnectionId()
         val rec = session.record?.openConnection("GET", remote, userAgent, armed, began)
+        rec?.range = range
         val connectionId = rec?.id ?: count
         val frames: FrameSource? = when {
             startFrame < 0 -> null
@@ -375,21 +403,22 @@ object KitchenStreams {
         }
         val map = KitchenMap(maxOf(0L, startFrame))
         // a trim is at most one frame per 10 ms
-        val builder = StreamBuilder(source, map, session.channels, trimSpacing = rate / 100)
+        val builder = StreamBuilder(source, map, session.channels, blockFrames = blockFrames, trimSpacing = rate / 100)
         val active = ActiveStream(connectionId, map, builder, began)
         // A captured stream after Play is not paced: its frames exist only as they are captured, so the reads wait for them.
         val lead = LEAD_FRAMES * rate / KitchenSession.RING_RATE
         fun dueNanos(block: Long): Long = when {
             armed && capture != null -> 0L
-            armed -> session.clock?.timeOfFrame(((block + 1) * Flac.BLOCK - lead).toDouble()) ?: 0L
-            else -> began + maxOf(0L, block * Flac.BLOCK * 1_000_000_000L / rate - PROBE_PREBUFFER_NANOS)
+            armed -> session.clock?.timeOfFrame(((block + 1) * blockFrames - lead).toDouble()) ?: 0L
+            else -> began + maxOf(0L, block * blockFrames * 1_000_000_000L / rate - PROBE_PREBUFFER_NANOS)
         }
         if (armed) session.attach(active)
         val peer = PeerWatch(conn)
         log(
             "$remote GET session ${session.token} conn $connectionId from ${if (capture != null) "captured" else "ring"} frame " +
                 "$startFrame, " + (if (armed) "the stream" else "a probe before Play") +
-                (if (capture != null) ", $rate Hz" else "") + " [$userAgent]",
+                ", ${format.key}" + (if (format == StreamFormat.FLAC) " blocks of $blockFrames" else " chunks of $blockFrames") +
+                " at $rate Hz" + (if (range.isNotEmpty()) ", Range: $range" else "") + " [$userAgent]",
         )
 
         var reason = "peer closed"
@@ -397,11 +426,12 @@ object KitchenStreams {
         var lost = false
         var blockNo = 0L
         var bytes = 0L
+        var dataBytes = 0L
         val pending = ByteArrayOutputStream(64 * 1024)
         var pendingBlocks = 0
         try {
-            pending.write(RESPONSE_HEAD.toByteArray(Charsets.ISO_8859_1))
-            pending.write(Flac.streamHeader(rate))
+            pending.write(responseHead(format).toByteArray(Charsets.ISO_8859_1))
+            pending.write(if (format == StreamFormat.WAV) Wav.header(rate) else Flac.streamHeader(rate, blockFrames))
 
             // One write for what is ready: the headers, and every frame that is due and exists at this moment.
             fun flush() {
@@ -469,7 +499,18 @@ object KitchenStreams {
                     sleepUntil(due) { session.cancelled || peer.closed }
                     continue
                 }
-                pending.write(Flac.frame(blockNo, builder.block, rate))
+                val chunk = if (format == StreamFormat.WAV) Wav.pcm(builder.block, blockFrames) else Flac.frame(blockNo, builder.block, rate, blockFrames)
+                if (format == StreamFormat.WAV) {
+                    if (!Wav.fits(dataBytes, chunk.size)) {
+                        // the length that the header claimed (about 3.4 h) is used up: the stream ends as it said it would
+                        flush()
+                        reason = "the length that the WAV header claims is reached"
+                        closedBy = "server"
+                        break
+                    }
+                    dataBytes += chunk.size
+                }
+                pending.write(chunk)
                 pendingBlocks++
                 blockNo++
                 haveBlock = false

@@ -5,6 +5,8 @@ import io.github.matijasalej.wholeflat.sync.Flac
 import io.github.matijasalej.wholeflat.sync.FrameSource
 import io.github.matijasalej.wholeflat.sync.SessionHistory
 import io.github.matijasalej.wholeflat.sync.StreamBuilder
+import io.github.matijasalej.wholeflat.sync.StreamFormat
+import io.github.matijasalej.wholeflat.sync.Wav
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -136,8 +138,13 @@ class KitchenHttpTest {
         }
     }
 
-    private fun ringSession(armed: Boolean = false, startFrame: Long = 5_000L): KitchenSession {
-        val s = KitchenSession("tok1", 1L, 0, startFrame, StreamBuilder.ChannelMode.STEREO)
+    private fun ringSession(
+        armed: Boolean = false,
+        startFrame: Long = 5_000L,
+        format: StreamFormat = StreamFormat.FLAC,
+        flacBlock: Int = 4096,
+    ): KitchenSession {
+        val s = KitchenSession("tok1", 1L, 0, startFrame, StreamBuilder.ChannelMode.STEREO, format = format, flacBlock = flacBlock)
         s.record = SessionHistory().begin("tok1", "ring", System.nanoTime(), System.currentTimeMillis())
         if (armed) s.arm(System.nanoTime() + 290_000_000L)
         return s
@@ -269,6 +276,95 @@ class KitchenHttpTest {
         while (feed.buffer.writeIndex < (blocks + 1) * 4096L) feed.writeAt(chunk, framesPerChunk, System.nanoTime())
         waitUntil { conn.writes.size == 2 }
         assertEquals(size, conn.writes[1].size)
+        conn.peerCloses()
+        t.join(5_000)
+    }
+
+    // ---- the format of the stream -------------------------------------------------------------------
+
+    @Test
+    fun aWavStreamHasTheWavHeadersTheRiffHeaderAndSmallChunks() {
+        val s = ringSession(format = StreamFormat.WAV)
+        val conn = FakeConn()
+        val t = serveAsync(Host(s), "GET", conn)
+        waitUntil { conn.writes.isNotEmpty() }
+        val first = conn.writes[0]
+        val head = KitchenStreams.RESPONSE_HEAD_WAV
+        assertEquals(head, String(first, 0, head.length, Charsets.ISO_8859_1))
+        assertTrue(head.contains("Content-Type: audio/wav\r\n"))
+        assertTrue(head.contains("Content-Length: ${Wav.CONTENT_LENGTH}\r\n"))
+        assertFalse(head.contains("Transfer-Encoding"))
+        // then the RIFF header, then chunks of 441 frames (10 ms) of little-endian samples
+        assertEquals("RIFF", String(first, head.length, 4, Charsets.US_ASCII))
+        assertArrayEqualsBytes(Wav.header(rate), first.copyOfRange(head.length, head.length + 44))
+        val data = first.size - head.length - 44
+        assertEquals("whole chunks only", 0, data % (441 * 4))
+        // a second of audio at once for a probe, as 10 ms chunks
+        assertTrue("${data / 1764} chunks in the first write", data / 1764 in 100..103)
+        // the first sample: the source's frame 5000 on both channels, little-endian
+        val p = head.length + 44
+        assertEquals((5_000 and 0xFF), first[p].toInt() and 0xFF)
+        assertEquals((5_000 shr 8) and 0xFF, first[p + 1].toInt() and 0xFF)
+        assertEquals(first[p], first[p + 2])
+        conn.peerCloses()
+        t.join(5_000)
+    }
+
+    private fun assertArrayEqualsBytes(expected: ByteArray, actual: ByteArray) {
+        assertEquals(expected.toList(), actual.toList())
+    }
+
+    @Test
+    fun aHeadOfAWavStreamGetsTheWavHeaders() {
+        val s = ringSession(format = StreamFormat.WAV)
+        val conn = FakeConn()
+        serveAsync(Host(s), "HEAD", conn).join(5_000)
+        assertEquals(KitchenStreams.RESPONSE_HEAD_WAV, String(conn.writes[0], Charsets.ISO_8859_1))
+        assertEquals(1, conn.writes.size)
+    }
+
+    @Test
+    fun smallerFlacBlocksAreSentInTheirOwnSizeAndNamedInTheHeader() {
+        for (block in intArrayOf(1152, 576)) {
+            val s = ringSession(flacBlock = block)
+            val conn = FakeConn()
+            val t = serveAsync(Host(s), "GET", conn)
+            waitUntil { conn.writes.isNotEmpty() }
+            val first = conn.writes[0]
+            val info = Flac.streamHeader(rate, block)
+            assertEquals(KitchenStreams.RESPONSE_HEAD, String(first, 0, headBytes.size, Charsets.ISO_8859_1))
+            assertEquals(info.toList(), first.copyOfRange(headBytes.size, headBytes.size + info.size).toList())
+            val frame = Flac.frame(0, ShortArray(block * 2), rate, block).size
+            val frames = (first.size - headBytes.size - info.size) / frame
+            assertEquals("whole frames only", headBytes.size + info.size + frames * frame, first.size)
+            // a second of audio at once: 38 frames of 1152, 76 of 576
+            val expected = 44_100 / block
+            assertTrue("$frames frames of $block", frames in expected..expected + 2)
+            conn.peerCloses()
+            t.join(5_000)
+        }
+    }
+
+    @Test
+    fun aCapturedWavStreamIsSentInChunksAsSoonAsTheyExist() {
+        val feed = CaptureFeed()
+        feed.newGeneration(1)
+        val per = feed.rate / 50
+        val audio = ShortArray(per * 2)
+        repeat(5) { feed.writeAt(audio, per, System.nanoTime()) } // 100 ms exist when the Sonos asks
+        val s = KitchenSession("tok1", -1L, 100, 0L, StreamBuilder.ChannelMode.STEREO, feed, 1L, format = StreamFormat.WAV)
+        s.record = SessionHistory().begin("tok1", "capture", System.nanoTime(), System.currentTimeMillis())
+        s.arm(System.nanoTime())
+        val conn = FakeConn()
+        val t = serveAsync(Host(s), "GET", conn)
+        waitUntil { conn.writes.isNotEmpty() }
+        val headLen = KitchenStreams.RESPONSE_HEAD_WAV.length
+        // 5 * 882 frames = 10 chunks of 441 frames
+        assertEquals(headLen + 44 + 10 * 441 * 4, conn.writes[0].size)
+        val before = conn.written
+        feed.writeAt(audio, per, System.nanoTime()) // 20 ms more: two chunks, no block to wait for
+        waitUntil { conn.written >= before + 2 * 441 * 4 }
+        assertEquals(before + 2 * 441 * 4, conn.written)
         conn.peerCloses()
         t.join(5_000)
     }

@@ -14,6 +14,7 @@ import io.github.matijasalej.wholeflat.sync.SonosXml
 import io.github.matijasalej.wholeflat.sync.StartBackoff
 import io.github.matijasalej.wholeflat.sync.StartPlanner
 import io.github.matijasalej.wholeflat.sync.StreamBuilder
+import io.github.matijasalej.wholeflat.sync.StreamFormat
 import io.github.matijasalej.wholeflat.sync.StreamView
 import io.github.matijasalej.wholeflat.sync.SyncController
 import io.github.matijasalej.wholeflat.sync.VolumeCurve
@@ -350,13 +351,13 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             advices[epoch] = StartAdvice.Alone
             return
         }
-        val s = KitchenSession(newToken(), epoch, kind, startFrame, channelsFor(kind))
+        val s = KitchenSession(newToken(), epoch, kind, startFrame, channelsFor(kind), format = streamFormat(), flacBlock = v.kitchenFlacBlock)
         val host = Net.localAddressFor(dev.ip)
         if (host == null) {
             advices[epoch] = StartAdvice.Alone
             return
         }
-        s.uri = "http://$host:${DebugServer.PORT}/k/${s.token}.flac"
+        s.uri = streamUri(host, s)
         registerSession(s)
         state = State.STARTING
         if (!prepare(s, soapFor(dev))) {
@@ -436,7 +437,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         if (holder.takeover) takeOver(api, holder.uri)
         val volume = sonosVolume()
         if (volume >= 0) api.setVolume(volume)
-        val didl = SonosXml.didlTrack(TITLE, s.uri)
+        val didl = SonosXml.didlTrack(TITLE, s.uri, s.format.mime)
         var set = api.setUri(s.uri, didl)
         var tries = 1
         while (!set.ok && set.upnpError == 701 && tries < 3) {
@@ -533,8 +534,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val meta = RingMeta()
         if (NativeBridge.ringState(meta.a) != 0 || !meta.playing || meta.startPending) return false
         val host = Net.localAddressFor(dev.ip) ?: return false
-        val s = KitchenSession(newToken(), meta.epoch, meta.kind, -1L, channelsFor(meta.kind))
-        s.uri = "http://$host:${DebugServer.PORT}/k/${s.token}.flac"
+        val s = KitchenSession(newToken(), meta.epoch, meta.kind, -1L, channelsFor(meta.kind), format = streamFormat(), flacBlock = v.kitchenFlacBlock)
+        s.uri = streamUri(host, s)
         registerSession(s)
         currentEpoch = meta.epoch
         state = State.STARTING
@@ -805,8 +806,9 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             val host = Net.localAddressFor(dev.ip) ?: return false
             s = KitchenSession(
                 newToken(), CAPTURE_EPOCH, KIND_CAPTURE, -1L, StreamBuilder.ChannelMode.STEREO, feed, feed.generation,
+                format = streamFormat(), flacBlock = v.kitchenFlacBlock,
             )
-            s.uri = "http://$host:${DebugServer.PORT}/k/${s.token}.flac"
+            s.uri = streamUri(host, s)
             registerSession(s)
             state = State.STARTING
             AppLog.add(TAG, "capture: getting the kitchen ready ($why), session ${s.token}")
@@ -1275,6 +1277,16 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val v = Settings.values
         controller.offsetMs = effectiveOffsetMs()
         if (changed.contains("capture_lead_ms")) captureLead.reset()
+        val sessionNow = session
+        if (sessionNow != null && !sessionNow.cancelled) {
+            // A stream keeps the format it was made with; a changed setting restarts the kitchen's stream (for the latency measurements).
+            val formatChanged = changed.contains("kitchen_format") && sessionNow.format.key != v.kitchenFormat
+            val blockChanged = changed.contains("kitchen_flac_block") && sessionNow.format == StreamFormat.FLAC && sessionNow.flacBlock != v.kitchenFlacBlock
+            if (formatChanged || blockChanged) {
+                lastRejoinNanos = 0L
+                rejoin("the stream format was changed to ${v.kitchenFormat}, FLAC block ${v.kitchenFlacBlock}", manual = true)
+            }
+        }
         if (changed.contains("kitchen_enabled")) {
             if (!v.kitchenEnabled) {
                 session?.let { endSession(it, "the kitchen was switched off", true) }
@@ -1367,6 +1379,12 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
 
     private fun newToken(): String = UUID.randomUUID().toString().replace("-", "").substring(0, 12)
 
+    /** The format of the streams that are made now (the setting `kitchen_format`; a session keeps the one it was made with). */
+    private fun streamFormat(): StreamFormat = StreamFormat.of(Settings.values.kitchenFormat) ?: StreamFormat.FLAC
+
+    /** Where the speaker finds a session's stream: the extension tells the format. */
+    private fun streamUri(host: String, s: KitchenSession): String = "http://$host:${DebugServer.PORT}/k/${s.token}.${s.format.ext}"
+
     private fun channelsFor(kind: Int): StreamBuilder.ChannelMode =
         if (kind == KIND_CALIBRATION) StreamBuilder.ChannelMode.RIGHT_ONLY else StreamBuilder.ChannelMode.STEREO
 
@@ -1420,6 +1438,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         o.put("prepare_failures", prepFailures)
         o.put("play_failures", playFailures)
         o.put("source", arbiter.source.label)
+        o.put("format", Settings.values.kitchenFormat)
+        o.put("flac_block", Settings.values.kitchenFlacBlock)
         o.put("failed_starts", backoff.failures)
         o.put("start_failures_total", startFailuresTotal)
         o.put("backoff_s", backoff.remainingMs(nowMs()) / 1000)
@@ -1464,6 +1484,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             j.put("trim_budget", s.stream?.builder?.unappliedBudget() ?: 0)
             j.put("capture", s.isCapture)
             j.put("rate", s.rate)
+            j.put("format", s.format.key)
+            j.put("block_frames", s.blockFrames)
             o.put("session", j)
         } else {
             o.put("session", JSONObject.NULL)

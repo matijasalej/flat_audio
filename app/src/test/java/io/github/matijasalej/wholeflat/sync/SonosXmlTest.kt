@@ -71,6 +71,25 @@ class SonosXmlTest {
     }
 
     @Test
+    fun ourWavStreamsAreRecognisedToo() {
+        assertTrue(SonosPolicy.isOurUri("http://192.168.0.165:8080/k/1a2b3c4d.wav"))
+        assertEquals("1a2b3c4d", SonosPolicy.tokenOf("http://192.168.0.165:8080/k/1a2b3c4d.wav"))
+        assertEquals(SonosPolicy.Availability.OURS, SonosPolicy.classify("PLAYING", "http://h:8080/k/ab.wav"))
+        assertFalse(SonosPolicy.isOurUri("http://192.168.0.165:8080/music/x.wav"))
+        assertNull(SonosPolicy.tokenOf("http://192.168.0.165:8080/k/.wav"))
+    }
+
+    @Test
+    fun theItemTellsTheMimeTypeOfTheStream() {
+        val flac = SonosXml.didlTrack("Whole Flat", "http://h:8080/k/ab.flac")
+        assertTrue(flac, flac.contains("protocolInfo=\"http-get:*:audio/flac:*\""))
+        val wav = SonosXml.didlTrack("Whole Flat", "http://h:8080/k/ab.wav", "audio/wav")
+        assertTrue(wav, wav.contains("protocolInfo=\"http-get:*:audio/wav:*\""))
+        assertTrue(wav.contains("<res protocolInfo=\"http-get:*:audio/wav:*\">http://h:8080/k/ab.wav</res>"))
+        assertTrue(wav.contains("<upnp:class>object.item.audioItem.musicTrack</upnp:class>"))
+    }
+
+    @Test
     fun onlyAForeignSourceThatPlaysKeepsTheKitchenOut() {
         val other = "x-rincon-stream:RINCON_123"
         assertEquals(SonosPolicy.Availability.FREE, SonosPolicy.classify("STOPPED", ""))

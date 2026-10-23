@@ -5,9 +5,12 @@ import java.nio.ByteOrder
 
 /**
  * A minimal FLAC encoder: every subframe is VERBATIM, so there is no compression and no dependency,
- * just a valid stream. STREAMINFO says "total samples unknown" (0), blocks are a fixed 4096 frames,
- * each frame header carries the frame number (UTF-8 coded) and a CRC-8, each frame ends with a
- * CRC-16.
+ * just a valid stream. STREAMINFO says "total samples unknown" (0), blocks are a fixed number of frames
+ * (4096 unless asked for another size), each frame header carries the frame number (UTF-8 coded) and a
+ * CRC-8, each frame ends with a CRC-16.
+ *
+ * A smaller block is a shorter wait in a live stream (a frame can only be sent once all of its samples
+ * exist): 4096 frames are 93 ms at 44.1 kHz, 1152 are 26 ms, 576 are 13 ms.
  */
 object Flac {
     const val BLOCK = 4096
@@ -47,15 +50,37 @@ object Flac {
         else -> throw IllegalArgumentException("sample rate $sampleRate has no code in the FLAC frame header")
     }
 
+    /** The block size code of the frame header; only the sizes that have a code of their own are possible. */
+    private fun blockCode(blockSize: Int): Int = when (blockSize) {
+        192 -> 0b0001
+        576 -> 0b0010
+        1152 -> 0b0011
+        2304 -> 0b0100
+        4608 -> 0b0101
+        256 -> 0b1000
+        512 -> 0b1001
+        1024 -> 0b1010
+        2048 -> 0b1011
+        4096 -> 0b1100
+        8192 -> 0b1101
+        16384 -> 0b1110
+        32768 -> 0b1111
+        else -> throw IllegalArgumentException("block size $blockSize has no code in the FLAC frame header")
+    }
+
+    /** The block sizes that can be asked for. */
+    val BLOCK_SIZES = intArrayOf(192, 256, 512, 576, 1024, 1152, 2048, 2304, 4096, 4608, 8192, 16384, 32768)
+
     /** "fLaC" plus one STREAMINFO block (the last metadata block). */
-    fun streamHeader(sampleRate: Int = 44_100): ByteArray {
+    fun streamHeader(sampleRate: Int = 44_100, blockSize: Int = BLOCK): ByteArray {
         rateCode(sampleRate) // refuses a rate the frames cannot carry
+        blockCode(blockSize) // and a block size
         val b = ByteBuffer.allocate(4 + 4 + 34).order(ByteOrder.BIG_ENDIAN)
         b.put("fLaC".toByteArray(Charsets.US_ASCII))
         // last metadata block, type 0 = STREAMINFO, then its length (34) as 24 bits
         b.put(byteArrayOf(0x80.toByte(), 0, 0, 34))
-        b.putShort(BLOCK.toShort()) // min block size
-        b.putShort(BLOCK.toShort()) // max block size
+        b.putShort(blockSize.toShort()) // min block size
+        b.putShort(blockSize.toShort()) // max block size
         b.put(byteArrayOf(0, 0, 0)) // min frame size: unknown
         b.put(byteArrayOf(0, 0, 0)) // max frame size: unknown
         // 20 bits sample rate, 3 bits channels - 1, 5 bits bits per sample - 1, 36 bits total samples (0 = unknown)
@@ -86,22 +111,22 @@ object Flac {
         return out
     }
 
-    /** One frame of [BLOCK] stereo frames from [pcm] (interleaved, at least BLOCK * 2 shorts). */
-    fun frame(number: Long, pcm: ShortArray, sampleRate: Int = 44_100): ByteArray {
+    /** One frame of [blockSize] stereo frames from [pcm] (interleaved, at least blockSize * 2 shorts). */
+    fun frame(number: Long, pcm: ShortArray, sampleRate: Int = 44_100, blockSize: Int = BLOCK): ByteArray {
         val coded = utf8Number(number)
         val headerLength = 4 + coded.size + 1
-        val out = ByteArray(headerLength + 2 * (1 + BLOCK * 2) + 2)
+        val out = ByteArray(headerLength + 2 * (1 + blockSize * 2) + 2)
         var p = 0
         out[p++] = 0xFF.toByte()
         out[p++] = 0xF8.toByte() // sync, fixed block size
-        out[p++] = ((0b1100 shl 4) or rateCode(sampleRate)).toByte() // block size code 1100 = 4096, then the sample rate code
+        out[p++] = ((blockCode(blockSize) shl 4) or rateCode(sampleRate)).toByte() // block size code, then the sample rate code
         out[p++] = 0x18.toByte() // channel assignment 0001 = 2 independent channels, 16 bit
         for (b in coded) out[p++] = b
         out[p] = crc8(out, p).toByte()
         p++
         for (channel in 0 until 2) {
             out[p++] = 0x02.toByte() // subframe header: VERBATIM, no wasted bits
-            for (i in 0 until BLOCK) {
+            for (i in 0 until blockSize) {
                 val s = pcm[i * 2 + channel].toInt()
                 out[p++] = (s shr 8).toByte()
                 out[p++] = s.toByte()

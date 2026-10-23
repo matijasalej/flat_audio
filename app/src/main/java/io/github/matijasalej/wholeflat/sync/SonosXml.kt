@@ -37,10 +37,10 @@ object SonosXml {
         return sb.toString()
     }
 
-    /** A plain music track whose resource is the FLAC stream (the class that makes the Sonos play it as a file). */
-    fun didlTrack(title: String, uri: String): String =
+    /** A plain music track whose resource is the stream, of MIME type [mime] (the class that makes the Sonos play it as a file). */
+    fun didlTrack(title: String, uri: String, mime: String = "audio/flac"): String =
         "<DIDL-Lite $DIDL_NS><item id=\"-1\" parentID=\"-1\" restricted=\"true\">" +
-            "<res protocolInfo=\"http-get:*:audio/flac:*\">${escape(uri)}</res>" +
+            "<res protocolInfo=\"http-get:*:$mime:*\">${escape(uri)}</res>" +
             "<dc:title>${escape(title)}</dc:title><upnp:class>object.item.audioItem.musicTrack</upnp:class>" +
             "</item></DIDL-Lite>"
 

@@ -43,7 +43,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * [arbiter] decides which source feeds the speaker; librespot wins. A capture has no living room to be
  * in step with, so the lag of the kitchen behind the capture is measured and then held constant.
  */
-class Kitchen(private val context: Context, private val living: LivingRoom) : StartCoordinator, SonosFinder.Listener {
+class Kitchen(private val context: Context, private val living: LivingRoom) : StartCoordinator, SonosFinder.Listener, StreamHost {
 
     enum class State(val label: String) {
         OFF("off"),
@@ -609,7 +609,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     }
 
     /** The stream thread found that its frames were gone. */
-    fun streamLost(s: KitchenSession, reason: String) {
+    override fun streamLost(s: KitchenSession, reason: String) {
         post("stream lost") {
             if (session === s && !s.cancelled) rejoin("stream: $reason")
         }
@@ -812,7 +812,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
 
     // ---- sessions ------------------------------------------------------------------------------
 
-    fun sessionFor(token: String): KitchenSession? = sessions[token]
+    override fun sessionFor(token: String): KitchenSession? = sessions[token]
 
     /** Ends a session. With [commands], the speaker is muted and stopped (it may still hold seconds of our audio). */
     private fun endSession(s: KitchenSession, why: String, commands: Boolean) {

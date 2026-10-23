@@ -6,25 +6,32 @@ import io.github.matijasalej.wholeflat.sync.Flac
 import io.github.matijasalej.wholeflat.sync.FrameSource
 import io.github.matijasalej.wholeflat.sync.KitchenMap
 import io.github.matijasalej.wholeflat.sync.SessionClock
+import io.github.matijasalej.wholeflat.sync.SessionRecord
 import io.github.matijasalej.wholeflat.sync.StreamBuilder
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.OutputStream
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
-/** The stream being served to the Sonos right now: its map from stream frames to ring frames and its trims. */
-class ActiveStream(val connectionId: Int, val map: KitchenMap, val builder: StreamBuilder)
+/**
+ * One stream connection of the Sonos after Play: its map from stream frames to source frames and its trims.
+ * Every connection of a session has its own builder; the one the controller steers is [KitchenSession.stream].
+ */
+class ActiveStream(val connectionId: Int, val map: KitchenMap, val builder: StreamBuilder, val startNanos: Long = System.nanoTime())
 
 /**
  * One stream for the Sonos: the FLAC of the ring from [startRingFrame] on, behind a URL of its own.
  * A session belongs to one epoch of the ring; a new epoch, a re-join or a pause ends it. A session of the
  * capture mode ([capture] is set) streams the captured audio of another app instead of the ring, at the
- * capture's 48 kHz, from a frame of one capture attempt ([captureGeneration]).
+ * capture's sample rate, from a frame of one capture attempt ([captureGeneration]).
  *
- * The Sonos asks for the URL before it is told to play (a HEAD and a short probe GET, which are
- * answered with real or silent frames and then closed), and again when Play arrives; only the stream
- * that is requested after [arm] is the one it plays.
+ * The Sonos asks for the URL in its own way: a GET that reads a frame or two and is closed by the Sonos
+ * (the probe), a GET that is the stream proper, a HEAD, in whatever order and at whatever moment. Every
+ * connection is served for itself from the start of the stream, until the Sonos closes it or the session
+ * ends; none is ever closed because another one came. A connection that comes after [arm] is a candidate
+ * for the stream proper ([attach]); the newest one that is still open is the one the controller steers.
  */
 class KitchenSession(
     val token: String,
@@ -37,7 +44,7 @@ class KitchenSession(
 ) {
     val isCapture: Boolean get() = capture != null
 
-    /** The sample rate of the stream: the ring's 44.1 kHz, or the capture's 48 kHz. */
+    /** The sample rate of the stream: the ring's 44.1 kHz, or the capture's. */
     val rate: Int get() = capture?.rate ?: RING_RATE
 
     /** First ring frame of the stream (a captured frame in capture mode); negative while it is not known yet (a hot-join picks it at Play time). */
@@ -72,26 +79,41 @@ class KitchenSession(
     @Volatile
     var playingReadings = 0
 
+    /** The log of this session's connections and of what the speaker showed (see `/kitchen/last-sessions`). */
+    @Volatile
+    var record: SessionRecord? = null
+
+    /** The session went on well for a while: a start that is over for the back-off. */
+    @Volatile
+    var healthy = false
+
+    /** The end of this session was counted as a failed start already. */
+    @Volatile
+    var failureCounted = false
+
+    private val streams = ArrayList<ActiveStream>()
+
+    /** The connection the controller steers: the newest one after Play that is still open; null if there is none. */
     @Volatile
     var stream: ActiveStream? = null
         private set
 
-    private val sockets = HashSet<Socket>()
+    private val conns = HashSet<ClientConn>()
 
-    fun addSocket(socket: Socket) {
-        synchronized(sockets) { sockets.add(socket) }
+    fun addConn(conn: ClientConn) {
+        synchronized(conns) { conns.add(conn) }
     }
 
-    fun removeSocket(socket: Socket) {
-        synchronized(sockets) { sockets.remove(socket) }
+    fun removeConn(conn: ClientConn) {
+        synchronized(conns) { conns.remove(conn) }
     }
 
     /** Closes the connections of this session: a stream thread blocked in a write to a stalled Sonos ends. */
     fun closeSockets() {
-        val open = synchronized(sockets) { sockets.toList() }
-        for (socket in open) {
+        val open = synchronized(conns) { conns.toList() }
+        for (conn in open) {
             try {
-                socket.close()
+                conn.closeNow()
             } catch (e: Exception) {
                 // closed already
             }
@@ -105,6 +127,7 @@ class KitchenSession(
 
     fun nextConnectionId(): Int = connections.incrementAndGet()
 
+    /** GET connections so far. */
     val connectionCount: Int get() = connections.get()
 
     /** Play is about to be sent: the Sonos should play stream frame 0 at [predictedStartNanos]. */
@@ -113,11 +136,24 @@ class KitchenSession(
         armed = true
     }
 
+    /** A connection that came after Play begins to stream: it is the one the controller steers until it ends. */
     fun attach(active: ActiveStream) {
-        stream = active
+        synchronized(streams) {
+            streams.add(active)
+            stream = active
+        }
     }
 
-    fun isCurrent(connectionId: Int): Boolean = stream?.connectionId == connectionId
+    /** A connection ended; the newest one that is still open (if any) is the one steered again. */
+    fun detach(active: ActiveStream) {
+        synchronized(streams) {
+            streams.remove(active)
+            stream = streams.lastOrNull()
+        }
+    }
+
+    /** Open connections after Play. */
+    val streamCount: Int get() = synchronized(streams) { streams.size }
 
     companion object {
         /** The ring plays 44.1 kHz. */
@@ -161,18 +197,83 @@ object SilenceSource : FrameSource {
     }
 }
 
+/** What the HTTP side needs from the kitchen. */
+interface StreamHost {
+    fun sessionFor(token: String): KitchenSession?
+
+    /** The frames of the stream the controller steers are gone. */
+    fun streamLost(s: KitchenSession, reason: String)
+}
+
+/** One HTTP connection of the Sonos, as the stream server sees it (a socket in the app, a fake in the tests). */
+interface ClientConn {
+    val out: OutputStream
+
+    /** Before a stream is sent: no Nagle, no read timeout. */
+    fun prepareForStream()
+
+    /** Blocks until the peer has closed its side or the connection failed; says which ("eof", "reset: ..."). */
+    fun awaitPeerClose(): String
+
+    /** Closes the connection from our side (the session ended); also ends [awaitPeerClose]. */
+    fun closeNow()
+}
+
+class SocketConn(private val socket: Socket, override val out: OutputStream) : ClientConn {
+    override fun prepareForStream() {
+        try {
+            socket.soTimeout = 0
+            socket.tcpNoDelay = true
+        } catch (e: Exception) {
+            // socket options are a nicety
+        }
+    }
+
+    override fun awaitPeerClose(): String {
+        return try {
+            val input = socket.getInputStream()
+            val buffer = ByteArray(256)
+            // The Sonos sends nothing after its request; what comes is ignored. The end of the stream is the news.
+            while (input.read(buffer) >= 0) {
+                // nothing to do
+            }
+            "eof"
+        } catch (e: IOException) {
+            "reset: " + e.message
+        }
+    }
+
+    override fun closeNow() {
+        socket.close()
+    }
+}
+
 /**
- * The HTTP side of the kitchen stream (`GET /k/<token>.flac`): headers as the spikes found the Sonos
- * likes them (FLAC without a length, no ranges, connection close), then the STREAMINFO header and one
- * verbatim FLAC frame per 4096 ring frames, paced to real time with a lead of [LEAD_FRAMES] ahead of
- * the position the Sonos is predicted to play.
+ * The HTTP side of the kitchen stream (`GET /k/<token>.flac`), made after the stream server of the Sonos
+ * spikes, which the Sonos plays from: headers as they found it likes them (FLAC without a length, no
+ * ranges, connection close), the STREAMINFO header and one verbatim FLAC frame per 4096 frames.
+ *
+ * - **Every connection is for itself.** Each GET is served from the first frame of the stream until the
+ *   Sonos closes it or the session ends; a connection is never closed because a newer one came, and a probe
+ *   is not closed when Play is sent: the Sonos closes what it opened.
+ * - **The first write is the whole lead.** The headers, the STREAMINFO header and every frame that is ready
+ *   (or due) go out in one write; after that one write per frame, or per burst of frames.
+ * - **A HEAD gets the headers of a GET** and touches nothing.
+ * - **Pacing:** a stream after Play is sent a lead of [LEAD_FRAMES] ahead of the position the Sonos is predicted
+ *   to play, a captured one as it is captured (it exists no sooner), a probe like the spikes' server: [PROBE_PREBUFFER_NANOS]
+ *   of audio at once, then in real time.
  */
 object KitchenStreams {
     private const val TAG = "stream"
 
     /** How far ahead of the Sonos's play position the stream is sent: 1.5 s. */
     const val LEAD_FRAMES = 66_150L
-    private const val PROBE_START_NANOS = 300_000_000L
+
+    /** The audio a connection that is not the stream proper gets at once, then real time (the spikes' server used 1 s). */
+    const val PROBE_PREBUFFER_NANOS = 1_000_000_000L
+
+    /** One write never carries more than this (a burst of frames is cut here). */
+    private const val MAX_WRITE_BYTES = 512 * 1024
 
     const val RESPONSE_HEAD = "HTTP/1.1 200 OK\r\n" +
         "Content-Type: audio/flac\r\n" +
@@ -182,6 +283,14 @@ object KitchenStreams {
         "transferMode.dlna.org: Streaming\r\n" +
         "Server: WholeFlat\r\n\r\n"
 
+    /** Where the log lines go (the tests collect them). */
+    @Volatile
+    var log: (String) -> Unit = { AppLog.add(TAG, it) }
+
+    /** The ring as a source of frames for a session of [epoch] (the tests put a fake here). */
+    @Volatile
+    var ringFrames: (Long) -> FrameSource = { epoch -> RingFrameSource(epoch) }
+
     /** The token of a `/k/<token>.flac` path, or null. */
     fun tokenOf(path: String): String? {
         if (!path.startsWith("/k/") || !path.endsWith(".flac")) return null
@@ -189,8 +298,9 @@ object KitchenStreams {
         return if (token.isNotEmpty() && token.all { it.isLetterOrDigit() }) token else null
     }
 
-    fun serve(kitchen: Kitchen, token: String, method: String, remote: String, userAgent: String, client: Socket, out: OutputStream) {
-        val session = kitchen.sessionFor(token)
+    fun serve(host: StreamHost, token: String, method: String, remote: String, userAgent: String, conn: ClientConn) {
+        val out = conn.out
+        val session = host.sessionFor(token)
         if (session == null) {
             val body = "no such stream\n".toByteArray(Charsets.UTF_8)
             out.write(
@@ -198,39 +308,65 @@ object KitchenStreams {
             )
             out.write(body)
             out.flush()
-            AppLog.add(TAG, "$remote $method /k/$token -> 404 (no such session)")
+            log("$remote $method /k/$token -> 404 (no such session)")
             return
         }
-        out.write(RESPONSE_HEAD.toByteArray(Charsets.ISO_8859_1))
         if (method == "HEAD") {
-            out.flush()
-            AppLog.add(TAG, "$remote HEAD session ${session.token} [$userAgent]")
+            // the headers of a GET and nothing else; no session or stream state is touched
+            val rec = session.record?.openConnection("HEAD", remote, userAgent, session.armed, System.nanoTime())
+            try {
+                out.write(RESPONSE_HEAD.toByteArray(Charsets.ISO_8859_1))
+                out.flush()
+                rec?.let { session.record?.closeConnection(it, System.nanoTime(), "server", "HEAD answered") }
+            } catch (e: IOException) {
+                rec?.let { session.record?.closeConnection(it, System.nanoTime(), "peer", "peer: " + e.message) }
+                throw e
+            }
+            log("$remote HEAD session ${session.token} [$userAgent]")
             return
         }
+        conn.prepareForStream()
+        session.addConn(conn)
         try {
-            client.soTimeout = 0
-            client.tcpNoDelay = true
-        } catch (e: Exception) {
-            // socket options are a nicety
-        }
-        session.addSocket(client)
-        try {
-            stream(kitchen, session, remote, userAgent, out)
+            stream(host, session, remote, userAgent, conn)
         } finally {
-            session.removeSocket(client)
+            session.removeConn(conn)
         }
     }
 
-    private fun stream(kitchen: Kitchen, session: KitchenSession, remote: String, userAgent: String, out: OutputStream) {
-        val connectionId = session.nextConnectionId()
+    /** Watches a connection for its closing by the Sonos, so that the stream notices at once, also when it sleeps or waits for frames. */
+    private class PeerWatch(conn: ClientConn) {
+        @Volatile
+        var closed = false
+
+        @Volatile
+        var how = ""
+
+        init {
+            val t = Thread({
+                val result = conn.awaitPeerClose()
+                how = result
+                closed = true
+            }, "wf-stream-peer")
+            t.isDaemon = true
+            t.start()
+        }
+    }
+
+    private fun stream(host: StreamHost, session: KitchenSession, remote: String, userAgent: String, conn: ClientConn) {
+        val out = conn.out
         val armed = session.armed
         val startFrame = session.startRingFrame
         val capture = session.capture
         val rate = session.rate
+        val began = System.nanoTime()
+        val count = session.nextConnectionId()
+        val rec = session.record?.openConnection("GET", remote, userAgent, armed, began)
+        val connectionId = rec?.id ?: count
         val frames: FrameSource? = when {
             startFrame < 0 -> null
             capture != null -> CaptureFrames(capture.buffer, session.captureGeneration)
-            else -> RingFrameSource(session.epoch)
+            else -> ringFrames(session.epoch)
         }
         val source: FrameSource = when {
             frames == null -> SilenceSource
@@ -240,78 +376,126 @@ object KitchenStreams {
         val map = KitchenMap(maxOf(0L, startFrame))
         // a trim is at most one frame per 10 ms
         val builder = StreamBuilder(source, map, session.channels, trimSpacing = rate / 100)
-        val probeClock = if (armed) null else SessionClock(System.nanoTime() + PROBE_START_NANOS, rate)
-        // A captured stream is not paced: its frames exist only as they are captured, so the reads wait for them.
-        val paced = !(armed && capture != null)
-        if (armed) session.attach(ActiveStream(connectionId, map, builder))
-        AppLog.add(
-            TAG,
+        val active = ActiveStream(connectionId, map, builder, began)
+        // A captured stream after Play is not paced: its frames exist only as they are captured, so the reads wait for them.
+        val lead = LEAD_FRAMES * rate / KitchenSession.RING_RATE
+        fun dueNanos(block: Long): Long = when {
+            armed && capture != null -> 0L
+            armed -> session.clock?.timeOfFrame(((block + 1) * Flac.BLOCK - lead).toDouble()) ?: 0L
+            else -> began + maxOf(0L, block * Flac.BLOCK * 1_000_000_000L / rate - PROBE_PREBUFFER_NANOS)
+        }
+        if (armed) session.attach(active)
+        val peer = PeerWatch(conn)
+        log(
             "$remote GET session ${session.token} conn $connectionId from ${if (capture != null) "captured" else "ring"} frame " +
                 "$startFrame, " + (if (armed) "the stream" else "a probe before Play") +
-                (if (capture != null) ", $rate Hz" + (if (paced) "" else ", not paced") else "") + " [$userAgent]",
+                (if (capture != null) ", $rate Hz" else "") + " [$userAgent]",
         )
+
         var reason = "peer closed"
+        var closedBy = "peer"
         var lost = false
         var blockNo = 0L
-        val began = System.nanoTime()
-        fun stopped(): Boolean = session.cancelled || (armed && !session.isCurrent(connectionId)) || (!armed && session.armed)
+        var bytes = 0L
+        val pending = ByteArrayOutputStream(64 * 1024)
+        var pendingBlocks = 0
         try {
-            out.write(Flac.streamHeader(rate))
-            out.flush()
+            pending.write(RESPONSE_HEAD.toByteArray(Charsets.ISO_8859_1))
+            pending.write(Flac.streamHeader(rate))
+
+            // One write for what is ready: the headers, and every frame that is due and exists at this moment.
+            fun flush() {
+                val size = pending.size()
+                if (size == 0) return
+                pending.writeTo(out)
+                out.flush()
+                pending.reset()
+                bytes += size
+                session.bytesSent.addAndGet(size.toLong())
+                session.blocksSent.addAndGet(pendingBlocks.toLong())
+                if (rec != null) {
+                    if (rec.firstByteMs < 0) rec.firstByteMs = session.record?.ms(System.nanoTime()) ?: 0L
+                    rec.bytes = bytes
+                    rec.blocks = blockNo
+                }
+                pendingBlocks = 0
+            }
+
+            var haveBlock = false
             while (true) {
                 if (session.cancelled) {
-                    reason = "session ended"
+                    reason = "session ended" + (session.endReason?.let { ": $it" } ?: "")
+                    closedBy = "server"
                     break
                 }
-                if (!armed && session.armed) {
-                    reason = "probe done, Play was sent"
+                if (peer.closed) {
+                    reason = "peer " + peer.how
+                    closedBy = "peer"
                     break
                 }
-                if (armed && !session.isCurrent(connectionId)) {
-                    reason = "replaced by a newer connection"
-                    break
+                if (!haveBlock) {
+                    // with something to send, only what exists at once is built; then it is sent and the wait for more begins
+                    val n = builder.nextBlock(if (pending.size() > 0) 0 else 150)
+                    when {
+                        n == FrameSource.CLOSED -> {
+                            flush()
+                            reason = "source closed"
+                            closedBy = "server"
+                            break
+                        }
+                        n == FrameSource.LAPPED -> {
+                            flush()
+                            reason = "the frames are gone (lapped)"
+                            closedBy = "server"
+                            lost = true
+                            break
+                        }
+                        n == FrameSource.EPOCH -> {
+                            flush()
+                            reason = "epoch changed"
+                            closedBy = "server"
+                            break
+                        }
+                        n <= 0 -> {
+                            flush()
+                            continue
+                        }
+                        else -> haveBlock = true
+                    }
                 }
-                val n = builder.nextBlock(150)
-                if (n == FrameSource.CLOSED) {
-                    reason = "ring closed"
-                    break
+                val due = dueNanos(blockNo)
+                if (due > System.nanoTime()) {
+                    flush()
+                    sleepUntil(due) { session.cancelled || peer.closed }
+                    continue
                 }
-                if (n == FrameSource.LAPPED) {
-                    reason = "the ring moved on (lapped)"
-                    lost = true
-                    break
-                }
-                if (n == FrameSource.EPOCH) {
-                    reason = "epoch changed"
-                    break
-                }
-                if (n <= 0) continue
-                val clock = if (armed) session.clock else probeClock
-                if (clock != null && paced) {
-                    val lead = LEAD_FRAMES * rate / KitchenSession.RING_RATE
-                    val due = clock.timeOfFrame(((blockNo + 1) * Flac.BLOCK - lead).toDouble())
-                    sleepUntil(due) { stopped() }
-                    if (stopped()) continue
-                }
-                val frame = Flac.frame(blockNo, builder.block, rate)
-                out.write(frame)
-                out.flush()
+                pending.write(Flac.frame(blockNo, builder.block, rate))
+                pendingBlocks++
                 blockNo++
-                session.bytesSent.addAndGet(frame.size.toLong())
-                session.blocksSent.incrementAndGet()
+                haveBlock = false
+                if (pending.size() >= MAX_WRITE_BYTES) flush()
             }
         } catch (e: IOException) {
             reason = "peer: " + e.message
+            closedBy = "peer"
         } catch (e: InterruptedException) {
             reason = "interrupted"
+            closedBy = "server"
         } finally {
-            AppLog.add(
-                TAG,
-                "session ${session.token} conn $connectionId closed after ${(System.nanoTime() - began) / 1_000_000L} ms, " +
-                    "$blockNo blocks ($reason)",
+            val wasCurrent = session.stream === active
+            if (armed) session.detach(active)
+            val ended = System.nanoTime()
+            if (rec != null) {
+                rec.bytes = bytes
+                rec.blocks = blockNo
+                session.record?.closeConnection(rec, ended, closedBy, reason)
+            }
+            log(
+                "session ${session.token} conn $connectionId closed after ${(ended - began) / 1_000_000L} ms, " +
+                    "$blockNo blocks, $bytes bytes, by the ${if (closedBy == "peer") "Sonos" else "app"} ($reason)",
             )
+            if (armed && lost && wasCurrent) host.streamLost(session, reason)
         }
-        if (armed && lost && session.isCurrent(connectionId)) kitchen.streamLost(session, reason)
     }
 
     private fun sleepUntil(targetNanos: Long, shouldStop: () -> Boolean) {

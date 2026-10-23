@@ -112,6 +112,14 @@ class TsHistory(private val maxBytes: Long = 16L shl 20, private val maxAgeNanos
         }
     }
 
+    /** How old the oldest key place that is held is at [nowNanos] (ns), null while there is none. */
+    fun oldestKeyAgeNanos(nowNanos: Long): Long? {
+        synchronized(lock) {
+            for (e in entries) if (e.key) return nowNanos - e.nanos
+            return null
+        }
+    }
+
     /** The newest key place, null if none is held. */
     fun newestKey(): Long? {
         synchronized(lock) {

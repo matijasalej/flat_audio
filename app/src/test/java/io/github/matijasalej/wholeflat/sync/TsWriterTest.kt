@@ -171,4 +171,27 @@ class TsWriterTest {
         assertNull(q.popDue(10))
         assertNull(q.nextDue())
     }
+
+    @Test
+    fun aHigherRateOfTheStreamIsStillConstantWithTheClockEveryTwentyMilliseconds() {
+        // the video setting can ask for more bits (tv_video): the stream then runs at 1.5 times the bitrate
+        val mux = TsMuxer(muxRate = 15_000_000)
+        val history = TsHistory()
+        val w = TsWriter(mux, history) { t -> Math.floor(t / 1e9 * mux.slotsPerSecond).toLong() }
+        w.submitVideo(10 * ms, au(120_000), 1_000, true)
+        for (i in 0 until 40) w.submitAudio((20L + i * 23) * ms, au(300), 1_100L + i * 2_070)
+        var t = 0L
+        while (t <= 1_000 * ms) {
+            w.step(t)
+            t += ms
+        }
+        val r = everything(history)
+        assertEquals(emptyList<String>(), r.errors)
+        assertEquals((Math.floor(1_000 * ms / 1e9 * mux.slotsPerSecond).toLong() + 1) * 188, history.endPos)
+        val pcrs = r.packets.filter { it.pcr != null }
+        for (i in 1 until pcrs.size) assertTrue((pcrs[i].pcr!! - pcrs[i - 1].pcr!!) / 27_000.0 <= 20.1)
+        assertEquals(1, r.pes[TsMuxer.VIDEO_PID]!!.size)
+        assertEquals(120_000, r.pes[TsMuxer.VIDEO_PID]!![0].payload.size)
+        assertEquals(40, r.pes[TsMuxer.AUDIO_PID]!!.size)
+    }
 }

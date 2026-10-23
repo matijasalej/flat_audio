@@ -479,6 +479,17 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             fail("SetAVTransportURI: ${set.describe()}")
             return
         }
+        if (pipe != null) {
+            // A connection starts at the newest key picture that is at least tv_burst_ms old, or at the oldest one held when the stream is
+            // younger than that, and the TV's latency is the age of that picture plus 0.49 s (measured at backlogs of 1.6 and 2.2 s): so Play
+            // waits until the stream holds the burst, or the first GET of a TV that is quick finds a backlog of 0.8 s, which nothing measured.
+            val need = (Settings.values.tvBurstMs + BURST_MARGIN_MS) * 1_000_000L
+            val waitedFrom = nowMs()
+            waitFor(Settings.values.tvBurstMs + 1_000L) { (pipe.history.oldestKeyAgeNanos(System.nanoTime()) ?: 0L) >= need }
+            val waited = nowMs() - waitedFrom
+            if (waited > 50) AppLog.add(TAG, "Play waited $waited ms for the stream to be ${Settings.values.tvBurstMs + BURST_MARGIN_MS} ms old (the burst of a connection)")
+            if (cancelRequested) return cancelled()
+        }
         s.record?.playSent(System.nanoTime())
         if (pipe != null) warmup.start(System.nanoTime())
         var play = api.play()
@@ -990,6 +1001,9 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
 
         /** The video stream's connections: a little more room, it is about 600 KB/s. */
         private const val TS_SEND_BUFFER_BYTES = 64 * 1024
+
+        /** The stream is this much older than the burst of a connection (ms) when Play is sent. */
+        private const val BURST_MARGIN_MS = 150L
 
         /** The warm-up is looked at this often (ms). */
         private const val WARMUP_TICK_MS = 250L

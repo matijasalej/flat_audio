@@ -33,6 +33,20 @@ class TsHistoryTest {
     }
 
     @Test
+    fun theAgeOfTheOldestKeyPlaceTellsWhetherTheStreamHoldsTheBurst() {
+        val h = TsHistory()
+        assertNull(h.oldestKeyAgeNanos(0))
+        // units without a key place do not count
+        h.append(unit(10, 1), 0, false)
+        assertNull(h.oldestKeyAgeNanos(1 * s))
+        h.append(unit(10, 2), 200_000_000L, true)
+        h.append(unit(10, 3), 400_000_000L, true)
+        assertEquals(1_300_000_000L, h.oldestKeyAgeNanos(1_500_000_000L))
+        // a connection made then would start at the oldest key place (the stream is younger than a burst of 1.5 s)
+        assertEquals(10L, h.startFor(1_500_000_000L, 1_500_000_000L))
+    }
+
+    @Test
     fun withoutAKeyPlaceThereIsNoStart() {
         val h = TsHistory()
         assertNull(h.startFor(0, 0))

@@ -78,4 +78,32 @@ class PositionProbeTest {
         limit = 800.0
         assertEquals(0L, p.add(5_000, "0:00:14.500", null, null, null).pauseMs) // 500 ms under 800
     }
+
+    @Test
+    fun aTvThatDoesNotImplementThePositionNeverShowsAStandstill() {
+        // the Philips: RelTime always 0:00:00, AbsTime NOT_IMPLEMENTED, the counts 2147483647
+        val p = PositionProbe { 100.0 }
+        var pauses = 0L
+        for (i in 0 until 10) pauses += p.add(i * 7_000L, "00:00:00", "NOT_IMPLEMENTED", "2147483647", "2147483647").pauseMs
+        assertEquals(0L, pauses)
+        assertEquals(false, p.supported)
+        // it stays so, also for a new stream of the same TV
+        p.reset()
+        assertEquals(false, p.supported)
+        assertEquals(0L, p.add(100_000, "00:00:00", "NOT_IMPLEMENTED", "2147483647", "2147483647").pauseMs)
+    }
+
+    @Test
+    fun aTvThatGivesAPositionIsSupportedAndAStandstillBeforeAnyAdvanceIsNoPause() {
+        val p = PositionProbe { 100.0 }
+        // the first two readings are 0:00:00 (the player is only starting), then it runs: supported, never unsupported
+        assertEquals(0L, p.add(0, "0:00:00", null, null, null).pauseMs)
+        assertEquals(0L, p.add(6_000, "0:00:00", null, null, null).pauseMs)
+        assertEquals(null, p.supported)
+        assertEquals(0L, p.add(12_000, "0:00:12", null, null, null).pauseMs)
+        assertEquals(true, p.supported)
+        assertEquals(0L, p.add(18_000, "0:00:18", null, null, null).pauseMs)
+        // and now a standstill is a pause
+        assertEquals(true, p.add(28_000, "0:00:21", null, null, null).pauseMs > 0)
+    }
 }

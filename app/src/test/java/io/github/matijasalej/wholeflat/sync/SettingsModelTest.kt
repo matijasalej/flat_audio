@@ -49,6 +49,18 @@ class SettingsModelTest {
         assertEquals("FOLLOW_AUDIO", o.getString("ambilight_dark_style"))
         assertEquals("PARTY", o.getString("ambilight_dark_algorithm"))
         assertEquals("", o.getString("ambilight_dark_menu"))
+        assertEquals(false, o.getBoolean("tv_auto_reanchor"))
+        assertEquals(false, o.getBoolean("tv_reanchor_running"))
+    }
+
+    @Test
+    fun theRisksOfAReanchorAreOptInAndOff() {
+        val m = SettingsModel()
+        assertEquals(false, m.values().tvAutoReanchor)
+        assertEquals(false, m.values().tvReanchorRunning)
+        assertEquals(setOf("tv_auto_reanchor", "tv_reanchor_running"), m.applyJson(JSONObject("""{"tv_auto_reanchor": true, "tv_reanchor_running": "yes"}""")))
+        assertEquals(true, m.values().tvAutoReanchor)
+        assertEquals(true, m.values().tvReanchorRunning)
     }
 
     @Test
@@ -95,7 +107,7 @@ class SettingsModelTest {
                 "kitchen_volume", "capture_volume_mirror", "kitchen_format", "kitchen_flac_block",
                 "mode", "tv_latency_ms", "tv_format", "tv_burst_ms", "tv_extra_ms", "tv_preroll_ms", "tv_pcr_lead_ms", "tv_reanchor_min", "tv_render", "tv_video", "lyrics_offset_ms", "display", "background_cleanup",
                 "ambilight_style", "ambilight_menu", "tv_pause_ms", "tv_quiet", "tv_audio_only", "tv_mac", "tv_position_probe",
-                "ambilight_dark_style", "ambilight_dark_algorithm", "ambilight_dark_menu",
+                "ambilight_dark_style", "ambilight_dark_algorithm", "ambilight_dark_menu", "tv_auto_reanchor", "tv_reanchor_running",
             ),
             keys,
         )

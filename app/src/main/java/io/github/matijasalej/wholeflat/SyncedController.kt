@@ -267,6 +267,7 @@ class SyncedController(
         val playing = renderer.state == TvRenderer.State.PLAYING && renderer.live && effectiveMode == Mode.SYNCED
         // while the music plays the box is freed of what it does not need, now and then
         if ((playing || source == "capture") && silent < CLEANUP_WHILE_SOUND_MS && now - cleaner.lastRunMs >= CLEANUP_EVERY_MS) cleaner.run("every 10 minutes while the music plays")
+        if (playing || source == "capture") cleaner.watch()
         kitchen.holdStart = if (effectiveMode == Mode.SYNCED && renderer.warming) "the TV is warming up (a splash and silence), its music is not live yet" else null
         // while the TV warms up again (a re-anchor) the kitchen is not sent back to the lag of Lyrics mode: it would be started twice
         holdTheKitchen(playing, now, keepTarget = effectiveMode == Mode.SYNCED && (renderer.warming || renderer.restarting))
@@ -309,6 +310,8 @@ class SyncedController(
         AppLog.add(TAG, "a re-anchor of the TV's stream is wanted at the next song boundary")
     }
 
+    private var suspectNoted = false
+
     private fun trackKey(): String = renderer.track().let { "${it.title}|${it.artist}" }
 
     /**
@@ -329,10 +332,16 @@ class SyncedController(
             AppLog.add(TAG, "the TV's stream is $age s old: a re-anchor is due and waits for a song boundary")
         }
         if (!reanchorWanted && Settings.values.tvPauseMs > 0 && renderer.suspectStream()) {
-            // the TV's player paused on this stream: its sound is later than the kitchen's by about the pause, and only a new start sets it right
-            reanchorWanted = true
-            trackWhenWanted = trackKey()
-            AppLog.add(TAG, "${renderer.pauseSummary()}: the kitchen is about that much ahead of it. The stream is made again at the next song boundary (a shift of the kitchen is not made)")
+            // the TV's player paused on this stream: its sound is later than the kitchen's by about the pause, and only a new start sets it right.
+            // The automatic start is opt-in (tv_auto_reanchor): the TV once went to standby on one; the pause is counted and logged either way
+            if (Settings.values.tvAutoReanchor) {
+                reanchorWanted = true
+                trackWhenWanted = trackKey()
+                AppLog.add(TAG, "${renderer.pauseSummary()}: the kitchen is about that much ahead of it. The stream is made again at the next song boundary (a shift of the kitchen is not made)")
+            } else if (!suspectNoted) {
+                suspectNoted = true
+                AppLog.add(TAG, "${renderer.pauseSummary()}: the kitchen is about that much ahead of it; tv_auto_reanchor is off, so the stream is left as it is (/tv/reanchor?at=boundary makes it again)")
+            }
         }
         if (!reanchorWanted) return
         val boundary = trackKey() != trackWhenWanted || silentMs in REANCHOR_SILENCE_MS..SILENT_NOT_PLAYING_MS

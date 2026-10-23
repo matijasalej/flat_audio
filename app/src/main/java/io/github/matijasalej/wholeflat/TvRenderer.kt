@@ -254,6 +254,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
 
     @Volatile
     private var probeAdvancing: Boolean? = null
+    private var loggedNoPosition = false
 
     @Volatile
     private var probeReadings = 0
@@ -830,7 +831,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
      * `tv_position_probe` alone, not by `tv_quiet`.
      */
     private fun probePosition(api: SonosSoap, s: KitchenSession) {
-        if (!Settings.values.tvPositionProbe) return
+        if (!Settings.values.tvPositionProbe || probe.supported == false) return
         val now = nowMs()
         if (now < nextProbeMs) return
         nextProbeMs = now + PROBE_MIN_MS + probeRandom.nextInt(PROBE_SPREAD_MS)
@@ -847,6 +848,11 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         val x = probe.add(now, rel, abs, relCount, absCount)
         probeReadings++
         probeAdvancing = x.advancing
+        if (x.supported == false && !loggedNoPosition) {
+            loggedNoPosition = true
+            AppLog.add(TAG, "the TV does not report a position (RelTime $rel, AbsTime $abs, counts $relCount and $absCount): the position probe is off for it, a standstill cannot be seen this way")
+            return
+        }
         val delta = if (x.dWallMs == null) "" else " (wall +${x.dWallMs} ms, position +${x.dRelMs} ms, standstill ${x.driftMs} ms)"
         lastProbe = "RelTime=$rel AbsTime=$abs RelCount=$relCount AbsCount=$absCount$delta"
         AppLog.add(TAG, "position probe: $lastProbe")
@@ -906,7 +912,8 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         // the grab sends its own Stop and waits for the TV to settle: a Stop right behind another is what the TV answers with 705
         doRelease(why, waitHdmi = false, sendStop = false)
         cancelRequested = false
-        doGrab(why, keepRunning = true)
+        // tv_reanchor_running: the new item goes to the transport that is running (no Stop); off by default, the TV once answered that with a time-out and went to standby
+        doGrab(why, keepRunning = Settings.values.tvReanchorRunning)
     }
 
     /**
@@ -1128,6 +1135,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         pr.put("readings", probeReadings)
         pr.put("advancing", probeAdvancing ?: JSONObject.NULL)
         pr.put("coarse", probe.coarse)
+        pr.put("supported", probe.supported ?: JSONObject.NULL)
         pr.put("last", lastProbe.ifEmpty { JSONObject.NULL })
         o.put("position_probe", pr)
         o.put("last_action", lastAction.ifEmpty { JSONObject.NULL })

@@ -84,6 +84,10 @@ class SettingsValues(
     val ambilightDarkStyle: String,
     val ambilightDarkAlgorithm: String,
     val ambilightDarkMenu: String,
+    /** A stream whose TV paused is made again at the next song boundary (see tv_pause_ms). Off by default: the TV once went to standby on such a re-anchor. */
+    val tvAutoReanchor: Boolean,
+    /** A stream that is made again goes to the transport that is running, with no Stop. Off by default: the TV once timed out on that and went to standby. */
+    val tvReanchorRunning: Boolean,
 )
 
 class SettingsModel {
@@ -126,6 +130,8 @@ class SettingsModel {
     var ambilightDarkStyle = DEFAULT_AMBILIGHT_DARK_STYLE
     var ambilightDarkAlgorithm = DEFAULT_AMBILIGHT_DARK_ALGORITHM
     var ambilightDarkMenu = ""
+    var tvAutoReanchor = false
+    var tvReanchorRunning = false
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
@@ -133,7 +139,7 @@ class SettingsModel {
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
         captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPrerollMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
         backgroundCleanup, ambilightStyle, ambilightMenu, tvPauseMs, tvQuiet, tvAudioOnly, tvMac, tvPositionProbe,
-        ambilightDarkStyle, ambilightDarkAlgorithm, ambilightDarkMenu,
+        ambilightDarkStyle, ambilightDarkAlgorithm, ambilightDarkMenu, tvAutoReanchor, tvReanchorRunning,
     )
 
     fun toJson(): JSONObject {
@@ -177,6 +183,8 @@ class SettingsModel {
         o.put(AMBILIGHT_DARK_STYLE, ambilightDarkStyle)
         o.put(AMBILIGHT_DARK_ALGORITHM, ambilightDarkAlgorithm)
         o.put(AMBILIGHT_DARK_MENU, ambilightDarkMenu)
+        o.put(TV_AUTO_REANCHOR, tvAutoReanchor)
+        o.put(TV_REANCHOR_RUNNING, tvReanchorRunning)
         return o
     }
 
@@ -352,6 +360,14 @@ class SettingsModel {
             val v = json.get(AMBILIGHT_DARK_MENU).toString().trim().uppercase()
             if ((v.isEmpty() || STYLE_NAME.matches(v)) && v != ambilightDarkMenu) { ambilightDarkMenu = v; changed.add(AMBILIGHT_DARK_MENU) }
         }
+        if (json.has(TV_AUTO_REANCHOR)) {
+            val v = bool(json.get(TV_AUTO_REANCHOR))
+            if (v != null && v != tvAutoReanchor) { tvAutoReanchor = v; changed.add(TV_AUTO_REANCHOR) }
+        }
+        if (json.has(TV_REANCHOR_RUNNING)) {
+            val v = bool(json.get(TV_REANCHOR_RUNNING))
+            if (v != null && v != tvReanchorRunning) { tvReanchorRunning = v; changed.add(TV_REANCHOR_RUNNING) }
+        }
         if (json.has(TV_POSITION_PROBE)) {
             val v = bool(json.get(TV_POSITION_PROBE))
             if (v != null && v != tvPositionProbe) { tvPositionProbe = v; changed.add(TV_POSITION_PROBE) }
@@ -417,6 +433,8 @@ class SettingsModel {
         /** With the screen off the Ambilight does not follow a picture: PARTY, in its expert form, lights up (Lumina and FOLLOW_VIDEO give 1 to 6 of 255). */
         const val DEFAULT_AMBILIGHT_DARK_STYLE = "FOLLOW_AUDIO"
         const val DEFAULT_AMBILIGHT_DARK_ALGORITHM = "PARTY"
+        const val TV_AUTO_REANCHOR = "tv_auto_reanchor"
+        const val TV_REANCHOR_RUNNING = "tv_reanchor_running"
         const val TV_PAUSE_MS = "tv_pause_ms"
         const val TV_QUIET = "tv_quiet"
         const val TV_AUDIO_ONLY = "tv_audio_only"

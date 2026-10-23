@@ -5,7 +5,9 @@ package io.github.matijasalej.wholeflat.sync
  * time: if the position of the item has advanced less than the wall clock did between two readings, the player stood still (paused,
  * rebuffered) for the difference, and its sound is that much later than the other room's. The write-block detector cannot see a pause where
  * the TV keeps reading; this can, to the resolution of the counter (whole seconds if the TV only gives those, and then only a pause of
- * more than about 2.5 s counts). Plain Kotlin.
+ * more than about 2.5 s counts). A TV that does not implement the position (the Philips: RelTime always 0:00:00, AbsTime NOT_IMPLEMENTED, the
+ * counts 2147483647) has none to stand still: after three readings without a position it is [supported] = false for good, and a standstill
+ * is only ever reported for a TV whose position has been seen to advance. Plain Kotlin.
  */
 class PositionProbe(private val minPauseMs: () -> Double) {
     /** What one reading said. */
@@ -24,6 +26,8 @@ class PositionProbe(private val minPauseMs: () -> Double) {
         val advancing: Boolean?,
         /** The standstill that is counted as a pause (ms), 0 if none. */
         val pauseMs: Long,
+        /** Whether the TV reports a position at all: null until it is known, false when it never gave one. */
+        val supported: Boolean? = null,
     )
 
     private var prevWall = 0L
@@ -31,6 +35,13 @@ class PositionProbe(private val minPauseMs: () -> Double) {
     private var prevCount: Long? = null
     private var wholeSeconds = true
     private var readings = 0
+    private var withoutPosition = 0
+    private var sawAdvance = false
+
+    /** True once the TV gave a position, false once it gave none three times in a row at the start; null before that. Kept across [reset]. */
+    @Volatile
+    var supported: Boolean? = null
+        private set
 
     /** True while every position seen so far was a whole number of seconds. */
     val coarse: Boolean get() = wholeSeconds
@@ -41,6 +52,8 @@ class PositionProbe(private val minPauseMs: () -> Double) {
         prevCount = null
         wholeSeconds = true
         readings = 0
+        sawAdvance = false
+        if (supported != false) withoutPosition = 0
     }
 
     /** One reading, taken at [wallMs] (any steady clock, ms), with the texts the TV gave. */
@@ -52,6 +65,15 @@ class PositionProbe(private val minPauseMs: () -> Double) {
         val ac = absCount?.trim()?.toLongOrNull()
         if (rel != null && rel % 1000L != 0L) wholeSeconds = false
         readings++
+        if (rel == null || rel == 0L) {
+            if (supported == null) {
+                withoutPosition++
+                if (withoutPosition >= UNSUPPORTED_AFTER) supported = false
+            }
+        } else if (supported != false) {
+            supported = true
+            withoutPosition = 0
+        }
         var dWall: Long? = null
         var dRel: Long? = null
         var drift: Long? = null
@@ -62,6 +84,7 @@ class PositionProbe(private val minPauseMs: () -> Double) {
             dRel = rel - pr
             drift = dWall - dRel
             advancing = dRel > 0
+            if (dRel > 0) sawAdvance = true
         } else if (rel == null && rc != null && prevCount != null) {
             advancing = rc != prevCount
         }
@@ -69,11 +92,14 @@ class PositionProbe(private val minPauseMs: () -> Double) {
         prevRel = rel
         prevCount = rc
         val threshold = maxOf(minPauseMs(), if (wholeSeconds) 2_500.0 else 100.0)
-        val pause = if (drift != null && dWall != null && drift >= threshold) drift else 0L
-        return Reading(wallMs, rel, abs, rc, ac, dWall, dRel, drift, advancing, pause)
+        val pause = if (supported == true && sawAdvance && drift != null && dWall != null && drift >= threshold) drift else 0L
+        return Reading(wallMs, rel, abs, rc, ac, dWall, dRel, drift, advancing, pause, supported)
     }
 
     companion object {
+        /** A TV that gives no position (none or 0:00:00) this many readings in a row at the start does not implement it. */
+        const val UNSUPPORTED_AFTER = 3
+
         /** "H:MM:SS" or "H:MM:SS.fff" in ms; null for "NOT_IMPLEMENTED", empty or anything else. */
         fun parseTime(text: String?): Long? {
             val t = text?.trim() ?: return null

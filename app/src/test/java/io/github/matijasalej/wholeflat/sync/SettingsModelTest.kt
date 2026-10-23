@@ -35,12 +35,36 @@ class SettingsModelTest {
         assertEquals(700, o.getInt("tv_pcr_lead_ms"))
         assertEquals(0, o.getInt("tv_reanchor_min"))
         assertEquals("auto", o.getString("tv_render"))
-        assertEquals("1080p30 cbr 6000 gop1", o.getString("tv_video"))
+        assertEquals("720p30 cbr 2500 gop1", o.getString("tv_video"))
         assertEquals(0, o.getInt("lyrics_offset_ms"))
         assertEquals("listen", o.getString("display"))
         assertEquals(true, o.getBoolean("background_cleanup"))
         assertEquals("FOLLOW_AUDIO", o.getString("ambilight_style"))
         assertEquals("ENERGY_ADAPTIVE_BRIGHTNESS", o.getString("ambilight_menu"))
+        assertEquals(100, o.getInt("tv_pause_ms"))
+        assertEquals(false, o.getBoolean("tv_quiet"))
+        assertEquals(false, o.getBoolean("tv_audio_only"))
+        assertEquals("C0:D2:F3:87:BF:F4", o.getString("tv_mac"))
+        assertEquals(true, o.getBoolean("tv_position_probe"))
+    }
+
+    @Test
+    fun theStallSettingsAreClampedAndTheMacIsChecked() {
+        val m = SettingsModel()
+        assertEquals(setOf("tv_pause_ms"), m.applyJson(JSONObject("""{"tv_pause_ms": 99999}""")))
+        assertEquals(2000, m.tvPauseMs)
+        assertEquals(setOf("tv_pause_ms"), m.applyJson(JSONObject("""{"tv_pause_ms": 0}""")))
+        assertEquals(0, m.values().tvPauseMs)
+        assertEquals(setOf("tv_quiet", "tv_audio_only", "tv_position_probe"), m.applyJson(JSONObject("""{"tv_quiet": true, "tv_audio_only": "on", "tv_position_probe": 0}""")))
+        assertEquals(true, m.values().tvQuiet)
+        assertEquals(true, m.values().tvAudioOnly)
+        assertEquals(false, m.values().tvPositionProbe)
+        assertEquals(setOf("tv_mac"), m.applyJson(JSONObject("""{"tv_mac": "aa-bb-cc-00-11-22"}""")))
+        assertEquals("AA:BB:CC:00:11:22", m.tvMac)
+        assertEquals(emptySet<String>(), m.applyJson(JSONObject("""{"tv_mac": "not a mac"}""")))
+        assertEquals("AA:BB:CC:00:11:22", m.tvMac)
+        assertEquals(setOf("tv_mac"), m.applyJson(JSONObject("""{"tv_mac": ""}""")))
+        assertEquals("", m.values().tvMac)
     }
 
     @Test
@@ -53,7 +77,7 @@ class SettingsModelTest {
                 "capture_enabled", "capture_living_latency_ms", "capture_lead_ms", "kitchen_target_ms", "kitchen_floor_ms",
                 "kitchen_volume", "capture_volume_mirror", "kitchen_format", "kitchen_flac_block",
                 "mode", "tv_latency_ms", "tv_format", "tv_burst_ms", "tv_extra_ms", "tv_preroll_ms", "tv_pcr_lead_ms", "tv_reanchor_min", "tv_render", "tv_video", "lyrics_offset_ms", "display", "background_cleanup",
-                "ambilight_style", "ambilight_menu",
+                "ambilight_style", "ambilight_menu", "tv_pause_ms", "tv_quiet", "tv_audio_only", "tv_mac", "tv_position_probe",
             ),
             keys,
         )

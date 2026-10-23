@@ -4,14 +4,14 @@ package io.github.matijasalej.wholeflat.sync
  * What the lyrics video is made as (the setting `tv_video`), so that the encoder of the box can be tried at other settings without a new
  * build: the height of the picture (1080 or 720, always 16:9), the frames a second (24, 25 or 30), how the encoder spends its bits
  * ([Mode]), the bitrate it is asked for in kbit/s, and the time between key pictures in seconds. Written as text:
- * `"1080p30 cbr 6000 gop1"` (the default), `"720p30 vbr 8000"`, `"1080p25 vbr 10000 gop2"`, and with the rate of the transport stream
+ * `"720p30 cbr 2500 gop1"` (the default; it was 1080p30 cbr 6000 until the encoder of the box was seen to need 65 ms a picture for it), `"720p30 vbr 8000"`, `"1080p25 vbr 10000 gop2"`, and with the rate of the transport stream
  * in kbit/s `"720p30 vbr 2500 mux3500"`; the order of the words does not matter and a word that is left out keeps its default. Plain Kotlin.
  */
 class TvVideoSpec(
-    val height: Int = 1080,
+    val height: Int = 720,
     val fps: Int = 30,
     val mode: Mode = Mode.CBR,
-    val kbps: Int = 6_000,
+    val kbps: Int = 2_500,
     val gopS: Int = 1,
     /** The rate of the transport stream in kbit/s (`mux3000` in the text); 0: made from the bitrate. */
     val muxKbps: Int = 0,

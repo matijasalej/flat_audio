@@ -70,6 +70,16 @@ class SettingsValues(
     /** The Ambilight style in Synced mode (JointSpace `styleName`) and its `menuSetting`. */
     val ambilightStyle: String,
     val ambilightMenu: String,
+    /** A write to the TV that blocks this long (ms) once the burst is over means it did not read: its player paused. The stream is then made again at the next song. 0: not watched. */
+    val tvPauseMs: Int,
+    /** During Synced play no call is made to the TV (the 2 s transport poll, the Ambilight refresh) except at the grab and the release. */
+    val tvQuiet: Boolean,
+    /** While the screen is off the TV's stream has no video (a transport stream of the audio only). */
+    val tvAudioOnly: Boolean,
+    /** The TV's MAC address for Wake-on-LAN, as AA:BB:CC:DD:EE:FF; empty: none (the one JointSpace tells is used). */
+    val tvMac: String,
+    /** Whether the TV's position (GetPositionInfo) is read every 5 to 10 s and logged, to see whether its player pauses. */
+    val tvPositionProbe: Boolean,
 )
 
 class SettingsModel {
@@ -104,13 +114,18 @@ class SettingsModel {
     var backgroundCleanup = true
     var ambilightStyle = DEFAULT_AMBILIGHT_STYLE
     var ambilightMenu = DEFAULT_AMBILIGHT_MENU
+    var tvPauseMs = DEFAULT_TV_PAUSE_MS
+    var tvQuiet = false
+    var tvAudioOnly = false
+    var tvMac = DEFAULT_TV_MAC
+    var tvPositionProbe = true
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
         captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPrerollMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
-        backgroundCleanup, ambilightStyle, ambilightMenu,
+        backgroundCleanup, ambilightStyle, ambilightMenu, tvPauseMs, tvQuiet, tvAudioOnly, tvMac, tvPositionProbe,
     )
 
     fun toJson(): JSONObject {
@@ -146,6 +161,11 @@ class SettingsModel {
         o.put(BACKGROUND_CLEANUP, backgroundCleanup)
         o.put(AMBILIGHT_STYLE, ambilightStyle)
         o.put(AMBILIGHT_MENU, ambilightMenu)
+        o.put(TV_PAUSE_MS, tvPauseMs)
+        o.put(TV_QUIET, tvQuiet)
+        o.put(TV_AUDIO_ONLY, tvAudioOnly)
+        o.put(TV_MAC, tvMac)
+        o.put(TV_POSITION_PROBE, tvPositionProbe)
         return o
     }
 
@@ -290,6 +310,28 @@ class SettingsModel {
             val v = json.get(AMBILIGHT_MENU).toString().trim().uppercase()
             if (STYLE_NAME.matches(v) && v != ambilightMenu) { ambilightMenu = v; changed.add(AMBILIGHT_MENU) }
         }
+        if (json.has(TV_PAUSE_MS)) {
+            val v = number(json.get(TV_PAUSE_MS))?.coerceIn(0, MAX_TV_PAUSE_MS)
+            if (v != null && v != tvPauseMs) { tvPauseMs = v; changed.add(TV_PAUSE_MS) }
+        }
+        if (json.has(TV_QUIET)) {
+            val v = bool(json.get(TV_QUIET))
+            if (v != null && v != tvQuiet) { tvQuiet = v; changed.add(TV_QUIET) }
+        }
+        if (json.has(TV_AUDIO_ONLY)) {
+            val v = bool(json.get(TV_AUDIO_ONLY))
+            if (v != null && v != tvAudioOnly) { tvAudioOnly = v; changed.add(TV_AUDIO_ONLY) }
+        }
+        if (json.has(TV_MAC)) {
+            // six hex pairs with colons or dashes, kept as upper case with colons; empty clears it; anything else is ignored
+            val raw = json.get(TV_MAC).toString().trim()
+            val v = if (raw.isEmpty()) "" else if (MAC.matches(raw)) raw.uppercase().replace('-', ':') else null
+            if (v != null && v != tvMac) { tvMac = v; changed.add(TV_MAC) }
+        }
+        if (json.has(TV_POSITION_PROBE)) {
+            val v = bool(json.get(TV_POSITION_PROBE))
+            if (v != null && v != tvPositionProbe) { tvPositionProbe = v; changed.add(TV_POSITION_PROBE) }
+        }
         return changed
     }
 
@@ -344,6 +386,19 @@ class SettingsModel {
         const val BACKGROUND_CLEANUP = "background_cleanup"
         const val AMBILIGHT_STYLE = "ambilight_style"
         const val AMBILIGHT_MENU = "ambilight_menu"
+        const val TV_PAUSE_MS = "tv_pause_ms"
+        const val TV_QUIET = "tv_quiet"
+        const val TV_AUDIO_ONLY = "tv_audio_only"
+        const val TV_MAC = "tv_mac"
+        const val TV_POSITION_PROBE = "tv_position_probe"
+
+        /** A write to the TV that blocks 100 ms after the burst is a pause of its player (seen: 134 and 150 ms with a freeze each time). */
+        const val DEFAULT_TV_PAUSE_MS = 100
+        const val MAX_TV_PAUSE_MS = 2_000
+
+        /** The wifi0 address of the Philips TV (JointSpace `/6/network/devices`, `wake-on-lan: Enabled`). */
+        const val DEFAULT_TV_MAC = "C0:D2:F3:87:BF:F4"
+        private val MAC = Regex("^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$")
 
         /** The offset is limited to what a Mac calibration could plausibly ask for. */
         const val MAX_OFFSET_MS = 2_000

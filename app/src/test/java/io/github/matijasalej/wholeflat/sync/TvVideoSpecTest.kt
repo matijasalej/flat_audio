@@ -7,13 +7,13 @@ import org.junit.Test
 
 class TvVideoSpecTest {
     @Test
-    fun theDefaultIsWhatTheVideoWasUntilNow() {
+    fun theDefaultIsTheLightVideo() {
         val d = TvVideoSpec.DEFAULT
-        assertEquals("1080p30 cbr 6000 gop1", d.text())
-        assertEquals(1920, d.width)
-        assertEquals(1080, d.height)
+        assertEquals("720p30 cbr 2500 gop1", d.text())
+        assertEquals(1280, d.width)
+        assertEquals(720, d.height)
         assertEquals(30, d.fps)
-        assertEquals(6_000_000, d.bitrate)
+        assertEquals(2_500_000, d.bitrate)
         assertEquals(3000L, d.frameTicks)
         assertEquals(9_000_000, d.muxRate)
     }
@@ -43,9 +43,9 @@ class TvVideoSpecTest {
     fun theOrderOfTheWordsDoesNotMatterAndWhatIsLeftOutKeepsItsDefault() {
         assertEquals(TvVideoSpec.parse("720p30 vbr 8000"), TvVideoSpec.parse("8000 vbr 720p30"))
         val s = TvVideoSpec.parse("vbr")!!
-        assertEquals("1080p30 vbr 6000 gop1", s.text())
-        assertEquals("720p30 cbr 6000 gop1", TvVideoSpec.parse("720p")!!.text())
-        assertEquals("1080p30 cq 6000 gop1", TvVideoSpec.parse("  CQ , ")!!.text())
+        assertEquals("720p30 vbr 2500 gop1", s.text())
+        assertEquals("1080p30 cbr 2500 gop1", TvVideoSpec.parse("1080p")!!.text())
+        assertEquals("720p30 cq 2500 gop1", TvVideoSpec.parse("  CQ , ")!!.text())
     }
 
     @Test
@@ -73,7 +73,9 @@ class TvVideoSpecTest {
         // without it the rate is made from the bitrate, as before
         assertEquals(12_000_000, TvVideoSpec.parse("720p30 vbr 8000")!!.muxRate)
         assertEquals(9_000_000, TvVideoSpec.DEFAULT.muxRate)
-        assertEquals("1080p30 cbr 6000 gop1", TvVideoSpec.DEFAULT.text())
+        assertEquals("720p30 cbr 2500 gop1", TvVideoSpec.DEFAULT.text())
+        // the video before the light default is still one word away
+        assertEquals("1080p30 cbr 6000 gop1", TvVideoSpec.parse("1080p30 cbr 6000 gop1")!!.text())
     }
 
     @Test

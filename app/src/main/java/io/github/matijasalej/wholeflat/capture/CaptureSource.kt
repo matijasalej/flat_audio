@@ -54,6 +54,9 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
 
     private val app: Context = context.applicationContext
     private val detector = ActivityDetector()
+
+    /** The silence counted from the level of the chunks, which a made-again capture (and the reset of the detector with it) does not reset. */
+    private val silence = SilenceClock(ActivityDetector.DEFAULT_SILENCE_DB, System.nanoTime())
     private val retry = RetrySchedule()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val attemptIds = AtomicInteger()
@@ -554,6 +557,7 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
             val frames = n / 2
             val peak = feed.writeAt(buf, frames, tNs)
             a.frames += frames
+            silence.onChunk(tNs, peak)
             dispatch(detector.onChunk(tNs, peak))
             if (tNs - lastTimestampAt >= TIMESTAMP_EVERY_NANOS) {
                 lastTimestampAt = tNs
@@ -739,17 +743,14 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
 
     private fun fmt(v: Double): String = String.format(java.util.Locale.US, "%.1f", v)
 
-    /** The time since the last sound of the captured player (ms); a very big number if there was none in this run. */
-    fun silentForMs(): Long {
-        val ns = detector.silentForNanos(System.nanoTime())
-        return if (ns < 0) Long.MAX_VALUE / 4 else ns / 1_000_000L
-    }
+    /**
+     * The time since the last sound of the captured player (ms), counted from the level of the chunks and kept when the capture is made
+     * again; before the first sound it is the time since the app began.
+     */
+    fun silentForMs(): Long = silence.silentForNanos(System.nanoTime()) / 1_000_000L
 
-    /** The silent time since the last sound, in seconds; -1 before the first. */
-    private fun silentSeconds(): Double {
-        val ns = detector.silentForNanos(System.nanoTime())
-        return if (ns < 0) -1.0 else ns / 1e9
-    }
+    /** The silent time since the last sound (or since the start, if there was none), in seconds. */
+    private fun silentSeconds(): Double = silence.silentForNanos(System.nanoTime()) / 1e9
 
     /**
      * A player whose media session says it plays while the captured audio stays silent: the app may keep

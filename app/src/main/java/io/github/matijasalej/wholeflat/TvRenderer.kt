@@ -9,6 +9,7 @@ import io.github.matijasalej.wholeflat.sync.CoverColor
 import io.github.matijasalej.wholeflat.sync.Display
 import io.github.matijasalej.wholeflat.sync.DmrDescription
 import io.github.matijasalej.wholeflat.sync.FrameTimes
+import io.github.matijasalej.wholeflat.sync.PositionProbe
 import io.github.matijasalej.wholeflat.sync.SessionHistory
 import io.github.matijasalej.wholeflat.sync.SettingsModel
 import io.github.matijasalej.wholeflat.sync.SonosXml
@@ -243,6 +244,20 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     @Volatile
     private var notBeforeMs = 0L
 
+    // the position of the item the TV plays, read now and then (see PositionProbe)
+    private val probe = PositionProbe { Settings.values.tvPauseMs.toDouble() }
+    private var nextProbeMs = 0L
+    private val probeRandom = java.util.Random()
+
+    @Volatile
+    private var lastProbe = ""
+
+    @Volatile
+    private var probeAdvancing: Boolean? = null
+
+    @Volatile
+    private var probeReadings = 0
+
     private var unreachablePolls = 0
     private var stoppedPolls = 0
     private var closedPolls = 0
@@ -351,9 +366,9 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     // ---- the grab --------------------------------------------------------------------------------
 
     /** A grab that fails for a reason nobody foresaw is a failed grab (the encoders of its stream do not run on). */
-    private fun doGrab(reason: String) {
+    private fun doGrab(reason: String, keepRunning: Boolean = false) {
         try {
-            doGrabSteps(reason)
+            doGrabSteps(reason, keepRunning)
         } catch (t: Throwable) {
             AppLog.error(TAG, "the grab failed unexpectedly", t)
             if (session == null) {
@@ -364,7 +379,11 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         }
     }
 
-    private fun doGrabSteps(reason: String) {
+    /**
+     * [keepRunning]: the stream is made again for a TV that plays one of ours (a re-anchor): the new item goes to the transport that is
+     * running, with no Stop first, which the TV answers with 705 for seconds afterwards and which leaves it with no stream.
+     */
+    private fun doGrabSteps(reason: String, keepRunning: Boolean = false) {
         if (state == State.STARTING || state == State.PLAYING) return
         val now = nowMs()
         if (now < notBeforeMs) return
@@ -419,6 +438,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             val p = TvTsPipeline(
                 context, feed, (hold * 1_000_000.0).toLong(), scenes, { Display.of(Settings.values.display) == Display.SCREEN },
                 { Settings.values.let { v -> TvTsPipeline.Params(v.tvBurstMs, v.tvPcrLeadMs, v.tvRender, TvVideoSpec.parse(v.tvVideo) ?: TvVideoSpec.DEFAULT) } },
+                audioOnly = audioOnlyWanted(),
             )
             val err = p.start()
             if (err == null) {
@@ -449,6 +469,10 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             // the TV's latency is the backlog of the connection it plays: when it makes another (or drops one) the common delay is worked out again
             s.onTsChange = { post("connections changed") { if (session === s) refreshTiming(force = false) } }
             s.sendBufferBytes = TS_SEND_BUFFER_BYTES
+            s.tvPauseMs = Settings.values.tvPauseMs
+            probe.reset()
+            nextProbeMs = 0L
+            probeAdvancing = null
         } else {
             s.startAtConnect = { began -> startFrameAt(feed, began) }
             s.holdTargetNanos = { (holdMs * 1_000_000.0).toLong() }
@@ -474,12 +498,27 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         // The TV's player: Stop (it may hold an old stream of ours), the item, Play. A TV that was stopped a moment ago (a re-anchor) is
         // still busy stopping and says 705 (the transport is locked) to the item until it has settled: its transport is waited for, and a 701
         // or 705 is tried again for a few seconds instead of failing the grab (which makes the next start wait 10 s).
-        api.stop()
-        settleAfterStop(api)
+        if (!keepRunning) {
+            api.stop()
+            settleAfterStop(api)
+        } else {
+            AppLog.add(TAG, "the new stream goes to the transport that is running (no Stop)")
+        }
         var set = api.setUri(s.uri, didl)
         var tries = 1
-        while (!set.ok && (set.upnpError == 701 || set.upnpError == 705) && tries < SET_TRIES) {
-            AppLog.add(TAG, "SetAVTransportURI: ${set.describe()} (the TV is still busy), trying again in ${SET_RETRY_MS} ms (try ${tries + 1} of $SET_TRIES)")
+        var limit = SET_TRIES
+        var stoppedOnce = !keepRunning
+        while (!set.ok && (set.upnpError == 701 || set.upnpError == 705)) {
+            if (tries >= limit) {
+                if (stoppedOnce) break
+                // the running transport would not take the item in about 15 s: Stop once and ask again, a TV without a stream is worse
+                AppLog.add(TAG, "the running transport did not take the new stream in $tries tries: Stop, then the item again")
+                api.stop()
+                settleAfterStop(api)
+                stoppedOnce = true
+                limit = tries + SET_TRIES_AFTER_STOP
+            }
+            AppLog.add(TAG, "SetAVTransportURI: ${set.describe()} (the TV is still busy), trying again in ${SET_RETRY_MS} ms (try ${tries + 1} of $limit)")
             sleepQuietly(SET_RETRY_MS)
             if (cancelRequested) return cancelled()
             set = api.setUri(s.uri, didl)
@@ -746,29 +785,33 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             restart("the lyrics video has a problem: $trouble")
             return
         }
-        val t = api.transportInfo()
-        if (!t.ok) {
-            unreachablePolls++
-            if (unreachablePolls >= UNREACHABLE_POLLS) left(LeftKind.UNREACHABLE, "the TV does not answer (${t.describe()})")
-            return
+        probePosition(api, s)
+        // tv_quiet: no call to the TV while it plays (the transport and the screen are not looked at); only the end of its connection tells it left
+        if (!Settings.values.tvQuiet) {
+            val t = api.transportInfo()
+            if (!t.ok) {
+                unreachablePolls++
+                if (unreachablePolls >= UNREACHABLE_POLLS) left(LeftKind.UNREACHABLE, "the TV does not answer (${t.describe()})")
+                return
+            }
+            unreachablePolls = 0
+            val st = SonosXml.tag(t.body, "CurrentTransportState") ?: ""
+            val status = SonosXml.tag(t.body, "CurrentTransportStatus") ?: ""
+            if (st != lastTransport || status != lastTransportStatus) AppLog.add(TAG, "the TV's transport is $st ($status)")
+            lastTransport = st
+            lastTransportStatus = status
+            val ctx = tv.context() ?: ""
+            if (ctx != lastContext) {
+                AppLog.add(TAG, "the TV shows: ${ctx.ifEmpty { "?" }} (was ${lastContext.ifEmpty { "?" }})")
+                lastContext = ctx
+            }
+            if (st == "STOPPED" || st == "NO_MEDIA_PRESENT" || st == "PAUSED_PLAYBACK") {
+                stoppedPolls++
+                if (stoppedPolls >= STOPPED_POLLS) left(LeftKind.STOPPED, "the TV's transport is $st")
+                return
+            }
+            stoppedPolls = 0
         }
-        unreachablePolls = 0
-        val st = SonosXml.tag(t.body, "CurrentTransportState") ?: ""
-        val status = SonosXml.tag(t.body, "CurrentTransportStatus") ?: ""
-        if (st != lastTransport || status != lastTransportStatus) AppLog.add(TAG, "the TV's transport is $st ($status)")
-        lastTransport = st
-        lastTransportStatus = status
-        val ctx = tv.context() ?: ""
-        if (ctx != lastContext) {
-            AppLog.add(TAG, "the TV shows: ${ctx.ifEmpty { "?" }} (was ${lastContext.ifEmpty { "?" }})")
-            lastContext = ctx
-        }
-        if (st == "STOPPED" || st == "NO_MEDIA_PRESENT" || st == "PAUSED_PLAYBACK") {
-            stoppedPolls++
-            if (stoppedPolls >= STOPPED_POLLS) left(LeftKind.STOPPED, "the TV's transport is $st")
-            return
-        }
-        stoppedPolls = 0
         // the TV closed its stream and asked for none other
         val sincePlaying = nowMs() - playingSinceMs
         if (s.streamCount == 0 && sincePlaying > CLOSED_AFTER_MS) {
@@ -779,6 +822,53 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         closedPolls = 0
         if (sincePlaying > HEALTHY_AFTER_MS) backoff.onHealthy()
     }
+
+    /**
+     * The position of the item the TV plays, read every 5 to 10 s (at a random moment, so that it never keeps step with anything else) once it
+     * has played for a while, and put in the log: does RelTime advance, and does it keep time with the wall clock? A position that stands
+     * still while the clock goes on is a pause of its player, counted like a write that blocks (see [PositionProbe]). Gated by
+     * `tv_position_probe` alone, not by `tv_quiet`.
+     */
+    private fun probePosition(api: SonosSoap, s: KitchenSession) {
+        if (!Settings.values.tvPositionProbe) return
+        val now = nowMs()
+        if (now < nextProbeMs) return
+        nextProbeMs = now + PROBE_MIN_MS + probeRandom.nextInt(PROBE_SPREAD_MS)
+        if (now - playingSinceMs < PROBE_AFTER_MS) return
+        val r = api.positionInfo()
+        if (!r.ok) {
+            lastProbe = "failed: ${r.describe()}"
+            return
+        }
+        val rel = SonosXml.tag(r.body, "RelTime")
+        val abs = SonosXml.tag(r.body, "AbsTime")
+        val relCount = SonosXml.tag(r.body, "RelCount")
+        val absCount = SonosXml.tag(r.body, "AbsCount")
+        val x = probe.add(now, rel, abs, relCount, absCount)
+        probeReadings++
+        probeAdvancing = x.advancing
+        val delta = if (x.dWallMs == null) "" else " (wall +${x.dWallMs} ms, position +${x.dRelMs} ms, standstill ${x.driftMs} ms)"
+        lastProbe = "RelTime=$rel AbsTime=$abs RelCount=$relCount AbsCount=$absCount$delta"
+        AppLog.add(TAG, "position probe: $lastProbe")
+        if (x.pauseMs > 0 && s.tvPauseMs > 0) {
+            s.noteTvPause(x.pauseMs.toDouble(), System.nanoTime())
+            AppLog.add(TAG, "WARNING the TV's position stood still for ${x.pauseMs} ms (its player paused): the stream is marked suspect and is made again at the next change of song")
+        }
+    }
+
+    /** Whether the stream in force has a TV that paused (see [KitchenSession.suspect]): its sound may be later than the other room's. */
+    fun suspectStream(): Boolean = session?.suspect == true
+
+    /** What the TV did, for the log line of the re-anchor it causes. */
+    fun pauseSummary(): String = session?.let {
+        "the TV paused ${it.tvPauses} times, ${Math.round(it.tvPausedMs)} ms in all, the last ${Math.round(it.lastTvPauseMs)} ms"
+    } ?: ""
+
+    /** Whether the stream is to have no video now: `tv_audio_only` and the screen is off. */
+    fun audioOnlyWanted(): Boolean = Settings.values.tvAudioOnly && !(Display.of(Settings.values.display) ?: Display.DEFAULT).screenOn
+
+    /** The stream in force is not of the kind the settings ask for (the setting or the display changed): it is to be made again. */
+    fun audioOnlyMismatch(): Boolean = state == State.PLAYING && pipeline?.let { it.audioOnly != audioOnlyWanted() } == true
 
     private fun left(kind: LeftKind, why: String) {
         val s = session
@@ -816,7 +906,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         // the grab sends its own Stop and waits for the TV to settle: a Stop right behind another is what the TV answers with 705
         doRelease(why, waitHdmi = false, sendStop = false)
         cancelRequested = false
-        doGrab(why)
+        doGrab(why, keepRunning = true)
     }
 
     /**
@@ -1020,12 +1110,26 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             j.put("open_connections", s.streamCount)
             j.put("bytes_sent", s.bytesSent.get())
             j.put("age_s", (System.nanoTime() - s.createdNanos) / 1_000_000_000L)
+            j.put("suspect", s.suspect)
+            j.put("tv_pauses", s.tvPauses)
+            j.put("tv_paused_ms", Math.round(s.tvPausedMs))
+            j.put("last_tv_pause_ms", Math.round(s.lastTvPauseMs))
+            j.put("late_deliveries", s.lateDeliveries)
+            j.put("worst_behind_ms", Math.round(s.worstBehindMs))
             o.put("session", j)
         } else {
             o.put("session", JSONObject.NULL)
         }
         val p = pipeline
         o.put("video", p?.statusJson() ?: JSONObject.NULL)
+        o.put("quiet", Settings.values.tvQuiet)
+        val pr = JSONObject()
+        pr.put("enabled", Settings.values.tvPositionProbe)
+        pr.put("readings", probeReadings)
+        pr.put("advancing", probeAdvancing ?: JSONObject.NULL)
+        pr.put("coarse", probe.coarse)
+        pr.put("last", lastProbe.ifEmpty { JSONObject.NULL })
+        o.put("position_probe", pr)
         o.put("last_action", lastAction.ifEmpty { JSONObject.NULL })
         o.put("last_error", lastError ?: JSONObject.NULL)
         return o
@@ -1049,6 +1153,12 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
          * leaves it without a stream (and makes the next start wait). About 14 s in all. Play is tried a few times in the same way.
          */
         private const val SET_TRIES = 13
+        private const val SET_TRIES_AFTER_STOP = 5
+
+        /** The position of the item is read this often (ms): 5 s and a random part of up to 5 s more, once the TV has played for 8 s. */
+        private const val PROBE_MIN_MS = 5_000L
+        private const val PROBE_SPREAD_MS = 5_000
+        private const val PROBE_AFTER_MS = 8_000L
         private const val SET_RETRY_MS = 1_200L
         private const val PLAY_TRIES = 6
         private const val PLAY_RETRY_MS = 600L
@@ -1060,7 +1170,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         private const val STOP_SETTLE_MS = 1_500L
 
         /** A restart of the stream on purpose is expected to be through within this long (ms). */
-        private const val RESTART_WINDOW_MS = 25_000L
+        private const val RESTART_WINDOW_MS = 40_000L
 
         /** The stream is this much older than the burst of a connection (ms) when Play is sent. */
         private const val BURST_MARGIN_MS = 150L

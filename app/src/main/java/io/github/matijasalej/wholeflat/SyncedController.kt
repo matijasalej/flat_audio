@@ -115,6 +115,12 @@ class SyncedController(
         if (changed.any { it in WATCHED }) {
             if (changed.contains("tv_latency_ms") || changed.contains("tv_format") || changed.any { it.startsWith("kitchen_") }) renderer.settingsChanged()
             if (changed.contains("ambilight_style") || changed.contains("ambilight_menu")) post { ambilight.restyle() }
+            if (changed.contains("tv_audio_only") || changed.contains("display")) {
+                // a stream with or without video is another stream: it is made again now (the switch is the user's own, there is no waiting for a song)
+                post {
+                    if (renderer.audioOnlyMismatch()) renderer.reanchor(if (renderer.audioOnlyWanted()) "the stream is to have no video while the screen is off" else "the stream is to have video again")
+                }
+            }
             tickSoon()
         }
     }
@@ -298,6 +304,12 @@ class SyncedController(
             trackWhenWanted = trackKey()
             AppLog.add(TAG, "the TV's stream is $age s old: a re-anchor is due and waits for a song boundary")
         }
+        if (!reanchorWanted && Settings.values.tvPauseMs > 0 && renderer.suspectStream()) {
+            // the TV's player paused on this stream: its sound is later than the kitchen's by about the pause, and only a new start sets it right
+            reanchorWanted = true
+            trackWhenWanted = trackKey()
+            AppLog.add(TAG, "${renderer.pauseSummary()}: the kitchen is about that much ahead of it. The stream is made again at the next song boundary (a shift of the kitchen is not made)")
+        }
         if (!reanchorWanted) return
         val boundary = trackKey() != trackWhenWanted || silentMs in REANCHOR_SILENCE_MS..SILENT_NOT_PLAYING_MS
         if (boundary) {
@@ -425,6 +437,8 @@ class SyncedController(
 
     private fun refreshCurrent(now: Long) {
         if (now - lastRefreshMs < CURRENT_EVERY_MS) return
+        // tv_quiet: while the TV plays our stream nothing is asked of it
+        if (Settings.values.tvQuiet && renderer.state == TvRenderer.State.PLAYING) return
         // the TV is asked only when its lights matter (an unreachable TV would hold the step up for the length of two time-outs)
         val inUse = ambilight.entered || ambilight.remembered != null || renderer.state == TvRenderer.State.PLAYING || currentReadAtMs == 0L
         if (!inUse || tv.currentIp() == null) return
@@ -504,7 +518,7 @@ class SyncedController(
         /** The settings that make the controller look again at once. */
         private val WATCHED = setOf(
             "mode", "display", "tv_format", "tv_latency_ms", "tv_extra_ms", "kitchen_offset_ms", "kitchen_target_ms", "kitchen_floor_ms",
-            "ambilight_style", "ambilight_menu", "tv_reanchor_min",
+            "ambilight_style", "ambilight_menu", "tv_reanchor_min", "tv_audio_only", "tv_quiet", "tv_pause_ms",
         )
     }
 }

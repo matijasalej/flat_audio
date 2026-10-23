@@ -26,10 +26,10 @@ class SettingsModelTest {
         assertEquals(false, o.getBoolean("capture_volume_mirror"))
         assertEquals("auto", o.getString("kitchen_format"))
         assertEquals(4096, o.getInt("kitchen_flac_block"))
-        assertEquals("synced", o.getString("mode"))
-        assertEquals(300, o.getInt("tv_dlna_latency_ms"))
-        assertEquals(0, o.getInt("tv_dlna_leadin_ms"))
-        assertEquals(16, o.getInt("tv_dlna_sndbuf_kb"))
+        assertEquals(SettingsModel.DEFAULT_MODE, o.getString("mode"))
+        assertEquals(-1, o.getInt("tv_latency_ms"))
+        assertEquals("ts", o.getString("tv_format"))
+        assertEquals(false, o.getBoolean("karaoke"))
         assertEquals(true, o.getBoolean("ambilight_synced"))
         assertEquals("FOLLOW_AUDIO", o.getString("ambilight_style"))
         assertEquals("ENERGY_ADAPTIVE_BRIGHTNESS", o.getString("ambilight_menu"))
@@ -44,7 +44,7 @@ class SettingsModelTest {
                 "tv_screen_off", "tv_wake", "tv_ip",
                 "capture_enabled", "capture_living_latency_ms", "capture_lead_ms", "kitchen_target_ms", "kitchen_floor_ms",
                 "kitchen_volume", "capture_volume_mirror", "kitchen_format", "kitchen_flac_block",
-                "mode", "tv_dlna_latency_ms", "tv_dlna_leadin_ms", "tv_dlna_sndbuf_kb",
+                "mode", "tv_latency_ms", "tv_format", "karaoke",
                 "ambilight_synced", "ambilight_style", "ambilight_menu",
             ),
             keys,
@@ -109,7 +109,8 @@ class SettingsModelTest {
     @Test
     fun theModeIsSyncedOrLyricsAndNothingElse() {
         val m = SettingsModel()
-        assertEquals("synced", m.mode)
+        assertEquals(SettingsModel.DEFAULT_MODE, m.mode)
+        m.applyJson(JSONObject("""{"mode": "synced"}"""))
         assertEquals(setOf("mode"), m.applyJson(JSONObject("""{"mode": "lyrics"}""")))
         assertEquals("lyrics", m.values().mode)
         assertEquals(setOf("mode"), m.applyJson(JSONObject("""{"mode": " SYNCED "}""")))
@@ -134,17 +135,33 @@ class SettingsModelTest {
     }
 
     @Test
-    fun theTvTimingModelIsClamped() {
+    fun theTvLatencyIsOneNumberOrAuto() {
         val m = SettingsModel()
-        assertEquals(setOf("tv_dlna_latency_ms", "tv_dlna_leadin_ms", "tv_dlna_sndbuf_kb"), m.applyJson(JSONObject("""{"tv_dlna_latency_ms": 280, "tv_dlna_leadin_ms": 150, "tv_dlna_sndbuf_kb": 0}""")))
-        assertEquals(280, m.values().tvDlnaLatencyMs)
-        assertEquals(150, m.values().tvDlnaLeadinMs)
-        assertEquals(0, m.values().tvDlnaSndbufKb)
-        m.applyJson(JSONObject("""{"tv_dlna_latency_ms": -50, "tv_dlna_leadin_ms": 99999, "tv_dlna_sndbuf_kb": 9999}"""))
-        assertEquals(0, m.tvDlnaLatencyMs)
-        assertEquals(SettingsModel.MAX_TV_DLNA_MS, m.tvDlnaLeadinMs)
-        assertEquals(SettingsModel.MAX_TV_DLNA_SNDBUF_KB, m.tvDlnaSndbufKb)
-        assertTrue(m.applyJson(JSONObject("""{"tv_dlna_latency_ms": "slow"}""")).isEmpty())
+        assertEquals(setOf("tv_latency_ms"), m.applyJson(JSONObject("""{"tv_latency_ms": 1350}""")))
+        assertEquals(1350, m.values().tvLatencyMs)
+        m.applyJson(JSONObject("""{"tv_latency_ms": 99999}"""))
+        assertEquals(SettingsModel.MAX_TV_LATENCY_MS, m.tvLatencyMs)
+        assertEquals(setOf("tv_latency_ms"), m.applyJson(JSONObject("""{"tv_latency_ms": "auto"}""")))
+        assertEquals(-1, m.tvLatencyMs)
+        m.applyJson(JSONObject("""{"tv_latency_ms": 200}"""))
+        m.applyJson(JSONObject("""{"tv_latency_ms": -30}"""))
+        assertEquals(-1, m.tvLatencyMs)
+        assertTrue(m.applyJson(JSONObject("""{"tv_latency_ms": "slow"}""")).isEmpty())
+    }
+
+    @Test
+    fun theTvStreamIsTsOrL16AndKaraokeIsASwitch() {
+        val m = SettingsModel()
+        assertEquals(setOf("tv_format"), m.applyJson(JSONObject("""{"tv_format": " L16 "}""")))
+        assertEquals("l16", m.values().tvFormat)
+        assertEquals(setOf("tv_format"), m.applyJson(JSONObject("""{"tv_format": "TS"}""")))
+        assertEquals("ts", m.tvFormat)
+        assertTrue(m.applyJson(JSONObject("""{"tv_format": "mkv"}""")).isEmpty())
+        assertTrue(m.applyJson(JSONObject("""{"tv_format": 3}""")).isEmpty())
+        assertEquals("ts", m.tvFormat)
+        assertEquals(setOf("karaoke"), m.applyJson(JSONObject("""{"karaoke": "on"}""")))
+        assertTrue(m.values().karaoke)
+        assertTrue(m.applyJson(JSONObject("""{"karaoke": "maybe"}""")).isEmpty())
     }
 
     @Test

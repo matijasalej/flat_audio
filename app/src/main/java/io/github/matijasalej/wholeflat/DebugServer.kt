@@ -45,6 +45,11 @@ import kotlin.concurrent.thread
  *   GET  /tv                    the TV's status
  *   GET  /tv/run                runs the wake and screen-off sequence now
  *   GET  /tv/detect             looks for the TV again
+ *   GET  /synced                Synced mode: the mode manager, the TV's DLNA player, the screen, the Ambilight
+ *   GET  /tv/dlna               the TV's DLNA player alone
+ *   GET  /tv/last-sessions      the last 10 streams to the TV: every connection with its statistics
+ *   GET  /tv/grab               has the TV play the capture now (the mode manager may give it back; set mode=lyrics to test alone)
+ *   GET  /tv/release            gives the TV back (it returns to HDMI)
  *   GET  /k/<token>.flac        the kitchen stream (GET and HEAD), pulled by the Sonos
  */
 object DebugServer {
@@ -247,6 +252,19 @@ object DebugServer {
                 AppState.tv?.runNow()
                 sendJson(out, 200, JSONObject().put("ok", AppState.tv != null), head)
             }
+            "/synced" -> sendJson(out, 200, AppState.synced?.statusJson() ?: JSONObject().put("state", "not running"), head)
+            "/tv/dlna" -> sendJson(out, 200, AppState.tvRenderer?.statusJson() ?: JSONObject().put("state", "not running"), head)
+            "/tv/last-sessions" -> sendJson(out, 200, AppState.tvRenderer?.lastSessionsJson() ?: JSONArray(), head)
+            "/tv/grab" -> {
+                AppLog.add(TAG, "${req.remote} tv/grab")
+                AppState.tvRenderer?.grab("asked for on the debug page")
+                sendJson(out, 200, JSONObject().put("ok", AppState.tvRenderer != null), head)
+            }
+            "/tv/release" -> {
+                AppLog.add(TAG, "${req.remote} tv/release")
+                AppState.tvRenderer?.release("asked for on the debug page")
+                sendJson(out, 200, JSONObject().put("ok", AppState.tvRenderer != null), head)
+            }
             "/tv/detect" -> {
                 AppState.tv?.detectNow()
                 sendJson(out, 200, JSONObject().put("ok", AppState.tv != null), head)
@@ -377,7 +395,7 @@ object DebugServer {
         sb.append("<h1>Whole Flat Audio ").append(escapeHtml(BuildInfo.versionName)).append("</h1><table>")
         renderRows(sb, status, 0)
         sb.append("</table><p>")
-        for (link in listOf("/status.json", "/settings", "/kitchen", "/kitchen/last-sessions", "/capture", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/capture/restart", "/tv/run")) {
+        for (link in listOf("/status.json", "/settings", "/kitchen", "/kitchen/last-sessions", "/capture", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/capture/restart", "/tv/run", "/synced", "/tv/dlna", "/tv/last-sessions")) {
             sb.append("<a href=\"").append(link).append("\">").append(link).append("</a>")
         }
         sb.append("</p><h2 style=\"font-size:15px\">Log (last 120 lines)</h2><pre>")

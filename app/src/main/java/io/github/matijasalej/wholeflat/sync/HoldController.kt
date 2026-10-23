@@ -7,7 +7,7 @@ package io.github.matijasalej.wholeflat.sync
  * be written at capture(f) + hold. The stream is paced in real time from the moment the TV connects, and the capture clock and the
  * pacing clock drift apart a little (tens of ppm); a change of the setting moves the wanted hold. The difference is removed the way
  * the Sonos's is, by dropping or repeating single frames, at most one per trim spacing (4.5 ms of correction per second for a
- * captured stream), so that nothing is heard. The renderer's own delay (the setting `tv_dlna_latency_ms`) is behind the write and not
+ * captured stream), so that nothing is heard. The renderer's own delay (the setting `tv_latency_ms`) is behind the write and not
  * measured here.
  *
  * Plain Kotlin; the caller measures the error and passes the frames still on their way.

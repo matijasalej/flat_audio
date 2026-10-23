@@ -15,6 +15,14 @@ class SyncedTimingTest {
     }
 
     @Test
+    fun theUsualLatencyDependsOnTheStreamFormatAndTheSettingWinsWhenGiven() {
+        assertEquals(300, SyncedTiming.tvLatencyMs(-1, "l16"))
+        assertEquals(1_200, SyncedTiming.tvLatencyMs(-1, "ts"))
+        assertEquals(1_450, SyncedTiming.tvLatencyMs(1_450, "ts"))
+        assertEquals(0, SyncedTiming.tvLatencyMs(0, "l16"))
+    }
+
+    @Test
     fun theSlowerRoomDecides() {
         // a TV that needs less than the Sonos: the Sonos target counts
         assertEquals(352.0, SyncedTiming.delayMs(150.0, 80.0, 322.0), 0.0)

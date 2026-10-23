@@ -33,12 +33,15 @@ class SettingsValues(
     val kitchenFlacBlock: Int,
     /** "synced" (the living room through the TV's DLNA player, both rooms held to one delay) or "lyrics" (HDMI direct, the kitchen at its lowest clean lag). */
     val mode: String,
-    /** How long the TV needs from our write of a frame to its sound (ms): the timing model of the DLNA stream, calibrated on the device. */
-    val tvDlnaLatencyMs: Int,
-    /** Digital silence sent to the TV at once when its stream begins (ms); it adds to the TV's delay. */
-    val tvDlnaLeadinMs: Int,
-    /** The send buffer of the TV's socket in KB, small so that a TV that reads slower than real time shows (0: the system's). */
-    val tvDlnaSndbufKb: Int,
+    /**
+     * How long the TV needs from our write of a frame to its sound (ms): the one number of the timing model of the TV's stream, which is
+     * calibrated on the device. -1: the usual one of the stream format in use (see [SyncedTiming]).
+     */
+    val tvLatencyMs: Int,
+    /** The stream the TV is given in Synced mode: "ts" (a live lyrics video with the audio) or "l16" (audio only, the last resort). */
+    val tvFormat: String,
+    /** Lyrics on the TV in Synced mode (the screen on, the Ambilight on); off, the TV's screen is off and only the sound plays. */
+    val karaoke: Boolean,
     /** The Ambilight of the TV follows the audio in Synced mode and is put back afterwards. */
     val ambilightSynced: Boolean,
     /** The Ambilight style in Synced mode (JointSpace `styleName`) and its `menuSetting`. */
@@ -63,10 +66,10 @@ class SettingsModel {
     var captureVolumeMirror = false
     var kitchenFormat = StreamFormat.AUTO
     var kitchenFlacBlock = Flac.BLOCK
-    var mode = Mode.SYNCED.key
-    var tvDlnaLatencyMs = DEFAULT_TV_DLNA_LATENCY_MS
-    var tvDlnaLeadinMs = 0
-    var tvDlnaSndbufKb = DEFAULT_TV_DLNA_SNDBUF_KB
+    var mode = DEFAULT_MODE
+    var tvLatencyMs = AUTO_TV_LATENCY
+    var tvFormat = TV_FORMAT_TS
+    var karaoke = false
     var ambilightSynced = true
     var ambilightStyle = DEFAULT_AMBILIGHT_STYLE
     var ambilightMenu = DEFAULT_AMBILIGHT_MENU
@@ -75,7 +78,7 @@ class SettingsModel {
     fun values(): SettingsValues = SettingsValues(
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
-        captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvDlnaLatencyMs, tvDlnaLeadinMs, tvDlnaSndbufKb,
+        captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, karaoke,
         ambilightSynced, ambilightStyle, ambilightMenu,
     )
 
@@ -98,9 +101,9 @@ class SettingsModel {
         o.put(KITCHEN_FORMAT, kitchenFormat)
         o.put(KITCHEN_FLAC_BLOCK, kitchenFlacBlock)
         o.put(MODE, mode)
-        o.put(TV_DLNA_LATENCY_MS, tvDlnaLatencyMs)
-        o.put(TV_DLNA_LEADIN_MS, tvDlnaLeadinMs)
-        o.put(TV_DLNA_SNDBUF_KB, tvDlnaSndbufKb)
+        o.put(TV_LATENCY_MS, tvLatencyMs)
+        o.put(TV_FORMAT, tvFormat)
+        o.put(KARAOKE, karaoke)
         o.put(AMBILIGHT_SYNCED, ambilightSynced)
         o.put(AMBILIGHT_STYLE, ambilightStyle)
         o.put(AMBILIGHT_MENU, ambilightMenu)
@@ -186,17 +189,19 @@ class SettingsModel {
             val v = Mode.of(json.get(MODE).toString())?.key
             if (v != null && v != mode) { mode = v; changed.add(MODE) }
         }
-        if (json.has(TV_DLNA_LATENCY_MS)) {
-            val v = number(json.get(TV_DLNA_LATENCY_MS))?.coerceIn(0, MAX_TV_DLNA_MS)
-            if (v != null && v != tvDlnaLatencyMs) { tvDlnaLatencyMs = v; changed.add(TV_DLNA_LATENCY_MS) }
+        if (json.has(TV_LATENCY_MS)) {
+            // -1 (or "auto") is the usual latency of the stream format in use
+            val raw = json.get(TV_LATENCY_MS)
+            val v = if (raw is String && raw.trim().equals("auto", ignoreCase = true)) AUTO_TV_LATENCY else number(raw)?.let { if (it < 0) AUTO_TV_LATENCY else it.coerceAtMost(MAX_TV_LATENCY_MS) }
+            if (v != null && v != tvLatencyMs) { tvLatencyMs = v; changed.add(TV_LATENCY_MS) }
         }
-        if (json.has(TV_DLNA_LEADIN_MS)) {
-            val v = number(json.get(TV_DLNA_LEADIN_MS))?.coerceIn(0, MAX_TV_DLNA_MS)
-            if (v != null && v != tvDlnaLeadinMs) { tvDlnaLeadinMs = v; changed.add(TV_DLNA_LEADIN_MS) }
+        if (json.has(TV_FORMAT)) {
+            val t = json.get(TV_FORMAT).toString().trim().lowercase()
+            if ((t == TV_FORMAT_TS || t == TV_FORMAT_L16) && t != tvFormat) { tvFormat = t; changed.add(TV_FORMAT) }
         }
-        if (json.has(TV_DLNA_SNDBUF_KB)) {
-            val v = number(json.get(TV_DLNA_SNDBUF_KB))?.coerceIn(0, MAX_TV_DLNA_SNDBUF_KB)
-            if (v != null && v != tvDlnaSndbufKb) { tvDlnaSndbufKb = v; changed.add(TV_DLNA_SNDBUF_KB) }
+        if (json.has(KARAOKE)) {
+            val v = bool(json.get(KARAOKE))
+            if (v != null && v != karaoke) { karaoke = v; changed.add(KARAOKE) }
         }
         if (json.has(AMBILIGHT_SYNCED)) {
             val v = bool(json.get(AMBILIGHT_SYNCED))
@@ -251,9 +256,9 @@ class SettingsModel {
         const val KITCHEN_FORMAT = "kitchen_format"
         const val KITCHEN_FLAC_BLOCK = "kitchen_flac_block"
         const val MODE = "mode"
-        const val TV_DLNA_LATENCY_MS = "tv_dlna_latency_ms"
-        const val TV_DLNA_LEADIN_MS = "tv_dlna_leadin_ms"
-        const val TV_DLNA_SNDBUF_KB = "tv_dlna_sndbuf_kb"
+        const val TV_LATENCY_MS = "tv_latency_ms"
+        const val TV_FORMAT = "tv_format"
+        const val KARAOKE = "karaoke"
         const val AMBILIGHT_SYNCED = "ambilight_synced"
         const val AMBILIGHT_STYLE = "ambilight_style"
         const val AMBILIGHT_MENU = "ambilight_menu"
@@ -282,11 +287,19 @@ class SettingsModel {
         const val DEFAULT_KITCHEN_FLOOR_MS = 316
         const val MIN_KITCHEN_FLOOR_MS = 100
 
-        /** The Philips renders what we write about 0.3 s later (the manual test said 0.1 to 0.4 s, rough); calibrated on the device. */
-        const val DEFAULT_TV_DLNA_LATENCY_MS = 300
-        const val MAX_TV_DLNA_MS = 2_000
-        const val DEFAULT_TV_DLNA_SNDBUF_KB = 16
-        const val MAX_TV_DLNA_SNDBUF_KB = 256
+        /**
+         * The mode the app starts in. Synced is the aim; until the TV can be given the lyrics video (the audio-only stream is unreliable live)
+         * the app stays in Lyrics, which changes nothing about the way it has worked so far.
+         */
+        val DEFAULT_MODE = Mode.LYRICS.key
+
+        /** `tv_latency_ms` when the usual latency of the stream format is to be used. */
+        const val AUTO_TV_LATENCY = -1
+        const val MAX_TV_LATENCY_MS = 4_000
+
+        /** The streams the TV can be given. */
+        const val TV_FORMAT_TS = "ts"
+        const val TV_FORMAT_L16 = "l16"
 
         /** The Ambilight in Synced mode follows the audio (verified on the TV: the style "Lumina" in its menu). */
         const val DEFAULT_AMBILIGHT_STYLE = "FOLLOW_AUDIO"

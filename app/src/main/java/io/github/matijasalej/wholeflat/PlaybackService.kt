@@ -75,6 +75,8 @@ class PlaybackService : Service() {
     private lateinit var livingRoom: LivingRoom
     private lateinit var kitchen: Kitchen
     private lateinit var tv: TvControl
+    private lateinit var tvRenderer: TvRenderer
+    private lateinit var synced: SyncedController
     private lateinit var captureFeed: CaptureFeed
     private lateinit var captureSource: CaptureSource
     private var bootThread: Thread? = null
@@ -112,15 +114,26 @@ class PlaybackService : Service() {
         captureFeed = CaptureFeed()
         captureSource = CaptureSource(this, captureFeed)
         kitchen.captureFeed = captureFeed
+        tvRenderer = TvRenderer(this, tv)
+        tvRenderer.captureFeed = captureFeed
+        tvRenderer.captureAlive = { captureSource.state == "running" }
+        tvRenderer.sonosTargetMs = { kitchen.lyricsTargetMs() }
+        tvRenderer.track = {
+            TvRenderer.Track(AppState.captureTitle?.takeIf { it.isNotBlank() } ?: DEVICE_NAME, AppState.captureArtist, null, null)
+        }
+        synced = SyncedController(this, kitchen, tvRenderer, tv)
         kitchen.onSource = { source ->
             // the Sonos follows the box's music volume while the capture is the source
             captureSource.setVolumeActive(source == SourceArbiter.Source.CAPTURE)
             updateNotification()
+            if (::synced.isInitialized) synced.tickSoon()
         }
         AppState.livingRoom = livingRoom
         AppState.kitchen = kitchen
         AppState.tv = tv
         AppState.capture = captureSource
+        AppState.tvRenderer = tvRenderer
+        AppState.synced = synced
         Settings.addListener(settingsListener)
         applyVolume()
         acquireLocks()
@@ -129,6 +142,8 @@ class PlaybackService : Service() {
         livingRoom.start()
         kitchen.start()
         tv.start()
+        tvRenderer.start()
+        synced.start()
         DebugServer.ensureStarted(this)
         captureSource.start(captureFeed, CaptureEvents())
     }
@@ -166,6 +181,13 @@ class PlaybackService : Service() {
             AppLog.error(TAG, "stopping the capture failed", t)
         }
         try {
+            // the TV is given back first: the lights and the screen are put as they were, the player is stopped
+            if (::synced.isInitialized) synced.stop()
+            if (::tvRenderer.isInitialized) tvRenderer.stop()
+        } catch (t: Throwable) {
+            AppLog.error(TAG, "giving the TV back failed", t)
+        }
+        try {
             if (::kitchen.isInitialized) kitchen.stop()
             if (::tv.isInitialized) tv.stop()
         } catch (t: Throwable) {
@@ -180,6 +202,8 @@ class PlaybackService : Service() {
         AppState.kitchen = null
         AppState.tv = null
         AppState.capture = null
+        AppState.tvRenderer = null
+        AppState.synced = null
         AppState.source = "idle"
         Settings.removeListener(settingsListener)
         try {

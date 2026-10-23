@@ -14,6 +14,7 @@ import io.github.matijasalej.wholeflat.sync.DayFloor
 import io.github.matijasalej.wholeflat.sync.KitchenVolume
 import io.github.matijasalej.wholeflat.sync.PlayDelays
 import io.github.matijasalej.wholeflat.sync.SessionHistory
+import io.github.matijasalej.wholeflat.sync.SettingsModel
 import io.github.matijasalej.wholeflat.sync.SonosPolicy
 import io.github.matijasalej.wholeflat.sync.SonosXml
 import io.github.matijasalej.wholeflat.sync.StartBackoff
@@ -184,6 +185,13 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
      */
     @Volatile
     var syncedTargetMs = Double.NaN
+
+    /**
+     * In Synced mode, while the TV plays: the lead a captured stream is started with so that the Sonos lands near the common delay at once
+     * (ms ahead of the newest frame), instead of climbing there at 3 ms per second. NaN: the lead setting counts.
+     */
+    @Volatile
+    var syncedLeadMs = Double.NaN
 
     /** The state of the lag steering that was last put in the log, to note only its changes. */
     private var lastSteerState = LagSteer.State.OFF
@@ -878,6 +886,33 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         return delays.ms(format) + (if (pipeline.isNaN()) 0.0 else pipeline)
     }
 
+    /** The lead a captured stream is started with: the setting (or what was learned), or in Synced mode what puts the lag at the common delay. */
+    private fun effectiveLeadMs(settingMs: Int): Int {
+        val base = captureLead.effectiveMs(settingMs)
+        val synced = syncedLeadMs
+        return if (synced.isNaN()) base else maxOf(base, Math.round(synced).toInt().coerceAtMost(SettingsModel.MAX_CAPTURE_LEAD_MS))
+    }
+
+    /** The part of the lag of a captured WAV stream that the lead does not make (ms): the Play-to-sound delay and the capture pipeline. */
+    fun fixedLagMs(): Double {
+        val feed = captureFeed ?: return delays.ms(StreamFormat.WAV)
+        return fixedLagMs(feed, StreamFormat.WAV)
+    }
+
+    /** The lag the kitchen is to have now (ms after the capture): the common delay of Synced mode, else the target of the settings; NaN if none. */
+    fun currentTargetMs(): Double = currentTarget()?.ms ?: Double.NaN
+
+    /** The lag of the kitchen now (ms after the capture), NaN if no captured stream is locked. */
+    fun lagNowMs(): Double = if (session?.isCapture == true && lagCapture.isLocked) lagCapture.recentMs() else Double.NaN
+
+    /** Starts the kitchen's stream again, as a manual re-join does (no failed start): its lag is to be set from the start. */
+    fun restartStream(reason: String) {
+        post("restart") {
+            lastRejoinNanos = 0L
+            if (session?.isCapture == true) rejoin(reason, manual = true)
+        }
+    }
+
     /** The plan for a captured stream that Play is sent for at [tNanos]: where it begins and how far behind the capture it is expected to sound. */
     private fun capturePlan(feed: CaptureFeed, tNanos: Long, format: StreamFormat): CaptureStart.Plan {
         val v = Settings.values
@@ -886,7 +921,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             writeIndex = feed.buffer.writeIndex,
             validStart = feed.buffer.validStart,
             rate = feed.rate,
-            leadMs = captureLead.effectiveMs(v.captureLeadMs),
+            leadMs = effectiveLeadMs(v.captureLeadMs),
             lkMs = fixedLagMs(feed, format),
         )
     }

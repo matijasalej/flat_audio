@@ -318,6 +318,29 @@ class TvControl(private val context: Context) {
         return true
     }
 
+    /** The picture of the TV ("On" or "Off"; the sound goes on with the picture off), null if it does not answer. */
+    fun screenState(): String? {
+        val ip = currentIp() ?: return null
+        val text = httpText("GET", "http://$ip:$PORT/6/screenstate", null, 1500, quiet = true) ?: return null
+        return try {
+            JSONObject(text).optString("screenstate", "").ifEmpty { null }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** Switches the picture of the TV on or off (JointSpace `screenstate`); false if it refused or did not answer. */
+    fun setScreen(on: Boolean): Boolean {
+        val ip = currentIp() ?: return false
+        var ok = postJson(ip, "screenstate", "{\"screenstate\":\"${if (on) "On" else "Off"}\"}")
+        if (!ok) {
+            sleepQuietly(1000)
+            ok = postJson(ip, "screenstate", "{\"screenstate\":\"${if (on) "On" else "Off"}\"}")
+        }
+        note("screen ${if (on) "on" else "off"}: ${if (ok) "accepted" else "refused"}")
+        return ok
+    }
+
     /**
      * What the TV is showing, from JointSpace (`/6/context`, `level1`): "BrowseDlna" while it is in its DLNA player, "WatchExtension"
      * on an HDMI input, something else elsewhere. Null if the TV does not answer.

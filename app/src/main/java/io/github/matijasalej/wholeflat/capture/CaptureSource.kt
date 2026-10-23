@@ -739,6 +739,12 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
 
     private fun fmt(v: Double): String = String.format(java.util.Locale.US, "%.1f", v)
 
+    /** The time since the last sound of the captured player (ms); a very big number if there was none in this run. */
+    fun silentForMs(): Long {
+        val ns = detector.silentForNanos(System.nanoTime())
+        return if (ns < 0) Long.MAX_VALUE / 4 else ns / 1_000_000L
+    }
+
     /** The silent time since the last sound, in seconds; -1 before the first. */
     private fun silentSeconds(): Double {
         val ns = detector.silentForNanos(System.nanoTime())

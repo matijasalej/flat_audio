@@ -88,6 +88,8 @@ object AppState {
     @Volatile var kitchen: Kitchen? = null
     @Volatile var tv: TvControl? = null
     @Volatile var capture: CaptureSource? = null
+    @Volatile var tvRenderer: TvRenderer? = null
+    @Volatile var synced: SyncedController? = null
 
     /**
      * ok, key_refused (Spotify refuses the audio key of this account: the engine holds the track and tries
@@ -206,6 +208,7 @@ object AppState {
         o.put("living_room", livingRoom?.statusJson() ?: JSONObject.NULL)
         o.put("kitchen", kitchen?.statusJson() ?: JSONObject.NULL)
         o.put("tv", tv?.statusJson() ?: JSONObject.NULL)
+        o.put("synced", synced?.statusJson() ?: JSONObject.NULL)
         val captureJson = capture?.statusJson()
         if (captureJson != null) {
             captureJson.put("playback", capturePlayback)

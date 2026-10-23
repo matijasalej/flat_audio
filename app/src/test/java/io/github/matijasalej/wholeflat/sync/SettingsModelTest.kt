@@ -35,8 +35,7 @@ class SettingsModelTest {
         assertEquals(0, o.getInt("tv_reanchor_min"))
         assertEquals("auto", o.getString("tv_render"))
         assertEquals(0, o.getInt("lyrics_offset_ms"))
-        assertEquals(false, o.getBoolean("karaoke"))
-        assertEquals(true, o.getBoolean("ambilight_synced"))
+        assertEquals("listen", o.getString("display"))
         assertEquals("FOLLOW_AUDIO", o.getString("ambilight_style"))
         assertEquals("ENERGY_ADAPTIVE_BRIGHTNESS", o.getString("ambilight_menu"))
     }
@@ -50,8 +49,8 @@ class SettingsModelTest {
                 "tv_screen_off", "tv_wake", "tv_ip",
                 "capture_enabled", "capture_living_latency_ms", "capture_lead_ms", "kitchen_target_ms", "kitchen_floor_ms",
                 "kitchen_volume", "capture_volume_mirror", "kitchen_format", "kitchen_flac_block",
-                "mode", "tv_latency_ms", "tv_format", "tv_burst_ms", "tv_extra_ms", "tv_pcr_lead_ms", "tv_reanchor_min", "tv_render", "lyrics_offset_ms", "karaoke",
-                "ambilight_synced", "ambilight_style", "ambilight_menu",
+                "mode", "tv_latency_ms", "tv_format", "tv_burst_ms", "tv_extra_ms", "tv_pcr_lead_ms", "tv_reanchor_min", "tv_render", "lyrics_offset_ms", "display",
+                "ambilight_style", "ambilight_menu",
             ),
             keys,
         )
@@ -130,13 +129,11 @@ class SettingsModelTest {
     @Test
     fun theAmbilightSettingsTakeStyleNamesAndSwitches() {
         val m = SettingsModel()
-        assertEquals(setOf("ambilight_synced"), m.applyJson(JSONObject("""{"ambilight_synced": "off"}""")))
-        assertEquals(false, m.values().ambilightSynced)
         assertEquals(setOf("ambilight_style", "ambilight_menu"), m.applyJson(JSONObject("""{"ambilight_style": " follow_video ", "ambilight_menu": "standard"}""")))
         assertEquals("FOLLOW_VIDEO", m.values().ambilightStyle)
         assertEquals("STANDARD", m.values().ambilightMenu)
         // not a style name: ignored
-        assertTrue(m.applyJson(JSONObject("""{"ambilight_style": "rain bow", "ambilight_menu": "", "ambilight_synced": "maybe"}""")).isEmpty())
+        assertTrue(m.applyJson(JSONObject("""{"ambilight_style": "rain bow", "ambilight_menu": ""}""")).isEmpty())
         assertEquals("FOLLOW_VIDEO", m.ambilightStyle)
     }
 
@@ -165,9 +162,20 @@ class SettingsModelTest {
         assertTrue(m.applyJson(JSONObject("""{"tv_format": "mkv"}""")).isEmpty())
         assertTrue(m.applyJson(JSONObject("""{"tv_format": 3}""")).isEmpty())
         assertEquals("ts", m.tvFormat)
-        assertEquals(setOf("karaoke"), m.applyJson(JSONObject("""{"karaoke": "on"}""")))
-        assertTrue(m.values().karaoke)
-        assertTrue(m.applyJson(JSONObject("""{"karaoke": "maybe"}""")).isEmpty())
+    }
+
+    @Test
+    fun theDisplayIsOneOfThreeAndListeningIsTheDefault() {
+        val m = SettingsModel()
+        assertEquals("listen", m.values().display)
+        assertEquals(setOf("display"), m.applyJson(JSONObject("""{"display": " Screen "}""")))
+        assertEquals("screen", m.values().display)
+        assertEquals(setOf("display"), m.applyJson(JSONObject("""{"display": "ambilight"}""")))
+        assertTrue(m.applyJson(JSONObject("""{"display": "party"}""")).isEmpty())
+        assertTrue(m.applyJson(JSONObject("""{"display": 3}""")).isEmpty())
+        assertEquals("ambilight", m.display)
+        // the settings that the display replaced are not keys any more
+        assertTrue(m.applyJson(JSONObject("""{"karaoke": "on", "ambilight_synced": "off"}""")).isEmpty())
     }
 
     @Test

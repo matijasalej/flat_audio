@@ -52,7 +52,8 @@ class TvTsPipeline(
     /** From the capture of a frame to its write (ns), fixed for the life of the stream. */
     private val holdNanos: Long,
     private val scenes: SceneSource,
-    private val karaoke: () -> Boolean,
+    /** Whether the screen shows the lyrics (the display "Screen + Ambilight"); else the picture is black. */
+    private val showLyrics: () -> Boolean,
     private val params: () -> Params,
 ) : TsFeed {
     class Params(val burstMs: Int, val pcrLeadMs: Int, val render: String)
@@ -350,7 +351,7 @@ class TvTsPipeline(
                 }
                 val c = w - holdNanos + VIDEO_LATENCY_NANOS
                 val liveNow = c >= liveFromNanos
-                val pic = TvPicture.choose(warming = !liveNow, karaoke = karaoke())
+                val pic = TvPicture.choose(warming = !liveNow, lyrics = showLyrics())
                 if (liveNow && !wasLive) {
                     wasLive = true
                     venc?.requestSync() // the music begins with a key picture
@@ -362,7 +363,7 @@ class TvTsPipeline(
                     syncRequestsForPicture.incrementAndGet()
                     lastRefresh = now
                 } else if (pic != picture && picture != Picture.SPLASH) {
-                    venc?.requestSync() // the picture changed (karaoke on or off)
+                    venc?.requestSync() // the picture changed (the display was changed)
                     syncRequestsForPicture.incrementAndGet()
                 }
                 try {

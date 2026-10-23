@@ -1,0 +1,16 @@
+{
+  "name": "Whole Flat",
+  "short_name": "Whole Flat",
+  "description": "What the TV shows while the music plays, and the volume of the kitchen",
+  "start_url": "/remote",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f1720",
+  "theme_color": "#0f1720",
+  "icons": [
+    { "src": "/remote/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/remote/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/remote/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}

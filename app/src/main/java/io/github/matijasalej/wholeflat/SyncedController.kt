@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.os.SystemClock
 import io.github.matijasalej.wholeflat.sync.AmbilightControl
 import io.github.matijasalej.wholeflat.sync.AmbilightStore
+import io.github.matijasalej.wholeflat.sync.Display
 import io.github.matijasalej.wholeflat.sync.Foreground
 import io.github.matijasalej.wholeflat.sync.ForegroundPolicy
 import io.github.matijasalej.wholeflat.sync.Mode
@@ -29,9 +30,11 @@ import java.util.concurrent.TimeUnit
  * start meanwhile (a stream that plays goes on), and when the music goes live on the TV the kitchen is started, or started again, timed
  * so that its first sound is the TV's first sound: the two rooms begin together.
  *
- * **The TV.** In Synced mode the screen is off (the stream goes on, only the sound matters) unless karaoke is on; the Ambilight
- * follows the audio whenever lyrics are visible on the TV (karaoke, or Lyrics mode with the Spotify app on the screen), and what it was
- * before is put back afterwards. A screen that this app switched off is switched on again when the TV stops playing our stream. Both
+ * **The TV.** In Synced mode what the TV shows is the setting `display` (see [Display]): the screen off with the lights off (Listening),
+ * the screen off with the Ambilight on, or the lyrics video on the screen with the Ambilight on; a change of it is only the screen and
+ * the lights, the stream is not restarted, and it goes back to Listening after ten minutes without music. The Ambilight follows the audio
+ * whenever lyrics are visible on the TV (also in Lyrics mode, with the Spotify app on the screen), and what it was before is put back
+ * afterwards. A screen that this app switched off is switched on again when the TV stops playing our stream. Both
  * the remembered state of the lights and the fact that the screen was switched off are kept in the preferences, so that an app that
  * crashed does not leave the TV dark or lit for ever.
  */
@@ -76,6 +79,9 @@ class SyncedController(
     private var recovered = false
     private var recoverTries = 0
     private var lastRefreshMs = 0L
+    private var lastDisplay = Display.DEFAULT
+    private var lastPresentedMode = Mode.SYNCED
+    private var lastPresentedPlaying = false
 
     /** The lights as the TV reports them, read now and then for the status. */
     @Volatile
@@ -207,6 +213,11 @@ class SyncedController(
                 }
             }
         }
+        // ten minutes without music: back to Listening (the screen and the lights are not left on for an empty room)
+        if (silent >= DISPLAY_RESET_MS && source != "librespot" && Settings.values.display != Display.DEFAULT.key) {
+            AppLog.add(TAG, "no music for ${silent / 60_000} min: the display goes back to ${Display.DEFAULT.label}")
+            Settings.set("display", Display.DEFAULT.key)
+        }
         val effectiveMode = Mode.of(Settings.values.mode) ?: mode
         // the TV plays our music (not just the splash of the warm-up)
         val playing = renderer.state == TvRenderer.State.PLAYING && renderer.live && effectiveMode == Mode.SYNCED
@@ -315,7 +326,16 @@ class SyncedController(
 
     private fun present(mode: Mode, playing: Boolean, source: String, now: Long) {
         val v = Settings.values
-        val want = TvPresentation.want(mode, playing, v.karaoke, source, v.ambilightSynced, screenOffByUs)
+        val display = Display.of(v.display) ?: Display.DEFAULT
+        // a change that the user asked for is carried out at once, not at the next try of the retry interval
+        if (display != lastDisplay || mode != lastPresentedMode || playing != lastPresentedPlaying) {
+            lastDisplay = display
+            lastPresentedMode = mode
+            lastPresentedPlaying = playing
+            lastScreenTryMs = 0L
+            lastLightsTryMs = 0L
+        }
+        val want = TvPresentation.want(mode, playing, display, source, screenOffByUs)
         when (want.screen) {
             TvPresentation.Screen.OFF -> if (!screenOffByUs && now - lastScreenTryMs > RETRY_MS) {
                 lastScreenTryMs = now
@@ -398,7 +418,7 @@ class SyncedController(
         val o = JSONObject()
         val v = Settings.values
         o.put("mode", v.mode)
-        o.put("karaoke", v.karaoke)
+        o.put("display", v.display)
         o.put("tv_format", v.tvFormat)
         o.put("state", renderer.state.label)
         o.put("delay_ms", if (renderer.delayMs.isNaN()) JSONObject.NULL else Math.round(renderer.delayMs * 10.0) / 10.0)
@@ -415,7 +435,7 @@ class SyncedController(
         screen.put("last_action", screenAction.ifEmpty { JSONObject.NULL })
         o.put("screen", screen)
         val a = JSONObject()
-        a.put("enabled", v.ambilightSynced)
+        a.put("wanted_by_display", (Display.of(v.display) ?: Display.DEFAULT).lights)
         a.put("style", v.ambilightStyle)
         a.put("menu", v.ambilightMenu)
         a.put("on_for_lyrics", ambilight.entered)
@@ -442,6 +462,9 @@ class SyncedController(
         private const val RESTART_FAR_MS = 150.0
         private const val RESTART_EVERY_MS = 20_000L
 
+        /** Without music for this long (ms) the display goes back to Listening. */
+        private const val DISPLAY_RESET_MS = 600_000L
+
         /** What the kitchen's own start takes before its Play (the speaker is muted and stopped, its volume and the address are set), a guess to be read from the log (ms). */
         private const val KITCHEN_PREPARE_MS = 300.0
 
@@ -455,8 +478,8 @@ class SyncedController(
 
         /** The settings that make the controller look again at once. */
         private val WATCHED = setOf(
-            "mode", "karaoke", "tv_format", "tv_latency_ms", "kitchen_offset_ms", "kitchen_target_ms", "kitchen_floor_ms",
-            "ambilight_synced", "ambilight_style", "ambilight_menu", "tv_reanchor_min",
+            "mode", "display", "tv_format", "tv_latency_ms", "tv_extra_ms", "kitchen_offset_ms", "kitchen_target_ms", "kitchen_floor_ms",
+            "ambilight_style", "ambilight_menu", "tv_reanchor_min",
         )
     }
 }

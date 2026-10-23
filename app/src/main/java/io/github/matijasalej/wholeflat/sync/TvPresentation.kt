@@ -1,16 +1,17 @@
 package io.github.matijasalej.wholeflat.sync
 
 /**
- * What the TV shows and what its Ambilight does, from the mode.
+ * What the TV shows and what its Ambilight does, from the mode and the [Display].
  *
- * - **Synced**, the TV playing our stream: with **karaoke** (lyrics on the TV) the screen is on and the Ambilight follows the audio;
- *   without it the screen is off (the stream goes on, the sound is all) and so are the lights.
- * - **Lyrics** (the Spotify app is on the screen over HDMI, with its lyrics): the Ambilight follows the audio while the music plays.
+ * - **Synced**, the TV playing our stream, by the display: **Listening** the screen is off and so are the lights (the stream goes on, the
+ *   sound is all); **Ambilight** the screen is off and the lights follow the audio; **Screen + Ambilight** the lyrics video is on the screen
+ *   and the lights follow the audio.
+ * - **Lyrics** (the Spotify app is on the screen over HDMI, with its lyrics, which the user left the TV's player for): the Ambilight
+ *   follows the audio while the music plays, since lyrics are visible.
  * - Otherwise the screen is left as it is, and the lights are off.
  *
- * The rule of the lights: on whenever lyrics are visible on the TV, off when the screen is off; what they were before is put back
- * when they are not wanted any more. A screen that this app switched off is switched on again as soon as the TV is not playing our
- * stream (the user has left Synced mode and wants to see the Spotify app).
+ * What the lights were before is put back when they are not wanted any more. A screen that this app switched off is switched on again as
+ * soon as the TV is not playing our stream (the user has left Synced mode and wants to see the Spotify app) or the display wants it on.
  */
 object TvPresentation {
     enum class Screen {
@@ -23,17 +24,16 @@ object TvPresentation {
     class Want(val screen: Screen, val lights: Boolean)
 
     /**
-     * @param tvPlaying the TV plays our stream (Synced mode holds)
+     * @param tvPlaying the TV plays our music (Synced mode holds, the warm-up is over)
      * @param source "capture", "librespot" or "idle"
-     * @param lightsEnabled the setting `ambilight_synced`
      * @param screenOffByUs this app switched the screen off and has not switched it on again
      */
-    fun want(mode: Mode, tvPlaying: Boolean, karaoke: Boolean, source: String, lightsEnabled: Boolean, screenOffByUs: Boolean): Want {
+    fun want(mode: Mode, tvPlaying: Boolean, display: Display, source: String, screenOffByUs: Boolean): Want {
         val restore = if (screenOffByUs) Screen.ON else Screen.LEAVE
         if (mode == Mode.SYNCED && tvPlaying) {
-            return if (karaoke) Want(restore, lightsEnabled) else Want(Screen.OFF, false)
+            return Want(if (display.screenOn) restore else Screen.OFF, display.lights)
         }
         val lyricsOnTheScreen = mode == Mode.LYRICS && source == "capture"
-        return Want(restore, lightsEnabled && lyricsOnTheScreen)
+        return Want(restore, lyricsOnTheScreen)
     }
 }

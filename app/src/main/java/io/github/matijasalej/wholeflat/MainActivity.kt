@@ -22,6 +22,8 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
+import io.github.matijasalej.wholeflat.sync.Display
+import org.json.JSONObject
 import kotlin.concurrent.thread
 
 /**
@@ -36,6 +38,7 @@ class MainActivity : Activity() {
     private lateinit var statusView: TextView
     private lateinit var bannerView: TextView
     private lateinit var startButton: Button
+    private lateinit var displayButton: Button
     private lateinit var tvLabel: TextView
     private lateinit var kitchenToggle: Button
     private lateinit var captureToggle: Button
@@ -97,6 +100,10 @@ class MainActivity : Activity() {
         // The first control is harmless: a press on OK on a fresh start must not switch a setting.
         startButton = button("Start service") { startReceiver() }
         left.addView(startButton)
+
+        // what the TV shows while it plays the music: Listening, Ambilight, Screen + Ambilight; a press goes to the next
+        displayButton = button("TV display") { cycleDisplay() }
+        left.addView(displayButton)
 
         kitchenToggle = toggle("kitchen_enabled", "Kitchen")
         captureToggle = toggle("capture_enabled", "Capture of the Cast receiver")
@@ -289,6 +296,7 @@ class MainActivity : Activity() {
     /** Puts the stored settings on the controls (they can also change over HTTP). */
     private fun syncControls(force: Boolean = false) {
         val v = Settings.values
+        displayButton.text = displayText()
         kitchenToggle.text = "Kitchen: " + onOff(v.kitchenEnabled)
         captureToggle.text = "Capture of the Cast receiver: " + onOff(v.captureEnabled)
         fixedVolumeToggle.text = "Living room fixed volume: " + onOff(v.livingFixedVolume)
@@ -314,6 +322,20 @@ class MainActivity : Activity() {
     }
 
     private fun onOff(on: Boolean): String = if (on) "ON" else "OFF"
+
+    /** The button at the top: Listening, Ambilight, Screen + Ambilight, Listening. Choosing one also puts the app back in Synced mode. */
+    private fun cycleDisplay() {
+        val next = (Display.of(Settings.values.display) ?: Display.DEFAULT).next()
+        Settings.applyJson(JSONObject().put("display", next.key).put("mode", "synced"))
+        syncControls(force = true)
+    }
+
+    private fun displayText(): String {
+        val v = Settings.values
+        val d = Display.of(v.display) ?: Display.DEFAULT
+        val synced = v.mode == "synced"
+        return "TV display: " + d.label + (if (synced) "" else "  (Lyrics: the Spotify app is on the screen; a press goes back to Synced)")
+    }
 
     /** The receiver runs in a foreground service; opening the app starts it (a press on the button does too). */
     private fun startReceiver() {

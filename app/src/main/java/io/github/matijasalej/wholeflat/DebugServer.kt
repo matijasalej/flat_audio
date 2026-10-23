@@ -52,6 +52,10 @@ import kotlin.concurrent.thread
  *   GET  /tv/last-sessions      the last 10 streams to the TV: every connection with its statistics
  *   GET  /tv/grab               has the TV play the capture now (the mode manager may give it back; set mode=lyrics to test alone)
  *   GET  /tv/release            gives the TV back (it returns to HDMI)
+ *   GET  /remote                the phone page: the three displays of the TV (Listening, Ambilight, Screen + Ambilight) and the kitchen volume;
+ *                               /remote/state.json its state, /remote/action?display=screen&volume=%2B the presses, /remote/manifest.webmanifest
+ *                               and the icons for the home screen
+ *   GET  /tune                  the fine tuning of the debug page: ?tv_extra=%2B|-, ?fine=%2B|- (the kitchen against the TV), ?lyrics=%2B|-, ?display=...
  *   GET  /tv/reanchor           restarts the TV's stream now (with its warm-up); `?at=boundary` waits for the next song boundary
  *   GET  /tv/preview.jpg        what the picture of the TV's stream shows now (a small JPEG)
  *   GET  /tv/clicks             ?seconds=N (default 30): the click track in both streams instead of the music, for calibrating the rooms:
@@ -271,6 +275,21 @@ object DebugServer {
                 AppState.tvRenderer?.release("asked for on the debug page")
                 sendJson(out, 200, JSONObject().put("ok", AppState.tvRenderer != null), head)
             }
+            "/remote" -> asset("index.html", "text/html; charset=utf-8", out, head)
+            "/remote/state.json" -> sendJson(out, 200, RemoteApi.stateJson(), head)
+            "/remote/action" -> {
+                AppLog.add(TAG, "${req.remote} remote/action ${req.query}")
+                sendJson(out, 200, RemoteApi.action(req.query), head)
+            }
+            "/remote/manifest.webmanifest" -> asset("manifest.webmanifest", "application/manifest+json", out, head)
+            "/remote/icon-192.png" -> asset("icon-192.png", "image/png", out, head)
+            "/remote/icon-512.png" -> asset("icon-512.png", "image/png", out, head)
+            "/remote/apple-touch-icon.png", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png" -> asset("apple-touch-icon.png", "image/png", out, head)
+            "/tune" -> {
+                AppLog.add(TAG, "${req.remote} tune ${req.query}")
+                if (req.query.isNotEmpty()) RemoteApi.action(req.query)
+                sendJson(out, 200, RemoteApi.tuningJson(), head)
+            }
             "/tv/reanchor" -> {
                 AppLog.add(TAG, "${req.remote} tv/reanchor ${req.query}")
                 if (req.query["at"] == "boundary") {
@@ -397,6 +416,16 @@ object DebugServer {
         out.flush()
     }
 
+    /** A file of `assets/remote/` (the phone page, its manifest and icons). */
+    private fun asset(name: String, contentType: String, out: OutputStream, head: Boolean) {
+        val bytes = try {
+            appContext?.assets?.open("remote/$name")?.use { it.readBytes() }
+        } catch (e: IOException) {
+            null
+        }
+        if (bytes == null) sendText(out, 404, "not found\n", head) else sendBytes(out, 200, contentType, bytes, head)
+    }
+
     private fun sendText(out: OutputStream, code: Int, text: String, headOnly: Boolean) {
         sendBytes(out, code, "text/plain; charset=utf-8", text.toByteArray(Charsets.UTF_8), headOnly)
     }
@@ -441,8 +470,13 @@ object DebugServer {
         sb.append("h1{font-size:20px;margin:0 0 12px}table{border-collapse:collapse}")
         sb.append("td{padding:1px 14px 1px 0;vertical-align:top}td:first-child{color:#8b98a5}")
         sb.append("pre{background:#0b1118;padding:10px;overflow:auto;font-size:12px;line-height:1.35}")
-        sb.append("a{color:#6aa6ff;margin-right:14px}</style></head><body>")
-        sb.append("<h1>Whole Flat Audio ").append(escapeHtml(BuildInfo.versionName)).append("</h1><table>")
+        sb.append("a{color:#6aa6ff;margin-right:14px}")
+        sb.append(".tune{background:#16202a;border-radius:8px;padding:10px 12px;margin:0 0 14px;line-height:2.1}")
+        sb.append(".tune b{color:#8b98a5;font-weight:500;margin-right:6px}.tune button{font:inherit;background:#24303c;color:#e6edf3;border:0;border-radius:6px;padding:2px 12px;margin-right:6px}")
+        sb.append(".tune .on{background:#1b6ef3}.tune .gap{margin-left:18px}</style></head><body>")
+        sb.append("<h1>Whole Flat Audio ").append(escapeHtml(BuildInfo.versionName)).append("</h1>")
+        tuningPanel(sb)
+        sb.append("<table>")
         renderRows(sb, status, 0)
         sb.append("</table><p>")
         for (link in listOf("/status.json", "/settings", "/kitchen", "/kitchen/last-sessions", "/capture", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/capture/restart", "/tv/run", "/synced", "/tv/dlna", "/tv/last-sessions", "/tv/preview.jpg")) {
@@ -452,6 +486,35 @@ object DebugServer {
         sb.append(escapeHtml(AppLog.tail(120).joinToString("\n")))
         sb.append("</pre></body></html>")
         return sb.toString()
+    }
+
+    /**
+     * The fine tuning of Synced mode, which is not on the phone page: what the TV shows, the extra that the TV adds to the backlog of its
+     * connection (the calibration of the two rooms), the fine sync of the kitchen against the TV, the lyrics against the sound, and two tools.
+     */
+    private fun tuningPanel(sb: StringBuilder) {
+        val t = RemoteApi.tuningJson()
+        fun step(name: String, key: String, value: Any?, unit: String, small: String, big: String? = null) {
+            sb.append("<span class=\"gap\"><b>").append(name).append("</b>").append(escapeHtml(value?.toString() ?: "?")).append(" ").append(unit).append(" ")
+            sb.append("<button onclick=\"t('$key=-')\">&minus;$small</button><button onclick=\"t('$key=%2B')\">+$small</button>")
+            if (big != null) sb.append("<button onclick=\"t('$key=0')\">0</button>")
+            sb.append("</span>")
+        }
+        sb.append("<div class=\"tune\"><b>TV display</b>")
+        for ((key, label) in listOf("listen" to "Listening", "ambilight" to "Ambilight", "screen" to "Screen + Ambilight")) {
+            sb.append("<button").append(if (t.optString("display") == key) " class=\"on\"" else "").append(" onclick=\"t('display=$key')\">").append(label).append("</button>")
+        }
+        sb.append("<br>")
+        step("TV extra", "tv_extra", t.opt("tv_extra_ms"), "ms", "10")
+        step("Fine sync (kitchen against the TV)", "fine", t.opt("kitchen_offset_ms"), "ms", "10", "0")
+        step("Lyrics", "lyrics", t.opt("lyrics_offset_ms"), "ms", "100", "0")
+        sb.append("<br><span class=\"gap\">TV latency ").append(escapeHtml(t.opt("tv_latency_ms")?.toString() ?: "?"))
+        sb.append(" ms, common delay ").append(escapeHtml(t.opt("tv_delay_ms")?.toString() ?: "?")).append(" ms</span>")
+        sb.append("<button class=\"gap\" onclick=\"g('/tv/reanchor')\">Re-anchor the TV</button>")
+        sb.append("<button onclick=\"g('/tv/clicks?seconds=30')\">Clicks in both rooms, 30 s</button>")
+        sb.append("<button onclick=\"g('/tv/clicks/stop')\">Stop clicks</button>")
+        sb.append("<a class=\"gap\" href=\"/remote\">phone page</a></div>")
+        sb.append("<script>function t(q){fetch('/tune?'+q).then(function(){location.reload()})}function g(u){fetch(u).then(function(){location.reload()})}</script>")
     }
 
     private fun sysJson(): JSONObject {

@@ -6,6 +6,7 @@ import android.os.SystemClock
 import io.github.matijasalej.wholeflat.capture.CaptureFeed
 import io.github.matijasalej.wholeflat.sync.ClickTrack
 import io.github.matijasalej.wholeflat.sync.CoverColor
+import io.github.matijasalej.wholeflat.sync.Display
 import io.github.matijasalej.wholeflat.sync.DmrDescription
 import io.github.matijasalej.wholeflat.sync.SessionHistory
 import io.github.matijasalej.wholeflat.sync.SettingsModel
@@ -383,7 +384,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         var pipe: TvTsPipeline? = null
         if (wantTs) {
             val p = TvTsPipeline(
-                context, feed, (hold * 1_000_000.0).toLong(), scenes, { Settings.values.karaoke },
+                context, feed, (hold * 1_000_000.0).toLong(), scenes, { Display.of(Settings.values.display) == Display.SCREEN },
                 { Settings.values.let { v -> TvTsPipeline.Params(v.tvBurstMs, v.tvPcrLeadMs, v.tvRender) } },
             )
             val err = p.start()

@@ -925,6 +925,33 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     /** The lag the kitchen is to have now (ms after the capture): the common delay of Synced mode, else the target of the settings; NaN if none. */
     fun currentTargetMs(): Double = currentTarget()?.ms ?: Double.NaN
 
+    @Volatile
+    private var volumeReadNanos = 0L
+
+    @Volatile
+    private var volumeRead = -1
+
+    /**
+     * The volume of the Sonos for the slider of the phone page (0 to 100): the kitchen volume setting if one is set, else what the speaker
+     * says (read over the network, kept for 3 s); null if it cannot be read. Blocks for the length of the read.
+     */
+    fun sonosVolumeNow(): Int? {
+        val set = Settings.values.kitchenVolume
+        if (set >= 0) return set
+        val nanos = System.nanoTime()
+        if (volumeReadNanos != 0L && nanos - volumeReadNanos < 3_000_000_000L) return volumeRead.takeIf { it >= 0 }
+        val dev = device
+        if (dev == null || !reachable) return null
+        val v = try {
+            soapFor(dev).getVolume()
+        } catch (t: Throwable) {
+            null
+        }
+        volumeReadNanos = System.nanoTime()
+        volumeRead = v ?: -1
+        return v
+    }
+
     /** The delay of the speaker from Play to its sound for a WAV stream (ms): what Synced mode counts with when it times a start. */
     fun playToSoundMs(): Double = delays.ms(StreamFormat.WAV)
 

@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Whole Flat">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0f1720">
+<link rel="manifest" href="/remote/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/remote/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="/remote/icon-192.png">
+<title>Whole Flat</title>
+<style>
+  :root {
+    --bg: #0f1720;
+    --card: #1a2430;
+    --card-hi: #243140;
+    --text: #e6edf3;
+    --muted: #8b98a5;
+    --accent: #1b6ef3;
+    --accent-dim: #2a4f8f;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body {
+    font: 17px/1.35 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+    padding: max(20px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left));
+  }
+  main { max-width: 480px; margin: 0 auto; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 6px 0 16px; }
+  .notice { background: #4a2b12; color: #ffd166; border-radius: 12px; padding: 12px 14px; margin: 0 0 14px; font-size: 15px; }
+  .choices { display: grid; gap: 12px; }
+  .choice {
+    appearance: none; border: 0; text-align: left; color: var(--text); background: var(--card);
+    border-radius: 16px; padding: 16px 18px; min-height: 84px; font: inherit; cursor: pointer;
+    display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 12px;
+    transition: background .15s;
+  }
+  .choice:active { background: var(--card-hi); }
+  .choice .name { font-size: 21px; font-weight: 650; }
+  .choice .what { grid-column: 1; font-size: 15px; color: var(--muted); }
+  .choice .tick { grid-row: 1 / span 2; grid-column: 2; width: 28px; height: 28px; border-radius: 50%; border: 2px solid #3a4a5c; }
+  .choice[aria-pressed="true"] { background: var(--accent); }
+  .choice[aria-pressed="true"] .what { color: #dbe8ff; }
+  .choice[aria-pressed="true"] .tick { border-color: #fff; background: #fff; box-shadow: inset 0 0 0 7px var(--accent); }
+  #status { color: var(--muted); font-size: 14px; margin: 12px 4px 0; min-height: 1.35em; }
+  .volume { margin-top: 34px; }
+  .volume .head { display: flex; justify-content: space-between; align-items: baseline; margin: 0 4px 10px; }
+  .volume .head span:first-child { font-size: 15px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  #value { font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .row { display: grid; grid-template-columns: 64px 1fr 64px; gap: 12px; align-items: center; }
+  .step {
+    appearance: none; border: 0; border-radius: 16px; background: var(--card); color: var(--text);
+    height: 64px; font-size: 32px; line-height: 1; cursor: pointer;
+  }
+  .step:active { background: var(--card-hi); }
+  input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 64px; background: transparent; margin: 0; }
+  input[type=range]::-webkit-slider-runnable-track { height: 10px; border-radius: 5px; background: #33414f; }
+  input[type=range]::-moz-range-track { height: 10px; border-radius: 5px; background: #33414f; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 40px; height: 40px; border-radius: 50%; background: #fff; margin-top: -15px; box-shadow: 0 2px 8px #0008; }
+  input[type=range]::-moz-range-thumb { width: 40px; height: 40px; border: 0; border-radius: 50%; background: #fff; box-shadow: 0 2px 8px #0008; }
+  .offline #status { color: #ffd166; }
+</style>
+</head>
+<body>
+<main id="app">
+  <h1>Whole Flat</h1>
+  <div id="notice" class="notice" hidden>The TV is showing the Spotify app. Pick a setting to take it back.</div>
+  <div class="choices" role="group" aria-label="What the TV shows">
+    <button class="choice" data-display="listen" aria-pressed="false">
+      <span class="name">Listening</span><span class="tick"></span>
+      <span class="what">Screen off, lights off</span>
+    </button>
+    <button class="choice" data-display="ambilight" aria-pressed="false">
+      <span class="name">Ambilight</span><span class="tick"></span>
+      <span class="what">Screen off, lights on</span>
+    </button>
+    <button class="choice" data-display="screen" aria-pressed="false">
+      <span class="name">Screen + Ambilight</span><span class="tick"></span>
+      <span class="what">Lyrics on the TV, lights on</span>
+    </button>
+  </div>
+  <div id="status"></div>
+
+  <section class="volume" aria-label="Kitchen volume">
+    <div class="head"><span>Kitchen volume</span><span id="value">&ndash;</span></div>
+    <div class="row">
+      <button class="step" id="down" aria-label="Quieter">&minus;</button>
+      <input type="range" id="slider" min="0" max="100" step="1" value="0" aria-label="Kitchen volume">
+      <button class="step" id="up" aria-label="Louder">+</button>
+    </div>
+  </section>
+</main>
+<script>
+(function () {
+  var $ = function (s) { return document.querySelector(s); };
+  var slider = $('#slider'), value = $('#value'), status = $('#status'), notice = $('#notice');
+  var dragging = false, lastVolumeSent = 0, online = true;
+
+  function get(path) {
+    return fetch(path, { cache: 'no-store' }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    });
+  }
+
+  function say(s) {
+    var parts = [];
+    if (s.tv_text) parts.push(s.tv_text);
+    if (s.kitchen_text) parts.push(s.kitchen_text);
+    status.textContent = online ? parts.join(' · ') : 'No connection to the box';
+    document.body.classList.toggle('offline', !online);
+  }
+
+  function render(s) {
+    online = true;
+    var lyrics = s.mode === 'lyrics';
+    notice.hidden = !lyrics;
+    document.querySelectorAll('.choice').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(!lyrics && b.dataset.display === s.display));
+    });
+    if (!dragging && typeof s.volume === 'number') {
+      slider.value = s.volume;
+      value.textContent = s.volume;
+    } else if (typeof s.volume !== 'number' && !dragging) {
+      value.innerHTML = '&ndash;';
+    }
+    say(s);
+  }
+
+  function poll() {
+    get('/remote/state.json').then(render).catch(function () { online = false; say({}); });
+  }
+
+  document.querySelectorAll('.choice').forEach(function (b) {
+    b.addEventListener('click', function () {
+      // the answer is the new state: the button changes at once
+      document.querySelectorAll('.choice').forEach(function (o) { o.setAttribute('aria-pressed', String(o === b)); });
+      notice.hidden = true;
+      get('/remote/action?display=' + encodeURIComponent(b.dataset.display)).then(render).catch(function () { online = false; say({}); });
+    });
+  });
+
+  function sendVolume(arg) {
+    return get('/remote/action?volume=' + encodeURIComponent(arg)).then(render).catch(function () { online = false; say({}); });
+  }
+
+  slider.addEventListener('input', function () {
+    dragging = true;
+    value.textContent = slider.value;
+    var now = Date.now();
+    // while the finger is down the volume follows, not more than five times a second
+    if (now - lastVolumeSent > 200) {
+      lastVolumeSent = now;
+      sendVolume(slider.value);
+    }
+  });
+  slider.addEventListener('change', function () {
+    lastVolumeSent = Date.now();
+    sendVolume(slider.value).then(function () { dragging = false; });
+  });
+  $('#down').addEventListener('click', function () { dragging = false; sendVolume('-'); });
+  $('#up').addEventListener('click', function () { dragging = false; sendVolume('+'); });
+
+  poll();
+  setInterval(poll, 1500);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
+})();
+</script>
+</body>
+</html>

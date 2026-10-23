@@ -59,10 +59,8 @@ class SettingsValues(
     val tvRender: String,
     /** Moves the lyrics earlier (positive) or later (negative) against the sound, for what the media session's clock does not tell (ms). */
     val lyricsOffsetMs: Int,
-    /** Lyrics on the TV in Synced mode (the screen on, the Ambilight on); off, the TV's screen is off and only the sound plays. */
-    val karaoke: Boolean,
-    /** The Ambilight of the TV follows the audio in Synced mode and is put back afterwards. */
-    val ambilightSynced: Boolean,
+    /** What the TV shows in Synced mode: "listen" (screen off, lights off), "ambilight" (screen off, lights on) or "screen" (the lyrics video, lights on); see [Display]. */
+    val display: String,
     /** The Ambilight style in Synced mode (JointSpace `styleName`) and its `menuSetting`. */
     val ambilightStyle: String,
     val ambilightMenu: String,
@@ -94,8 +92,7 @@ class SettingsModel {
     var tvReanchorMin = 0
     var tvRender = TV_RENDER_AUTO
     var lyricsOffsetMs = 0
-    var karaoke = false
-    var ambilightSynced = true
+    var display = Display.DEFAULT.key
     var ambilightStyle = DEFAULT_AMBILIGHT_STYLE
     var ambilightMenu = DEFAULT_AMBILIGHT_MENU
 
@@ -103,8 +100,8 @@ class SettingsModel {
     fun values(): SettingsValues = SettingsValues(
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
-        captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPcrLeadMs, tvReanchorMin, tvRender, lyricsOffsetMs, karaoke,
-        ambilightSynced, ambilightStyle, ambilightMenu,
+        captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPcrLeadMs, tvReanchorMin, tvRender, lyricsOffsetMs, display,
+        ambilightStyle, ambilightMenu,
     )
 
     fun toJson(): JSONObject {
@@ -134,8 +131,7 @@ class SettingsModel {
         o.put(TV_REANCHOR_MIN, tvReanchorMin)
         o.put(TV_RENDER, tvRender)
         o.put(LYRICS_OFFSET_MS, lyricsOffsetMs)
-        o.put(KARAOKE, karaoke)
-        o.put(AMBILIGHT_SYNCED, ambilightSynced)
+        o.put(DISPLAY, display)
         o.put(AMBILIGHT_STYLE, ambilightStyle)
         o.put(AMBILIGHT_MENU, ambilightMenu)
         return o
@@ -255,13 +251,10 @@ class SettingsModel {
             val v = number(json.get(LYRICS_OFFSET_MS))?.coerceIn(-MAX_LYRICS_OFFSET_MS, MAX_LYRICS_OFFSET_MS)
             if (v != null && v != lyricsOffsetMs) { lyricsOffsetMs = v; changed.add(LYRICS_OFFSET_MS) }
         }
-        if (json.has(KARAOKE)) {
-            val v = bool(json.get(KARAOKE))
-            if (v != null && v != karaoke) { karaoke = v; changed.add(KARAOKE) }
-        }
-        if (json.has(AMBILIGHT_SYNCED)) {
-            val v = bool(json.get(AMBILIGHT_SYNCED))
-            if (v != null && v != ambilightSynced) { ambilightSynced = v; changed.add(AMBILIGHT_SYNCED) }
+        if (json.has(DISPLAY)) {
+            // anything but "listen", "ambilight" or "screen" is ignored
+            val v = Display.of(json.get(DISPLAY).toString())?.key
+            if (v != null && v != display) { display = v; changed.add(DISPLAY) }
         }
         if (json.has(AMBILIGHT_STYLE)) {
             // a JointSpace style name: capital letters, digits and underscores
@@ -320,8 +313,7 @@ class SettingsModel {
         const val TV_REANCHOR_MIN = "tv_reanchor_min"
         const val TV_RENDER = "tv_render"
         const val LYRICS_OFFSET_MS = "lyrics_offset_ms"
-        const val KARAOKE = "karaoke"
-        const val AMBILIGHT_SYNCED = "ambilight_synced"
+        const val DISPLAY = "display"
         const val AMBILIGHT_STYLE = "ambilight_style"
         const val AMBILIGHT_MENU = "ambilight_menu"
 

@@ -44,6 +44,12 @@ object SonosPolicy {
     fun needsTakeover(transportState: String, trackUri: String): Boolean =
         transportState == "PAUSED_PLAYBACK" && trackUri.isNotEmpty() && !isOurUri(trackUri)
 
+    /**
+     * Whether a playback state of the speaker's websocket (`PLAYBACK_STATE_BUFFERING`) or a transport state of UPnP (`TRANSITIONING`)
+     * says that it is waiting for audio: it ran dry, or is starting again after it did.
+     */
+    fun isStall(state: String): Boolean = state.contains("BUFFERING", ignoreCase = true) || state.contains("TRANSITIONING", ignoreCase = true)
+
     private val RINCON = Regex("RINCON_[0-9A-Fa-f]+")
 
     /** The URI that switches a speaker to its own queue, from the UDN of its description (`uuid:RINCON_...`); null if it has none. */

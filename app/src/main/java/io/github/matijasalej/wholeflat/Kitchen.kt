@@ -6,7 +6,9 @@ import io.github.matijasalej.wholeflat.capture.CaptureFeed
 import io.github.matijasalej.wholeflat.capture.CaptureLag
 import io.github.matijasalej.wholeflat.capture.CaptureLead
 import io.github.matijasalej.wholeflat.capture.CaptureStart
+import io.github.matijasalej.wholeflat.capture.CaptureTarget
 import io.github.matijasalej.wholeflat.capture.CaptureTracker
+import io.github.matijasalej.wholeflat.capture.LagSteer
 import io.github.matijasalej.wholeflat.capture.SourceArbiter
 import io.github.matijasalej.wholeflat.sync.PlayDelays
 import io.github.matijasalej.wholeflat.sync.SessionHistory
@@ -161,6 +163,12 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     @Volatile
     private var captureAgeAtPlayMs = Double.NaN
 
+    /** The state of the lag steering that was last put in the log, to note only its changes. */
+    private var lastSteerState = LagSteer.State.OFF
+
+    /** The last `playbackError` of the speaker that was taken for trouble, so that one error counts once. */
+    private var seenPlaybackErrorNanos = 0L
+
     @Volatile
     private var captureStarts = 0
 
@@ -246,6 +254,13 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     // ---- life cycle ----------------------------------------------------------------------------
 
     fun start() {
+        captureTracker.onFloor = { e ->
+            AppLog.add(
+                TAG,
+                "capture: the speaker ran out of audio at a lag of ${fmt(e.lagMs)} ms (${e.why}); the lag will not be brought below " +
+                    "${fmt(e.floorMs)} ms from now on (floor ${captureTracker.steer.floorEvents})",
+            )
+        }
         finder.listener = this
         finder.startNotifyListener()
         Settings.addListener(settingsListener)
@@ -511,7 +526,12 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         controller = if (s.isCapture) captureController else ringController
         controller.reset()
         controller.offsetMs = effectiveOffsetMs()
-        if (s.isCapture) captureTracker.startStream(capturePlannedLagMs)
+        if (s.isCapture) {
+            captureTracker.startStream(capturePlannedLagMs)
+            // an error of the speaker from before this stream is not trouble of it
+            seenPlaybackErrorNanos = ws.lastPlaybackErrorNanos
+            lastSteerState = LagSteer.State.OFF
+        }
         notPlayingReadings = 0
         lastSummaryReadings = 0
         badPolls = 0
@@ -605,6 +625,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             lastNotedWs = p.state + "|" + p.error
             noteSpeaker(lastTransport, lastTransportStatus, s.uri, p.state, p.error)
         }
+        if (s.isCapture) noteCaptureTrouble(p)
         if (p.state != "PLAYBACK_STATE_PLAYING" || p.positionMs < 0) {
             notPlayingReadings++
             val sincePlay = System.nanoTime() - s.playSentNanos
@@ -819,6 +840,15 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         return true
     }
 
+    /**
+     * The part of the lag of a captured stream that the lead does not make: the Play-to-sound delay of the speaker for streams of
+     * [format], and the capture pipeline (how old a frame is when it has been read, from the timestamps of AudioRecord; 0 without them).
+     */
+    private fun fixedLagMs(feed: CaptureFeed, format: StreamFormat): Double {
+        val pipeline = feed.pipelineMs()
+        return delays.ms(format) + (if (pipeline.isNaN()) 0.0 else pipeline)
+    }
+
     /** The plan for a captured stream that Play is sent for at [tNanos]: where it begins and how far behind the capture it is expected to sound. */
     private fun capturePlan(feed: CaptureFeed, tNanos: Long, format: StreamFormat): CaptureStart.Plan {
         val v = Settings.values
@@ -829,7 +859,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             rate = feed.rate,
             leadMs = captureLead.effectiveMs(v.captureLeadMs),
             offsetMs = v.kitchenOffsetMs,
-            lkMs = delays.ms(format),
+            lkMs = fixedLagMs(feed, format),
         )
     }
 
@@ -897,19 +927,25 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     ) {
         val feed = s.capture ?: return
         if (feed.generation != s.captureGeneration) return // the session is about to end
-        val offset = Settings.values.kitchenOffsetMs
+        val v = Settings.values
+        val offset = v.kitchenOffsetMs
+        val target = CaptureTarget.of(v.kitchenTargetMs, v.captureLivingLatencyMs, offset)
+        val steer = captureTracker.steer
         val outcome = captureTracker.onReading(
-            tMid, positionMs, stream.map, { stream.builder.unappliedBudget() }, feed.clock, offset, delays.ms(s.format),
+            tMid, positionMs, stream.map, { stream.builder.unappliedBudget() }, feed.clock, offset, fixedLagMs(feed, s.format),
+            target?.ms ?: Double.NaN,
         )
         when (outcome) {
             is CaptureTracker.Outcome.Locked -> {
                 AppLog.add(
                     TAG,
                     "capture: the kitchen sounds ${fmt(outcome.lagMs)} ms after the capture (expected ${fmt(outcome.expectedMs)} ms" +
-                        ", Play to sound ${(startNanos - s.playSentNanos) / 1_000_000L} ms), holding that" +
+                        ", Play to sound ${(startNanos - s.playSentNanos) / 1_000_000L} ms), " +
+                        (if (steer.active) "bringing it to ${fmt(steer.goalMs)} ms (target ${fmt(target?.ms ?: Double.NaN)} ms from ${target?.source}, floor ${fmt(steer.floorMs)} ms)" else "holding that") +
                         if (outcome.leadRaised) "; the speaker needs more than asked, the next stream starts ${captureLead.learnedMs} ms ahead" else "",
                 )
                 lastSummaryReadings = 0
+                lastSteerState = LagSteer.State.OFF
             }
             is CaptureTracker.Outcome.Trim -> {
                 stream.builder.addTrim(outcome.frames)
@@ -929,16 +965,43 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             is CaptureTracker.Outcome.Rejoin -> rejoin(outcome.reason)
             is CaptureTracker.Outcome.Hold, is CaptureTracker.Outcome.Waiting -> Unit
         }
+        val state = steer.state()
+        if (state != lastSteerState) {
+            if (state == LagSteer.State.DESCENDING || state == LagSteer.State.ASCENDING || lastSteerState != LagSteer.State.OFF) {
+                AppLog.add(
+                    TAG,
+                    "capture: the lag is ${state.label}: ${fmt(lagCapture.recentMs())} ms, setpoint ${fmt(steer.setpointMs)} ms, goal ${fmt(steer.goalMs)} ms",
+                )
+            }
+            lastSteerState = state
+        }
         val n = controller.readings
         if (lagCapture.isLocked && n > 0 && n % SUMMARY_EVERY_READINGS == 0 && n != lastSummaryReadings) {
             lastSummaryReadings = n
+            val held = if (steer.active && steer.hasSetpoint) steer.setpointMs else lagCapture.targetMs(offset)
             AppLog.add(
                 TAG,
-                "sync (capture): lag ${fmt(lagCapture.recentMs())} ms (held at ${fmt(lagCapture.targetMs(offset))}), " +
+                "sync (capture): lag ${fmt(lagCapture.recentMs())} ms (held at ${fmt(held)}" +
+                    (if (steer.active) ", ${state.label} to ${fmt(steer.goalMs)}, floor ${fmt(steer.floorMs)}" else "") + "), " +
                     "error ${fmt(controller.errorMs)} ms, drift ${fmt(controller.driftPpm)} ppm, " +
                     "trimmed ${controller.trimmedFrames} frames, re-joins $rejoins, round trip ${fmt(lastRttMs)} ms",
             )
         }
+    }
+
+    /**
+     * What the speaker says about a captured stream whose lag is brought down, that means it ran out of audio: it reports buffering,
+     * or a playback error. The steer raises the floor of the lag if it was the one that brought the lag down (see [LagSteer]).
+     */
+    private fun noteCaptureTrouble(p: SonosWs.Position) {
+        val errorAt = ws.lastPlaybackErrorNanos
+        val why = when {
+            SonosPolicy.isStall(p.state) -> "the speaker reports ${p.state}"
+            errorAt != seenPlaybackErrorNanos -> "playbackError ${ws.lastPlaybackError}"
+            else -> null
+        }
+        seenPlaybackErrorNanos = errorAt
+        if (why != null) captureTracker.onSpeakerTrouble(System.nanoTime(), why)
     }
 
     // ---- failed starts -------------------------------------------------------------------------
@@ -1169,6 +1232,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     }
 
     private fun setDevice(d: SonosDevice) {
+        if (device?.udn != d.udn) captureTracker.steer.clearFloor() // the floor is a property of the speaker
         device = d
         reachable = false
         busyElsewhere = false
@@ -1237,6 +1301,9 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             badPolls = 0
             return
         }
+        if (ours && s.isCapture && r.transport == "TRANSITIONING") {
+            captureTracker.onSpeakerTrouble(System.nanoTime(), "the transport is TRANSITIONING")
+        }
         if (!ours && kind == SonosPolicy.Availability.BUSY) {
             AppLog.add(TAG, "the speaker plays something else now (${r.transport}), leaving it alone")
             busyElsewhere = true
@@ -1304,6 +1371,10 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val v = Settings.values
         controller.offsetMs = effectiveOffsetMs()
         if (changed.contains("capture_lead_ms")) captureLead.reset()
+        if (changed.contains("kitchen_target_ms") || changed.contains("kitchen_format")) {
+            // the floor is what this speaker allowed with the target and the format of the time
+            if (captureTracker.steer.clearFloor()) AppLog.add(TAG, "capture: the floor of the lag is forgotten (the target or the format changed)")
+        }
         val sessionNow = session
         if (sessionNow != null && !sessionNow.cancelled) {
             // A stream keeps the format it was made with; a changed setting restarts the kitchen's stream (for the latency measurements).
@@ -1334,7 +1405,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
      */
     private fun effectiveOffsetMs(): Double {
         val offset = Settings.values.kitchenOffsetMs
-        return if (session?.isCapture == true) lagCapture.controllerOffsetMs(offset) else offset.toDouble()
+        return if (session?.isCapture == true) captureTracker.controllerOffsetMs(offset) else offset.toDouble()
     }
 
     /** The Connect volume changed (0 to 65535). */
@@ -1482,16 +1553,31 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         o.put("ws_error", lastWsError.ifEmpty { JSONObject.NULL })
         o.put("ws_description", ws.describe())
         val cs = session?.takeIf { it.isCapture }
-        val offset = Settings.values.kitchenOffsetMs
+        val v = Settings.values
+        val offset = v.kitchenOffsetMs
         val lag = if (cs != null) lagCapture.recentMs() else Double.NaN
+        val target = CaptureTarget.of(v.kitchenTargetMs, v.captureLivingLatencyMs, offset)
+        val steer = captureTracker.steer
         // how far behind the captured moment the kitchen sounds; it includes the kitchen offset, which moves it
         o.put("lag_ms", jsonNumber(round1(lag)))
         // how far ahead of the capture the stream was sent when it began (null for a session that is not a captured one)
         o.put("lead_ms", jsonNumber(round1(if (cs != null) captureAheadMs else Double.NaN)))
-        o.put("lag_target_ms", jsonNumber(round1(if (cs != null) lagCapture.targetMs(offset) else Double.NaN)))
+        // the lag the controller holds now: the setpoint on its way to the target, or where the lag locked (moved by the kitchen offset)
+        val held = if (steer.active && steer.hasSetpoint) steer.setpointMs else lagCapture.targetMs(offset)
+        o.put("lag_target_ms", jsonNumber(round1(if (cs != null) held else Double.NaN)))
         o.put("lag_locked", cs != null && lagCapture.isLocked)
-        // and behind the living room's sound: the same, less the time the living room needs from capture to sound
-        o.put("room_offset_ms", jsonNumber(round1(lag - Settings.values.captureLivingLatencyMs)))
+        // the lag that is wanted (kitchen_target_ms, else capture_living_latency_ms, plus the kitchen offset); null: the lag is left where it locked
+        o.put("target_ms", jsonNumber(round1(target?.ms ?: Double.NaN)))
+        o.put("target_from", target?.source ?: "off")
+        // the lowest lag the speaker has shown it allows, plus 20 ms (null: no trouble yet); kept across streams until the target or format changes
+        o.put("floor_ms", jsonNumber(round1(steer.floorMs)))
+        o.put("floor_events", steer.floorEvents)
+        // where the controller is bringing the lag now, and whether that is still down
+        o.put("setpoint_ms", jsonNumber(round1(if (cs != null) steer.setpointMs else Double.NaN)))
+        o.put("steering", if (cs != null) steer.state().label else "off")
+        o.put("descending", cs != null && steer.descending())
+        // how far the kitchen is from the target (positive: later); without a target from the living room's latency (0 if none), as before
+        o.put("room_offset_ms", jsonNumber(round1(lag - (target?.ms ?: v.captureLivingLatencyMs.toDouble()))))
         o.put("capture_age_at_play_ms", jsonNumber(round1(captureAgeAtPlayMs)))
         o.put("capture_starts", captureStarts)
         o.put("capture_planned_lag_ms", jsonNumber(round1(capturePlannedLagMs)))
@@ -1530,11 +1616,14 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         return o
     }
 
-    /** "  lag 430 ms" while a captured stream is measured, else nothing (for the screen). */
+    /** "  lag 430 ms" while a captured stream is measured, with "to 240" while it is brought to a target, else nothing (for the screen). */
     fun lagText(): String {
         if (session?.isCapture != true) return ""
         val lag = lagCapture.recentMs()
-        return if (lag.isNaN()) "" else "  lag " + Math.round(lag) + " ms"
+        if (lag.isNaN()) return ""
+        val steer = captureTracker.steer
+        val moving = steer.active && steer.hasSetpoint && steer.state().let { it == LagSteer.State.DESCENDING || it == LagSteer.State.ASCENDING }
+        return "  lag " + Math.round(lag) + " ms" + (if (moving) " to " + Math.round(steer.goalMs) else "")
     }
 
     private fun jsonNumber(v: Double): Any = if (v.isNaN() || v.isInfinite()) JSONObject.NULL else v

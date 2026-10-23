@@ -136,4 +136,16 @@ class SonosXmlTest {
         assertNull(SonosPolicy.queueUri(""))
         assertNull(SonosPolicy.queueUri("uuid:something-else"))
     }
+
+    @Test
+    fun aSpeakerThatWaitsForAudioIsBufferingOrTransitioning() {
+        assertTrue(SonosPolicy.isStall("PLAYBACK_STATE_BUFFERING"))
+        assertTrue(SonosPolicy.isStall("TRANSITIONING"))
+        assertTrue(SonosPolicy.isStall("playback_state_buffering"))
+        assertFalse(SonosPolicy.isStall("PLAYBACK_STATE_PLAYING"))
+        assertFalse(SonosPolicy.isStall("PLAYBACK_STATE_IDLE"))
+        assertFalse(SonosPolicy.isStall("PLAYBACK_STATE_PAUSED"))
+        assertFalse(SonosPolicy.isStall("PLAYING"))
+        assertFalse(SonosPolicy.isStall(""))
+    }
 }

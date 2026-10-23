@@ -16,6 +16,10 @@ import io.github.matijasalej.wholeflat.sync.SyncController
  * lag that has gone too far, for too many steps, and for the controller's own reason that is not a step
  * (the kitchen offset was changed by more than it can trim).
  *
+ * With a target lag (the `targetMs` of a reading) the lag is not held where it locked but brought to the target, slowly, by the
+ * [LagSteer]: its setpoint moves toward the target and the controller holds the lag at the setpoint. The steer also learns the
+ * floor, the lowest lag the speaker allows (see [LagSteer]); a step of the lag then is measured against the setpoint.
+ *
  * Plain Kotlin; the Kitchen feeds it and does what the outcome says.
  */
 class CaptureTracker(
@@ -23,6 +27,7 @@ class CaptureTracker(
     val lag: CaptureLag,
     val lead: CaptureLead,
     private val rate: Int,
+    val steer: LagSteer = LagSteer(),
 ) {
     sealed class Outcome {
         /** No usable reading (no mapping yet), or still measuring. */
@@ -51,19 +56,42 @@ class CaptureTracker(
     var expectedMs = Double.NaN
         private set
 
+    /** Called (on the thread of the reading) when trouble of the speaker raised the floor of the lag. */
+    @Volatile
+    var onFloor: ((LagSteer.FloorEvent) -> Unit)? = null
+
     /** A new stream was started, planned to sound [plannedLagMs] after the capture. */
     @Synchronized
     fun startStream(plannedLagMs: Double) {
         lag.reset()
         controller.reset()
+        steer.startStream()
         relocks = 0
         expectedMs = plannedLagMs
     }
 
     /**
+     * The offset that the controller works with: with the steer at work the setpoint (counted from the base of the lag), else the
+     * kitchen [offsetMs] of the settings, which moves the lag that was locked.
+     */
+    fun controllerOffsetMs(offsetMs: Int): Double {
+        val setpoint = steer.setpointMs
+        val base = lag.baseMs
+        return if (steer.active && !setpoint.isNaN() && !base.isNaN()) setpoint - base else lag.controllerOffsetMs(offsetMs)
+    }
+
+    /** The speaker said at [tNanos] that it ran out of audio ([why]); if the lag was brought down to that, the floor is raised. */
+    @Synchronized
+    fun onSpeakerTrouble(tNanos: Long, why: String): LagSteer.FloorEvent? {
+        val event = steer.onUnderrun(tNanos, why)
+        if (event != null) onFloor?.invoke(event)
+        return event
+    }
+
+    /**
      * One reading: at [tNanos] the Sonos reported [positionMs]. [map] and [unappliedBudget] are the stream's,
      * [clock] says when each captured frame was captured, [offsetMs] is the kitchen offset in force and [lkMs]
-     * the delay from Play to the first sound.
+     * the delay from Play to the first sound. [targetMs] is the lag to bring the kitchen to (NaN: hold what it locked).
      */
     @Synchronized
     fun onReading(
@@ -74,25 +102,42 @@ class CaptureTracker(
         clock: CaptureClock,
         offsetMs: Int,
         lkMs: Double,
+        targetMs: Double = Double.NaN,
     ): Outcome {
         val heard = (positionMs - controller.deltaMs) / 1000.0 * rate
         val frame = map.ringOfStream(heard) ?: return Outcome.Waiting
         val captured = clock.nanosOfFrame(Math.round(frame)) ?: return Outcome.Waiting
         val lagMs = (tNanos - captured) / 1e6
+        val ended = steer.setTarget(targetMs)
 
         if (!lag.isLocked) {
             if (!lag.onReading(lagMs, offsetMs)) return Outcome.Waiting
             controller.reset()
-            controller.offsetMs = lag.controllerOffsetMs(offsetMs)
             val locked = lag.locked ?: return Outcome.Waiting
+            if (steer.active) steer.onLock(locked)
+            controller.offsetMs = controllerOffsetMs(offsetMs)
             val expected = expectedMs
-            val raised = lead.onLocked(locked, expected, lkMs, offsetMs)
+            // with a target the lag is brought where it is wanted; what a speaker needs at the start is then no reason to start further ahead
+            val raised = !steer.active && lead.onLocked(locked, expected, lkMs, offsetMs)
             expectedMs = locked
             return Outcome.Locked(locked, expected, raised)
         }
 
+        if (ended) {
+            // the target was switched off while the lag was brought to it: what it is now is measured and held
+            val now = lag.recentMs(RECENT)
+            lag.reset()
+            controller.reset()
+            expectedMs = now
+            return Outcome.Waiting
+        }
+        // the target was switched on, or changed to one that the lag is brought to: it starts from what is held now
+        if (steer.active && !steer.hasSetpoint) steer.onLock(lag.targetMs(offsetMs))
+
         lag.onReading(lagMs, offsetMs)
-        controller.offsetMs = lag.controllerOffsetMs(offsetMs)
+        val floorEvent = steer.onReading(tNanos, lagMs)
+        if (floorEvent != null) onFloor?.invoke(floorEvent)
+        controller.offsetMs = controllerOffsetMs(offsetMs)
         val base = lag.baseNanos()
         val view = StreamView(map, unappliedBudget) { f -> clock.nanosOfFrame(f)?.plus(base) }
         return when (val d = controller.onReading(tNanos, positionMs, view)) {
@@ -104,14 +149,18 @@ class CaptureTracker(
 
     /** The controller wants a restart: is it the lag that moved (measure again), or something a restart is for? */
     private fun decide(reason: String): Outcome {
-        val moved = lag.movedMs(RECENT)
         val now = lag.recentMs(RECENT)
+        // a step is a lag that is far from where it was held: from the setpoint when the lag is steered, else from where it locked
+        val steering = steer.active && steer.hasSetpoint
+        val held = if (steering) steer.setpointMs else (lag.locked ?: now)
+        val moved = if (steering) (if (now.isNaN()) Double.NaN else now - held) else lag.movedMs(RECENT)
         val stepped = !moved.isNaN() && Math.abs(moved) >= MIN_STEP_MS
         if (stepped && now <= MAX_LAG_MS && relocks < MAX_RELOCKS) {
             relocks++
-            val from = lag.locked ?: now
+            val from = held
             lag.reset()
             controller.reset()
+            steer.startLock()
             expectedMs = from
             return Outcome.Relock(from, now)
         }

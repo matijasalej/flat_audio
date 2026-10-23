@@ -341,11 +341,8 @@ class SettingsModel {
         const val DEFAULT_KITCHEN_FLOOR_MS = 316
         const val MIN_KITCHEN_FLOOR_MS = 100
 
-        /**
-         * The mode the app starts in. Synced is the aim; until the TV can be given the lyrics video (the audio-only stream is unreliable live)
-         * the app stays in Lyrics, which changes nothing about the way it has worked so far.
-         */
-        val DEFAULT_MODE = Mode.LYRICS.key
+        /** The mode the app starts in: Synced (the TV plays the lyrics video, the kitchen follows); Lyrics is entered when the TV's own remote leaves the player. */
+        val DEFAULT_MODE = Mode.SYNCED.key
 
         /** `tv_latency_ms` when the usual latency of the stream format is to be used. */
         const val AUTO_TV_LATENCY = -1
@@ -387,12 +384,19 @@ class SettingsModel {
         /**
          * The version of the stored settings. 2: the default of `kitchen_format` became "auto", but every change of
          * any setting had stored all of them, so a stored "flac" is the old default and not a choice (see [migrate]).
+         * 3: the default of `mode` became "synced" (it was "lyrics" until the lyrics video existed, and was stored with every
+         * other change of a setting), and `display` replaced `karaoke` and `ambilight_synced`.
          */
-        const val VERSION = 2
+        const val VERSION = 3
 
         /** Brings settings [stored] by an older [version] up to date (in place). */
         fun migrate(stored: JSONObject, version: Int) {
             if (version < 2 && stored.optString(KITCHEN_FORMAT) == "flac") stored.remove(KITCHEN_FORMAT)
+            if (version < 3) {
+                if (stored.optString(MODE) == Mode.LYRICS.key) stored.remove(MODE)
+                stored.remove("karaoke")
+                stored.remove("ambilight_synced")
+            }
         }
 
         /** Empty, or a host name or address. */

@@ -281,6 +281,25 @@ class SettingsModelTest {
     }
 
     @Test
+    fun aLyricsModeStoredByAnOlderVersionWasTheOldDefaultAndBecomesSynced() {
+        val stored = JSONObject("""{"mode": "lyrics", "karaoke": true, "ambilight_synced": false, "kitchen_offset_ms": 20}""")
+        SettingsModel.migrate(stored, version = 2)
+        val m = SettingsModel()
+        m.applyJson(stored)
+        assertEquals("synced", m.mode)
+        assertEquals(20, m.kitchenOffsetMs)
+        assertEquals("listen", m.display)
+        // a mode of the current version is what the app or the user set
+        val current = JSONObject("""{"mode": "lyrics"}""")
+        SettingsModel.migrate(current, SettingsModel.VERSION)
+        assertEquals("lyrics", current.getString("mode"))
+        // and a synced mode stays
+        val synced = JSONObject("""{"mode": "synced"}""")
+        SettingsModel.migrate(synced, version = 2)
+        assertEquals("synced", synced.getString("mode"))
+    }
+
+    @Test
     fun theFlacBlockTakesTheThreeMeasuredSizesAsNumbersOrText() {
         val m = SettingsModel()
         assertEquals(setOf("kitchen_flac_block"), m.applyJson(JSONObject("""{"kitchen_flac_block": 1152}""")))

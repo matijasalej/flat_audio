@@ -40,10 +40,21 @@ class SceneDrawer(context: Context) {
 
     /** Draws [picture] with what is known of the track in [scene]. */
     fun draw(canvas: Canvas, picture: Picture, scene: TvScene?) {
-        when (picture) {
-            Picture.BLACK -> canvas.drawColor(Color.BLACK)
-            Picture.SPLASH -> splash(canvas, scene?.background ?: CoverColor.DEFAULT)
-            Picture.LYRICS -> if (scene == null) splash(canvas, CoverColor.DEFAULT) else lyrics(canvas, scene)
+        // the design is made for 1920 x 1080; a smaller picture (the setting `tv_video`) is the same design on a smaller canvas
+        val scale = canvas.width.toFloat() / LyricsLayout.W
+        val scaled = canvas.width > 0 && Math.abs(scale - 1f) > 0.001f
+        if (scaled) {
+            canvas.save()
+            canvas.scale(scale, scale)
+        }
+        try {
+            when (picture) {
+                Picture.BLACK -> canvas.drawColor(Color.BLACK)
+                Picture.SPLASH -> splash(canvas, scene?.background ?: CoverColor.DEFAULT)
+                Picture.LYRICS -> if (scene == null) splash(canvas, CoverColor.DEFAULT) else lyrics(canvas, scene)
+            }
+        } finally {
+            if (scaled) canvas.restore()
         }
     }
 

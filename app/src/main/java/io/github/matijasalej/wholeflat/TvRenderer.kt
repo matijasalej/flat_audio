@@ -15,6 +15,7 @@ import io.github.matijasalej.wholeflat.sync.StartBackoff
 import io.github.matijasalej.wholeflat.sync.StreamBuilder
 import io.github.matijasalej.wholeflat.sync.StreamFormat
 import io.github.matijasalej.wholeflat.sync.SyncedTiming
+import io.github.matijasalej.wholeflat.sync.TvVideoSpec
 import io.github.matijasalej.wholeflat.sync.TvDidl
 import io.github.matijasalej.wholeflat.sync.Warmup
 import org.json.JSONArray
@@ -412,7 +413,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         if (wantTs) {
             val p = TvTsPipeline(
                 context, feed, (hold * 1_000_000.0).toLong(), scenes, { Display.of(Settings.values.display) == Display.SCREEN },
-                { Settings.values.let { v -> TvTsPipeline.Params(v.tvBurstMs, v.tvPcrLeadMs, v.tvRender) } },
+                { Settings.values.let { v -> TvTsPipeline.Params(v.tvBurstMs, v.tvPcrLeadMs, v.tvRender, TvVideoSpec.parse(v.tvVideo) ?: TvVideoSpec.DEFAULT) } },
             )
             val err = p.start()
             if (err == null) {
@@ -784,6 +785,9 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             restart("re-anchor: $reason")
         }
     }
+
+    /** The last ten seconds or so of the video as CSV lines (see [TvTsPipeline.framesCsv]); empty if there is no lyrics video. */
+    fun framesCsv(): String = pipeline?.framesCsv() ?: ""
 
     /** A small JPEG of what the picture of the lyrics video shows now; null if there is no lyrics video. */
     fun previewJpeg(): ByteArray? = pipeline?.previewJpeg()

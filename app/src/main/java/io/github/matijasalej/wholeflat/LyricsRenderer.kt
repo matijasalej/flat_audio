@@ -25,7 +25,7 @@ import java.nio.FloatBuffer
  * connected to one way only, so the way is chosen before the first frame and a failure ends the encoder and starts the next way with a
  * new surface (see `TvTsPipeline`). Used by one thread.
  */
-class LyricsRenderer(context: Context, private val surface: Surface, val path: Path) {
+class LyricsRenderer(context: Context, private val surface: Surface, val path: Path, private val width: Int = LyricsLayout.W, private val height: Int = LyricsLayout.H) {
     enum class Path(val key: String) {
         HW("hw"),
         SW("sw"),
@@ -59,10 +59,10 @@ class LyricsRenderer(context: Context, private val surface: Surface, val path: P
 
     init {
         if (path == Path.GL) {
-            val b = Bitmap.createBitmap(LyricsLayout.W, LyricsLayout.H, Bitmap.Config.ARGB_8888)
+            val b = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             bitmap = b
             bitmapCanvas = Canvas(b)
-            gl = GlSink(surface, LyricsLayout.W, LyricsLayout.H)
+            gl = GlSink(surface, width, height)
         }
     }
 

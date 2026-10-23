@@ -34,6 +34,7 @@ class SettingsModelTest {
         assertEquals(700, o.getInt("tv_pcr_lead_ms"))
         assertEquals(0, o.getInt("tv_reanchor_min"))
         assertEquals("auto", o.getString("tv_render"))
+        assertEquals("1080p30 cbr 6000 gop1", o.getString("tv_video"))
         assertEquals(0, o.getInt("lyrics_offset_ms"))
         assertEquals("listen", o.getString("display"))
         assertEquals("FOLLOW_AUDIO", o.getString("ambilight_style"))
@@ -49,7 +50,7 @@ class SettingsModelTest {
                 "tv_screen_off", "tv_wake", "tv_ip",
                 "capture_enabled", "capture_living_latency_ms", "capture_lead_ms", "kitchen_target_ms", "kitchen_floor_ms",
                 "kitchen_volume", "capture_volume_mirror", "kitchen_format", "kitchen_flac_block",
-                "mode", "tv_latency_ms", "tv_format", "tv_burst_ms", "tv_extra_ms", "tv_pcr_lead_ms", "tv_reanchor_min", "tv_render", "lyrics_offset_ms", "display",
+                "mode", "tv_latency_ms", "tv_format", "tv_burst_ms", "tv_extra_ms", "tv_pcr_lead_ms", "tv_reanchor_min", "tv_render", "tv_video", "lyrics_offset_ms", "display",
                 "ambilight_style", "ambilight_menu",
             ),
             keys,
@@ -430,5 +431,19 @@ class SettingsModelTest {
         assertEquals(7, v.kitchenBalance)
         assertEquals("10.0.0.5", v.tvIp)
         assertTrue(v.kitchenEnabled)
+    }
+
+    @Test
+    fun theVideoSettingTakesWhatTheSpecUnderstandsInItsCanonicalFormAndIgnoresTheRest() {
+        val m = SettingsModel()
+        assertEquals(setOf("tv_video"), m.applyJson(JSONObject().put("tv_video", "720p30 VBR 8000")))
+        assertEquals("720p30 vbr 8000 gop1", m.tvVideo)
+        assertEquals("720p30 vbr 8000 gop1", m.toJson().getString("tv_video"))
+        // the same again, and nonsense: nothing changes
+        assertTrue(m.applyJson(JSONObject().put("tv_video", "vbr 8000 720p30")).isEmpty())
+        assertTrue(m.applyJson(JSONObject().put("tv_video", "480p30")).isEmpty())
+        assertTrue(m.applyJson(JSONObject().put("tv_video", "")).isEmpty())
+        assertEquals("720p30 vbr 8000 gop1", m.tvVideo)
+        assertEquals("720p30 vbr 8000 gop1", m.values().tvVideo)
     }
 }

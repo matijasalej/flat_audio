@@ -57,6 +57,8 @@ class SettingsValues(
     val tvReanchorMin: Int,
     /** How the lyrics picture is put on the video encoder: "auto" (hardware canvas, else software canvas, else OpenGL), "hw", "sw" or "gl". */
     val tvRender: String,
+    /** What the lyrics video is made as, as text (see [TvVideoSpec]): the height, the pictures a second, constant or variable bitrate, kbit/s and the time between key pictures. */
+    val tvVideo: String,
     /** Moves the lyrics earlier (positive) or later (negative) against the sound, for what the media session's clock does not tell (ms). */
     val lyricsOffsetMs: Int,
     /** What the TV shows in Synced mode: "listen" (screen off, lights off), "ambilight" (screen off, lights on) or "screen" (the lyrics video, lights on); see [Display]. */
@@ -91,6 +93,7 @@ class SettingsModel {
     var tvPcrLeadMs = DEFAULT_TV_PCR_LEAD_MS
     var tvReanchorMin = 0
     var tvRender = TV_RENDER_AUTO
+    var tvVideo = TvVideoSpec.DEFAULT.text()
     var lyricsOffsetMs = 0
     var display = Display.DEFAULT.key
     var ambilightStyle = DEFAULT_AMBILIGHT_STYLE
@@ -100,7 +103,7 @@ class SettingsModel {
     fun values(): SettingsValues = SettingsValues(
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
-        captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPcrLeadMs, tvReanchorMin, tvRender, lyricsOffsetMs, display,
+        captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
         ambilightStyle, ambilightMenu,
     )
 
@@ -130,6 +133,7 @@ class SettingsModel {
         o.put(TV_PCR_LEAD_MS, tvPcrLeadMs)
         o.put(TV_REANCHOR_MIN, tvReanchorMin)
         o.put(TV_RENDER, tvRender)
+        o.put(TV_VIDEO, tvVideo)
         o.put(LYRICS_OFFSET_MS, lyricsOffsetMs)
         o.put(DISPLAY, display)
         o.put(AMBILIGHT_STYLE, ambilightStyle)
@@ -247,6 +251,11 @@ class SettingsModel {
             val t = json.get(TV_RENDER).toString().trim().lowercase()
             if (t in TV_RENDERS && t != tvRender) { tvRender = t; changed.add(TV_RENDER) }
         }
+        if (json.has(TV_VIDEO)) {
+            // anything that is not understood (see TvVideoSpec) is ignored; what is understood is stored in its canonical form
+            val v = TvVideoSpec.parse(json.get(TV_VIDEO).toString())?.text()
+            if (v != null && v != tvVideo) { tvVideo = v; changed.add(TV_VIDEO) }
+        }
         if (json.has(LYRICS_OFFSET_MS)) {
             val v = number(json.get(LYRICS_OFFSET_MS))?.coerceIn(-MAX_LYRICS_OFFSET_MS, MAX_LYRICS_OFFSET_MS)
             if (v != null && v != lyricsOffsetMs) { lyricsOffsetMs = v; changed.add(LYRICS_OFFSET_MS) }
@@ -312,6 +321,7 @@ class SettingsModel {
         const val TV_PCR_LEAD_MS = "tv_pcr_lead_ms"
         const val TV_REANCHOR_MIN = "tv_reanchor_min"
         const val TV_RENDER = "tv_render"
+        const val TV_VIDEO = "tv_video"
         const val LYRICS_OFFSET_MS = "lyrics_offset_ms"
         const val DISPLAY = "display"
         const val AMBILIGHT_STYLE = "ambilight_style"

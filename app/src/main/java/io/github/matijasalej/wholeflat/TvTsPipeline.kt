@@ -18,6 +18,7 @@ import io.github.matijasalej.wholeflat.sync.TsHistory
 import io.github.matijasalej.wholeflat.sync.TsMuxer
 import io.github.matijasalej.wholeflat.sync.TsWriter
 import io.github.matijasalej.wholeflat.sync.TvPicture
+import io.github.matijasalej.wholeflat.sync.TvVideoSpec
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.CountDownLatch
@@ -56,14 +57,18 @@ class TvTsPipeline(
     private val showLyrics: () -> Boolean,
     private val params: () -> Params,
 ) : TsFeed {
-    class Params(val burstMs: Int, val pcrLeadMs: Int, val render: String)
+    class Params(val burstMs: Int, val pcrLeadMs: Int, val render: String, val video: TvVideoSpec = TvVideoSpec.DEFAULT)
 
     /** What [goLive] decided: the first capture frame of the music and when it is written to the TV. */
     class LiveInfo(val firstFrame: Long, val dueNanos: Long)
 
-    override val history = TsHistory(HISTORY_BYTES, HISTORY_NANOS)
+    /** What the video is made as (the setting `tv_video`), fixed for the life of the stream. */
+    private val spec = params().video
+    private val frameNanos = 1_000_000_000L / spec.fps
+
+    override val history = TsHistory(maxOf(HISTORY_BYTES, spec.muxRate / 8L * 14), HISTORY_NANOS)
     private val rate = feed.rate
-    private val mux = TsMuxer()
+    private val mux = TsMuxer(muxRate = spec.muxRate)
     private val writer = TsWriter(mux, history) { t -> slotOf(t) }
 
     @Volatile
@@ -339,12 +344,13 @@ class TvTsPipeline(
         var consecutiveFailures = 0
         try {
             while (running) {
-                val w = t0 + n * FRAME_NANOS
+                val w = t0 + n * frameNanos
                 if (!sleepUntil(w)) break
                 val now = System.nanoTime()
-                if (now - w > 4 * FRAME_NANOS) {
+                wakeLateMs = (now - w) / 1e6
+                if (now - w > 4 * frameNanos) {
                     // far behind (a stall): the frames that could not be drawn in time are not drawn late
-                    val skipped = (now - w) / FRAME_NANOS
+                    val skipped = (now - w) / frameNanos
                     skippedFrames.addAndGet(skipped)
                     n += skipped + 1
                     continue
@@ -387,10 +393,10 @@ class TvTsPipeline(
     }
 
     private fun startVideoChain(path: LyricsRenderer.Path) {
-        val enc = TvVideoEncoder(LyricsLayout.W, LyricsLayout.H, FPS, VIDEO_BITRATE) { au, ptsUs, key -> onVideoFrame(au, ptsUs, key) }
+        val enc = TvVideoEncoder(spec) { au, ptsUs, key -> onVideoFrame(au, ptsUs, key) }
         val surface = enc.start()
         venc = enc
-        val r = LyricsRenderer(context, surface, path)
+        val r = LyricsRenderer(context, surface, path, spec.width, spec.height)
         renderer = r
         // the first picture proves that the way works: the splash, as the stream begins
         renderFrame(System.nanoTime() - holdNanos + VIDEO_LATENCY_NANOS, Picture.SPLASH)
@@ -413,6 +419,35 @@ class TvTsPipeline(
         val scene = if (pic == Picture.BLACK) null else scenes.scene(captureNanos)
         val stamp = r.render(pic, scene, System.nanoTime())
         labels.add(stamp, captureNanos, pts)
+        synchronized(drawn) {
+            drawn.addLast(Drawn(stamp / 1_000_000L, stamp / 1000L, r.lastRenderMs, wakeLateMs))
+            while (drawn.size > RECENT_DRAWN) drawn.removeFirst()
+        }
+    }
+
+    /** One picture drawn: when it was put on the surface (ms of System.nanoTime) and its time for the encoder (us), how long drawing took, and how late the loop woke for it (ms). */
+    private class Drawn(val wallMs: Long, val stampUs: Long, val drawMs: Double, val lateMs: Double)
+
+    private val drawn = java.util.ArrayDeque<Drawn>()
+
+    @Volatile
+    private var wakeLateMs = 0.0
+
+    /**
+     * The last ten seconds or so of the video as CSV lines, for a look at where a scroll goes wrong: `draw,wall_ms,stamp_us,draw_ms,late_ms`
+     * for every picture drawn (late: how long after its time the loop woke) and `enc,wall_ms,pts_us,bytes,key,encode_ms` for every picture the
+     * encoder gave (encode: from the stamp of the picture to its bytes). The pts of an `enc` line is the stamp of a `draw` line.
+     */
+    fun framesCsv(): String {
+        val sb = StringBuilder()
+        synchronized(drawn) {
+            for (d in drawn) {
+                sb.append("draw,").append(d.wallMs).append(',').append(d.stampUs).append(',')
+                    .append(String.format(java.util.Locale.US, "%.1f,%.1f", d.drawMs, d.lateMs)).append('\n')
+            }
+        }
+        sb.append(venc?.recentCsv() ?: "")
+        return sb.toString()
     }
 
     private fun onVideoFrame(au: ByteArray, ptsUs: Long, key: Boolean) {
@@ -425,7 +460,7 @@ class TvTsPipeline(
         } else {
             // a picture that was not drawn by us (the encoder repeated one): it follows the last
             unlabeledFrames.incrementAndGet()
-            pts = (if (lastVideoPtsOut == Long.MIN_VALUE) PTS_BASE else lastVideoPtsOut) + 3003
+            pts = (if (lastVideoPtsOut == Long.MIN_VALUE) PTS_BASE else lastVideoPtsOut) + spec.frameTicks
             due = System.nanoTime()
         }
         if (pts <= lastVideoPtsOut) return // never two pictures with one time
@@ -489,9 +524,8 @@ class TvTsPipeline(
             val scene = if (pic == Picture.BLACK) null else scenes.scene(c)
             val bmp = Bitmap.createBitmap(LyricsLayout.W / 2, LyricsLayout.H / 2, Bitmap.Config.ARGB_8888)
             synchronized(previewDrawer) {
-                val canvas = Canvas(bmp)
-                canvas.scale(0.5f, 0.5f)
-                previewDrawer.draw(canvas, pic, scene)
+                // the drawer scales the 1920 x 1080 design to the canvas it is given
+                previewDrawer.draw(Canvas(bmp), pic, scene)
             }
             val out = ByteArrayOutputStream()
             bmp.compress(Bitmap.CompressFormat.JPEG, 82, out)
@@ -512,6 +546,7 @@ class TvTsPipeline(
         o.put("running", running)
         o.put("live", live)
         o.put("picture", picture.key)
+        o.put("video_spec", spec.text())
         o.put("video_encoder", v?.name ?: JSONObject.NULL)
         o.put("video_profile", v?.profile ?: JSONObject.NULL)
         o.put("audio_encoder", aenc?.name ?: JSONObject.NULL)
@@ -550,9 +585,6 @@ class TvTsPipeline(
 
     companion object {
         private const val TAG = "tvvideo"
-        const val FPS = 30
-        private const val FRAME_NANOS = 1_000_000_000L / FPS
-        const val VIDEO_BITRATE = 6_000_000
 
         /** The ring holds the last 12 s or 16 MB of the stream (9 Mbit/s is 1.1 MB a second); a connection starts up to 2.5 s back. */
         private const val HISTORY_BYTES = 16L shl 20
@@ -570,6 +602,7 @@ class TvTsPipeline(
         private const val VIDEO_LATENCY_NANOS = 100_000_000L
         private const val WARMUP_IDR_EVERY_NANOS = 200_000_000L
         private const val STATS_EVERY_NANOS = 5_000_000_000L
+        private const val RECENT_DRAWN = 600
         private const val START_WAIT_S = 10L
     }
 }

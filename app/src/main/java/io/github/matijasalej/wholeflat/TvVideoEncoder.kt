@@ -6,10 +6,12 @@ import android.media.MediaFormat
 import android.os.Bundle
 import android.view.Surface
 import io.github.matijasalej.wholeflat.sync.H264
+import io.github.matijasalej.wholeflat.sync.TvVideoSpec
 
 /**
- * The H.264 encoder of the lyrics video: 1920 x 1080 at 30 frames a second from the input surface (the pictures are drawn on it), High
- * profile if the encoder has it (else Main, else what it gives), constant bitrate about 6 Mbit/s (the transport stream is padded to 9 Mbit/s around it), an IDR picture every second, no
+ * The H.264 encoder of the lyrics video: the size, the rate of pictures, the bitrate and its mode, and the time between IDR pictures of
+ * the [TvVideoSpec] (the setting `tv_video`; by default 1920 x 1080 at 30 frames a second, constant bitrate 6 Mbit/s, an IDR picture every
+ * second), from the input surface (the pictures are drawn on it), High profile if the encoder has it (else Main, else what it gives), no
  * B-frames, the lowest latency the encoder offers, and the previous picture repeated if no new one comes for 100 ms. The hardware
  * encoder of this box is `c2.amlogic.avc.encoder` (tried first, then whatever makes `video/avc`).
  *
@@ -17,12 +19,14 @@ import io.github.matijasalej.wholeflat.sync.H264
  * time the picture was put on the surface (microseconds, System.nanoTime based) and whether the encoder calls it a key picture.
  */
 class TvVideoEncoder(
-    private val width: Int,
-    private val height: Int,
-    private val fps: Int,
-    private val bitrate: Int,
+    private val spec: TvVideoSpec,
     private val onFrame: (ByteArray, Long, Boolean) -> Unit,
 ) {
+    private val width = spec.width
+    private val height = spec.height
+    private val fps = spec.fps
+    private val bitrate = spec.bitrate
+
     private var codec: MediaCodec? = null
     private var drain: Thread? = null
 
@@ -74,6 +78,31 @@ class TvVideoEncoder(
 
     private var latencySum = 0.0
     private var latencyCount = 0L
+    private var lastSlowLogNanos = 0L
+
+    /** What the encoder gave for each of the last pictures, for a look at a scroll: when it came (ms of System.nanoTime), the time of the picture (us), its size, whether it is a key picture, and the time from the picture to its bytes (ms). */
+    private class Out(val wallMs: Long, val ptsUs: Long, val bytes: Int, val key: Boolean, val latencyMs: Double)
+
+    private val recent = java.util.ArrayDeque<Out>()
+
+    private fun record(wallMs: Long, ptsUs: Long, bytes: Int, key: Boolean, latencyMs: Double) {
+        synchronized(recent) {
+            recent.addLast(Out(wallMs, ptsUs, bytes, key, latencyMs))
+            while (recent.size > RECENT_FRAMES) recent.removeFirst()
+        }
+    }
+
+    /** The pictures that came out last as CSV lines `enc,wall_ms,pts_us,bytes,key,encode_ms` (about the last 20 s). */
+    fun recentCsv(): String {
+        val sb = StringBuilder()
+        synchronized(recent) {
+            for (o in recent) {
+                sb.append("enc,").append(o.wallMs).append(',').append(o.ptsUs).append(',').append(o.bytes).append(',').append(if (o.key) 1 else 0).append(',')
+                    .append(String.format(java.util.Locale.US, "%.1f", o.latencyMs)).append('\n')
+            }
+        }
+        return sb.toString()
+    }
 
     val latencyAvgMs: Double get() = if (latencyCount == 0L) 0.0 else latencySum / latencyCount
 
@@ -94,7 +123,7 @@ class TvVideoEncoder(
                     it.isDaemon = true
                     it.start()
                 }
-                AppLog.add(TAG, "video encoder $name, ${variant.label}, ${width}x$height at $fps fps, ${bitrate / 1000} kbit/s constant, an IDR every second")
+                AppLog.add(TAG, "video encoder $name, ${variant.label}, ${width}x$height at $fps fps, ${bitrate / 1000} kbit/s ${spec.mode.key}, an IDR every ${spec.gopS} s (asked for: $spec)")
                 return surface
             } catch (t: Throwable) {
                 failure = t
@@ -132,8 +161,15 @@ class TvVideoEncoder(
         f.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
         f.setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
         f.setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-        f.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-        f.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+        f.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, spec.gopS)
+        f.setInteger(
+            MediaFormat.KEY_BITRATE_MODE,
+            when (spec.mode) {
+                TvVideoSpec.Mode.CBR -> MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+                TvVideoSpec.Mode.VBR -> MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR
+                TvVideoSpec.Mode.CQ -> MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ
+            },
+        )
         f.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
         f.setInteger(MediaFormat.KEY_LATENCY, 1)
         f.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, REPEAT_AFTER_US)
@@ -179,7 +215,13 @@ class TvVideoEncoder(
                                 bytesOut += bytes.size
                                 val key = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
                                 if (key) keyFramesOut++
-                                noteLatency((arrived - info.presentationTimeUs * 1000L) / 1e6)
+                                val latency = (arrived - info.presentationTimeUs * 1000L) / 1e6
+                                noteLatency(latency)
+                                if (latency > SLOW_MS && latency < 2_000 && arrived - lastSlowLogNanos > 2_000_000_000L) {
+                                    lastSlowLogNanos = arrived
+                                    AppLog.add(TAG, "a picture took ${latency.toLong()} ms to come out of the encoder (${bytes.size} bytes${if (key) ", a key picture" else ""}, ${syncRequests} sync requests so far)")
+                                }
+                                record(arrived / 1_000_000L, info.presentationTimeUs, bytes.size, key, latency)
                                 onFrame(bytes, info.presentationTimeUs, key)
                             }
                         }
@@ -228,6 +270,10 @@ class TvVideoEncoder(
     private companion object {
         const val TAG = "tvvideo"
         const val REPEAT_AFTER_US = 100_000L
+        const val RECENT_FRAMES = 600
+
+        /** A picture that takes longer than this to come out of the encoder is put in the log (ms). */
+        const val SLOW_MS = 150.0
         val PREFERRED = listOf("c2.amlogic.avc.encoder")
         val VARIANTS = listOf(
             Variant("High", MediaCodecInfo.CodecProfileLevel.AVCProfileHigh, MediaCodecInfo.CodecProfileLevel.AVCLevel41),

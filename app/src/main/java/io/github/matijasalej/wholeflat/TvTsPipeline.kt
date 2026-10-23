@@ -487,6 +487,8 @@ class TvTsPipeline(
         var lastFrames = 0L
         var lastEncoded = 0L
         var lastNulls = 0L
+        var lastShort = 0L
+        var starvedPeriods = 0
         var lastSlewNanos = 0L
         while (running) {
             val now = System.nanoTime()
@@ -512,6 +514,15 @@ class TvTsPipeline(
                     history.heldBytes / 1024, shortBlocks.get(), unlabeledFrames.get(), skippedFrames.get(), slew.adjustMs, if (live) "live" else "warming up",
                 )
                 AppLog.add(TAG, lastStats)
+                // A stream whose clock runs ahead of the capture's (the capture slower than the system clock by more than the clock follows)
+                // meets frames that do not exist yet, block after block. A hiccup of the capture is a few blocks; this is the stream starved.
+                val shortNow = shortBlocks.get()
+                if (live && shortNow - lastShort >= STARVED_BLOCKS) starvedPeriods++ else starvedPeriods = 0
+                lastShort = shortNow
+                if (starvedPeriods >= 2 && captureTrouble == null) {
+                    captureTrouble = "the stream is ahead of the capture ($shortNow short audio blocks so far)"
+                    AppLog.add(TAG, "$captureTrouble: it is made again")
+                }
                 lastLog = now
                 lastBytes = writer.bytes
                 lastFrames = frames
@@ -621,6 +632,9 @@ class TvTsPipeline(
         private const val WARMUP_IDR_EVERY_NANOS = 200_000_000L
         private const val STATS_EVERY_NANOS = 5_000_000_000L
         private const val RECENT_DRAWN = 600
+
+        /** Short audio blocks in one statistics period (5 s, about 215 blocks) that mean the stream has run out of frames. */
+        private const val STARVED_BLOCKS = 40
         private const val START_WAIT_S = 10L
     }
 }

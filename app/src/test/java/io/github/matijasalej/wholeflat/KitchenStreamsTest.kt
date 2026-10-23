@@ -109,4 +109,17 @@ class KitchenStreamsTest {
         assertEquals(4096, builder.nextBlock(0))
         assertEquals(4096L, builder.streamFrames)
     }
+
+    @Test
+    fun theTrimsOfACapturedStreamAreTwiceAsFastAsSpotifysButStayUnderAHalfPercent() {
+        val ring = KitchenStreams.trimSpacing(44_100, captured = false)
+        val captured = KitchenStreams.trimSpacing(44_100, captured = true)
+        assertEquals(441, ring)
+        assertEquals(220, captured)
+        // a trim drops or repeats one frame per spacing: the correction in ms per second, and the speed change it makes
+        fun msPerSecond(spacing: Int) = 1000.0 * 44_100 / (spacing + 1) / 44_100
+        assertEquals(2.26, msPerSecond(ring), 0.01)
+        assertEquals(4.52, msPerSecond(captured), 0.01)
+        assertTrue("at most 5 ms/s and 0.5 %", msPerSecond(captured) <= 5.0 && msPerSecond(captured) / 1000.0 <= 0.005)
+    }
 }

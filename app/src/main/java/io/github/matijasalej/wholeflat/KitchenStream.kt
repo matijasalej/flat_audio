@@ -303,6 +303,13 @@ object KitchenStreams {
         "transferMode.dlna.org: Streaming\r\n" +
         "Server: WholeFlat\r\n\r\n"
 
+    /**
+     * The frames between two trims of a stream (a trim is one frame dropped or repeated): 10 ms for Spotify's, which is up to
+     * 2.3 ms of correction per second; 5 ms for a captured one, up to 4.5 ms per second, which is a speed change of the kitchen
+     * of 0.45 %, the most that the lag steering of the capture mode (`kitchen_target_ms`) lets itself use.
+     */
+    fun trimSpacing(rate: Int, captured: Boolean): Int = if (captured) rate / 200 else rate / 100
+
     /** The headers of a stream of [format]; the same for a GET and a HEAD. */
     fun responseHead(format: StreamFormat): String = if (format == StreamFormat.WAV) RESPONSE_HEAD_WAV else RESPONSE_HEAD
 
@@ -402,8 +409,7 @@ object KitchenStreams {
             else -> ProbeSource(frames)
         }
         val map = KitchenMap(maxOf(0L, startFrame))
-        // a trim is at most one frame per 10 ms
-        val builder = StreamBuilder(source, map, session.channels, blockFrames = blockFrames, trimSpacing = rate / 100)
+        val builder = StreamBuilder(source, map, session.channels, blockFrames = blockFrames, trimSpacing = trimSpacing(rate, capture != null))
         val active = ActiveStream(connectionId, map, builder, began)
         // A captured stream after Play is not paced: its frames exist only as they are captured, so the reads wait for them.
         val lead = LEAD_FRAMES * rate / KitchenSession.RING_RATE

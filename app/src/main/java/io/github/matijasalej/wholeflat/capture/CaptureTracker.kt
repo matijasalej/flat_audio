@@ -119,6 +119,19 @@ class CaptureTracker(
     }
 
     companion object {
+        /**
+         * The controller of a captured stream (the kitchen's and the tests' alike): a little more tolerant than the living room's,
+         * because the reads that the lag is measured against are 10 ms apart and only hold it where it is told to; it gives up
+         * (a re-join, or measuring the lag again) at 60 ms for five readings.
+         */
+        fun controllerParams(rate: Int) = SyncController.Params(
+            rejoinThresholdMs = 60.0,
+            rejoinReadings = 5,
+            deadbandMs = 5.0,
+            maxPendingFrames = 2_400,
+            rate = rate,
+        )
+
         /** The readings that say what the lag is now (1 s), as opposed to the whole window. */
         const val RECENT = 5
 

@@ -8,6 +8,7 @@ import io.github.matijasalej.wholeflat.capture.CaptureLead
 import io.github.matijasalej.wholeflat.capture.CaptureStart
 import io.github.matijasalej.wholeflat.capture.CaptureTracker
 import io.github.matijasalej.wholeflat.capture.SourceArbiter
+import io.github.matijasalej.wholeflat.sync.PlayDelays
 import io.github.matijasalej.wholeflat.sync.SessionHistory
 import io.github.matijasalej.wholeflat.sync.SonosPolicy
 import io.github.matijasalej.wholeflat.sync.SonosXml
@@ -75,18 +76,10 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     private val ringController = SyncController()
 
     /**
-     * The captured stream has the capture's sample rate, and its time stamps are looser than the living room's (the reads are 20 ms
-     * apart), so the controller is a little more tolerant: it only has to hold the lag constant.
+     * The captured stream has the capture's sample rate, and its time stamps are looser than the living room's (the reads are 10 ms
+     * apart), so the controller is a little more tolerant: it only has to hold the lag where it is told to.
      */
-    private val captureController = SyncController(
-        SyncController.Params(
-            rejoinThresholdMs = 60.0,
-            rejoinReadings = 5,
-            deadbandMs = 8.0,
-            maxPendingFrames = 2_400,
-            rate = CaptureFeed.RATE,
-        ),
-    )
+    private val captureController = SyncController(CaptureTracker.controllerParams(CaptureFeed.RATE))
 
     @Volatile
     private var controller = ringController
@@ -134,8 +127,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     @Volatile
     private var pausedOnSpeakerToken: String? = null
 
-    @Volatile
-    private var lkNanos = DEFAULT_LK_NANOS
+    /** The delay from Play to the first sound, by stream format. */
+    private val delays = PlayDelays()
 
     @Volatile
     private var lastVolumeRaw = -1
@@ -355,7 +348,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             advices[epoch] = StartAdvice.Alone
             return
         }
-        val s = KitchenSession(newToken(), epoch, kind, startFrame, channelsFor(kind), format = streamFormat(), flacBlock = v.kitchenFlacBlock)
+        val s = KitchenSession(newToken(), epoch, kind, startFrame, channelsFor(kind), format = streamFormat(capture = false), flacBlock = v.kitchenFlacBlock)
         val host = Net.localAddressFor(dev.ip)
         if (host == null) {
             advices[epoch] = StartAdvice.Alone
@@ -372,7 +365,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             advices[epoch] = StartAdvice.Alone
             return
         }
-        advices[epoch] = StartAdvice.Ready(lkNanos, v.kitchenOffsetMs * 1_000_000L)
+        advices[epoch] = StartAdvice.Ready(delays.nanos(s.format), v.kitchenOffsetMs * 1_000_000L)
     }
 
     private fun doCommit(epoch: Long, plan: StartPlanner.Plan) {
@@ -477,7 +470,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         // a captured stream is placed now, at the moment of Play: its lead is counted back from the newest frame of this very instant
         if (s.isCapture && !replanCapture(s, tSent)) return
         s.record?.playSent(tSent)
-        s.arm(tSent + lkNanos)
+        val lk = delays.nanos(s.format)
+        s.arm(tSent + lk)
         var result = api.play()
         var attempts = 1
         while (!result.ok && result.upnpError == 701 && attempts < 3 && !s.cancelled) {
@@ -492,7 +486,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         }
         post("after play") { afterPlay(s) }
         // the first sound is lk after Play; unmute 30 ms before it
-        val unmuteAt = tSent + lkNanos - UNMUTE_LEAD_NANOS
+        val unmuteAt = tSent + lk - UNMUTE_LEAD_NANOS
         while (System.nanoTime() < unmuteAt && !s.cancelled) sleepQuietly(5)
         synchronized(muteLock) {
             if (!s.cancelled) {
@@ -540,7 +534,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val meta = RingMeta()
         if (NativeBridge.ringState(meta.a) != 0 || !meta.playing || meta.startPending) return false
         val host = Net.localAddressFor(dev.ip) ?: return false
-        val s = KitchenSession(newToken(), meta.epoch, meta.kind, -1L, channelsFor(meta.kind), format = streamFormat(), flacBlock = v.kitchenFlacBlock)
+        val s = KitchenSession(newToken(), meta.epoch, meta.kind, -1L, channelsFor(meta.kind), format = streamFormat(capture = false), flacBlock = v.kitchenFlacBlock)
         s.uri = streamUri(host, s)
         registerSession(s)
         currentEpoch = meta.epoch
@@ -552,7 +546,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         // the frame the living room plays when the kitchen's first sound arrives
         val offsetNanos = v.kitchenOffsetMs * 1_000_000L
         val tCmd = System.nanoTime() + HOT_JOIN_LEAD_NANOS
-        val frame = StartPlanner.hotJoinFrame(living.timeline, tCmd, lkNanos, offsetNanos)
+        val frame = StartPlanner.hotJoinFrame(living.timeline, tCmd, delays.nanos(s.format), offsetNanos)
         val fresh = RingMeta()
         val ringOk = NativeBridge.ringState(fresh.a) == 0 && fresh.epoch == meta.epoch && !fresh.startPending
         if (frame == null || !ringOk || frame < fresh.validStart + JOIN_MARGIN_FRAMES || frame > fresh.writeIdx) {
@@ -645,11 +639,11 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             s.healthy = true
             backoff.onHealthy()
         }
+        if (s.playingReadings == LEARN_LK_AT) learnLk(s, clock.startNanos)
         if (s.isCapture) {
             handleCaptureReading(s, stream, clock.startNanos, tMid, p.positionMs)
             return
         }
-        if (s.playingReadings == LEARN_LK_AT) learnLk(s, clock.startNanos)
         if (onJoinedPending && s.playingReadings >= 2) {
             onJoinedPending = false
             AppLog.add(TAG, "kitchen connected")
@@ -678,16 +672,16 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
 
     private fun fmt(v: Double): String = if (v.isNaN()) "-" else String.format(Locale.US, "%.1f", v)
 
-    /** The measured delay from Play to the first sound, as it came out of the readings, smoothed over the starts. */
+    /** The measured delay from Play to the first sound of this stream's format, as it came out of the readings, smoothed over the starts. */
     private fun learnLk(s: KitchenSession, observedStartNanos: Long) {
         val observed = observedStartNanos - s.playSentNanos
-        if (observed < MIN_LK_NANOS || observed > MAX_LK_NANOS) {
+        val before = delays.nanos(s.format)
+        val now = delays.learn(s.format, observed)
+        if (now == null) {
             AppLog.add(TAG, "Play to sound looks like ${observed / 1_000_000L} ms, not used")
             return
         }
-        val before = lkNanos
-        lkNanos = (before * 0.6 + observed * 0.4).toLong()
-        AppLog.add(TAG, "Play to sound: ${observed / 1_000_000L} ms (was ${before / 1_000_000L}, now ${lkNanos / 1_000_000L})")
+        AppLog.add(TAG, "Play to sound (${s.format.key}): ${observed / 1_000_000L} ms (was ${before / 1_000_000L}, now ${now / 1_000_000L})")
     }
 
     /**
@@ -812,7 +806,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             val host = Net.localAddressFor(dev.ip) ?: return false
             s = KitchenSession(
                 newToken(), CAPTURE_EPOCH, KIND_CAPTURE, -1L, StreamBuilder.ChannelMode.STEREO, feed, feed.generation,
-                format = streamFormat(), flacBlock = v.kitchenFlacBlock,
+                format = streamFormat(capture = true), flacBlock = v.kitchenFlacBlock,
             )
             s.uri = streamUri(host, s)
             registerSession(s)
@@ -826,7 +820,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     }
 
     /** The plan for a captured stream that Play is sent for at [tNanos]: where it begins and how far behind the capture it is expected to sound. */
-    private fun capturePlan(feed: CaptureFeed, tNanos: Long): CaptureStart.Plan {
+    private fun capturePlan(feed: CaptureFeed, tNanos: Long, format: StreamFormat): CaptureStart.Plan {
         val v = Settings.values
         return CaptureStart.plan(
             nowFrame = feed.frameAtReadClock(tNanos),
@@ -835,7 +829,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             rate = feed.rate,
             leadMs = captureLead.effectiveMs(v.captureLeadMs),
             offsetMs = v.kitchenOffsetMs,
-            lkMs = lkNanos / 1e6,
+            lkMs = delays.ms(format),
         )
     }
 
@@ -849,7 +843,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         }
         val tCmd = System.nanoTime() + CAPTURE_PLAY_LEAD_NANOS
         // the plan is made again at the moment Play is sent (see [replanCapture]); this one marks the session as started
-        val plan = capturePlan(feed, tCmd)
+        val plan = capturePlan(feed, tCmd, s.format)
         s.startRingFrame = plan.startFrame
         capturePlannedLagMs = plan.plannedLagMs
         captureAheadMs = plan.aheadFrames * 1000.0 / feed.rate
@@ -873,7 +867,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             post("capture changed") { if (session === s) endSession(s, "the capture started again", true) }
             return false
         }
-        val plan = capturePlan(feed, tSent)
+        val plan = capturePlan(feed, tSent, s.format)
         s.startRingFrame = plan.startFrame
         capturePlannedLagMs = plan.plannedLagMs
         captureAheadMs = plan.aheadFrames * 1000.0 / feed.rate
@@ -905,7 +899,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         if (feed.generation != s.captureGeneration) return // the session is about to end
         val offset = Settings.values.kitchenOffsetMs
         val outcome = captureTracker.onReading(
-            tMid, positionMs, stream.map, { stream.builder.unappliedBudget() }, feed.clock, offset, lkNanos / 1e6,
+            tMid, positionMs, stream.map, { stream.builder.unappliedBudget() }, feed.clock, offset, delays.ms(s.format),
         )
         when (outcome) {
             is CaptureTracker.Outcome.Locked -> {
@@ -1313,7 +1307,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val sessionNow = session
         if (sessionNow != null && !sessionNow.cancelled) {
             // A stream keeps the format it was made with; a changed setting restarts the kitchen's stream (for the latency measurements).
-            val formatChanged = changed.contains("kitchen_format") && sessionNow.format.key != v.kitchenFormat
+            val formatChanged = changed.contains("kitchen_format") && sessionNow.format != StreamFormat.resolve(v.kitchenFormat, sessionNow.isCapture)
             val blockChanged = changed.contains("kitchen_flac_block") && sessionNow.format == StreamFormat.FLAC && sessionNow.flacBlock != v.kitchenFlacBlock
             if (formatChanged || blockChanged) {
                 lastRejoinNanos = 0L
@@ -1412,8 +1406,11 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
 
     private fun newToken(): String = UUID.randomUUID().toString().replace("-", "").substring(0, 12)
 
-    /** The format of the streams that are made now (the setting `kitchen_format`; a session keeps the one it was made with). */
-    private fun streamFormat(): StreamFormat = StreamFormat.of(Settings.values.kitchenFormat) ?: StreamFormat.FLAC
+    /**
+     * The format of the streams that are made now (the setting `kitchen_format`: with "auto" a captured stream is WAV and
+     * Spotify's is FLAC; a session keeps the one it was made with).
+     */
+    private fun streamFormat(capture: Boolean): StreamFormat = StreamFormat.resolve(Settings.values.kitchenFormat, capture)
 
     /** Where the speaker finds a session's stream: the extension tells the format. */
     private fun streamUri(host: String, s: KitchenSession): String = "http://$host:${DebugServer.PORT}/k/${s.token}.${s.format.ext}"
@@ -1454,7 +1451,10 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         w.put("group", ws.groupId)
         w.put("last_error", ws.lastError ?: JSONObject.NULL)
         o.put("websocket", w)
-        o.put("lk_ms", lkNanos / 1e6)
+        val sessionFormat = session?.format ?: streamFormat(arbiter.source == SourceArbiter.Source.CAPTURE)
+        o.put("lk_ms", delays.ms(sessionFormat))
+        o.put("lk_flac_ms", delays.ms(StreamFormat.FLAC))
+        o.put("lk_wav_ms", delays.ms(StreamFormat.WAV))
         o.put("offset_ms", controller.offsetMs)
         o.put("error_ms", jsonNumber(controller.errorMs))
         o.put("raw_error_ms", jsonNumber(controller.rawErrorMs))
@@ -1472,6 +1472,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         o.put("play_failures", playFailures)
         o.put("source", arbiter.source.label)
         o.put("format", Settings.values.kitchenFormat)
+        o.put("format_capture", streamFormat(capture = true).key)
+        o.put("format_ring", streamFormat(capture = false).key)
         o.put("flac_block", Settings.values.kitchenFlacBlock)
         o.put("failed_starts", backoff.failures)
         o.put("start_failures_total", startFailuresTotal)
@@ -1557,10 +1559,6 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         private const val SEARCH_OFFLINE_EVERY_NANOS = 30_000_000_000L
         private const val WS_RECONNECT_NANOS = 3_000_000_000L
 
-        /** Typical Play-to-sound delay, measured 0.288 s +- 14 ms; learned per run after that. */
-        private const val DEFAULT_LK_NANOS = 290_000_000L
-        private const val MIN_LK_NANOS = 100_000_000L
-        private const val MAX_LK_NANOS = 800_000_000L
         private const val LEARN_LK_AT = 4
         private const val UNMUTE_LEAD_NANOS = 30_000_000L
         private const val HOT_JOIN_LEAD_NANOS = 30_000_000L

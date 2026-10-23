@@ -1,5 +1,6 @@
 package io.github.matijasalej.wholeflat.capture
 
+import io.github.matijasalej.wholeflat.KitchenStreams
 import io.github.matijasalej.wholeflat.sync.KitchenMap
 import io.github.matijasalej.wholeflat.sync.StreamBuilder
 import io.github.matijasalej.wholeflat.sync.SyncController
@@ -20,7 +21,7 @@ import java.util.Random
 class CaptureLoopTest {
     private val rate = CaptureFeed.RATE
     private val t0 = 1_000_000_000_000L
-    private val chunk = rate / 50
+    private val chunk = rate / 100
 
     /** The Sonos stops playing for [lengthMs] at [atS] seconds after Play (it refills its buffer), then goes on. */
     private class Stall(val atS: Double, val lengthMs: Double)
@@ -87,10 +88,8 @@ class CaptureLoopTest {
         )
         val plan = planWith(offset)
         val map = KitchenMap(plan.startFrame)
-        val builder = StreamBuilder(CaptureFrames(buffer, 1), map, StreamBuilder.ChannelMode.STEREO, trimSpacing = rate / 100)
-        val controller = SyncController(
-            SyncController.Params(rejoinThresholdMs = 60.0, rejoinReadings = 5, deadbandMs = 8.0, maxPendingFrames = 2_400, rate = rate),
-        )
+        val builder = StreamBuilder(CaptureFrames(buffer, 1), map, StreamBuilder.ChannelMode.STEREO, trimSpacing = KitchenStreams.trimSpacing(rate, captured = true))
+        val controller = SyncController(CaptureTracker.controllerParams(rate))
         val tracker = CaptureTracker(controller, CaptureLag(), lead, rate)
         tracker.startStream(plan.plannedLagMs)
         val start = tPlay + ((lkMs + extraStartMs) * 1e6).toLong()

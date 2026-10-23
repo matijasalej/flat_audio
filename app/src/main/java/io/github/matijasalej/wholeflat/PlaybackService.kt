@@ -523,6 +523,7 @@ class PlaybackService : Service() {
     private val settingsListener: (Set<String>) -> Unit = { changed ->
         if (changed.contains("living_fixed_volume")) applyVolume()
         if (changed.contains("capture_enabled") && ::captureSource.isInitialized) captureSource.wake()
+        if (changed.contains("capture_volume_mirror") && ::captureSource.isInitialized) captureSource.refreshVolume()
     }
 
     /** The living room plays at full level, unless "living room fixed volume" is off. */

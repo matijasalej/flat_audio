@@ -220,8 +220,11 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
         wake()
     }
 
-    /** The Sonos follows the music volume of the box only while capture mode is the source. */
+    /** The Sonos follows the music volume of the box only while capture mode is the source, and only where the mirror is switched on. */
     fun setVolumeActive(on: Boolean) = volume.setActive(on)
+
+    /** The setting `capture_volume_mirror` changed. */
+    fun refreshVolume() = volume.refresh()
 
     // ---- the supervisor --------------------------------------------------------------------------
 

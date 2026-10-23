@@ -11,6 +11,7 @@ import io.github.matijasalej.wholeflat.capture.CaptureTracker
 import io.github.matijasalej.wholeflat.capture.LagSteer
 import io.github.matijasalej.wholeflat.capture.SourceArbiter
 import io.github.matijasalej.wholeflat.sync.DayFloor
+import io.github.matijasalej.wholeflat.sync.KitchenVolume
 import io.github.matijasalej.wholeflat.sync.PlayDelays
 import io.github.matijasalej.wholeflat.sync.SessionHistory
 import io.github.matijasalej.wholeflat.sync.SonosPolicy
@@ -1443,6 +1444,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             }
         }
         if (changed.contains("kitchen_balance")) pushVolume()
+        if (changed.contains("kitchen_volume")) pushKitchenVolume()
     }
 
     /**
@@ -1460,8 +1462,12 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         schedulePush()
     }
 
-    /** The music volume of the box changed (what the phone's Cast volume sets), as a Connect volume 0 to 65535. */
+    /**
+     * The music volume of the box changed (what the phone's Cast volume sets), as a Connect volume 0 to 65535. Only where the mirror
+     * is switched on (`capture_volume_mirror`): on this box the Cast volume changes nothing, and the kitchen volume is a setting.
+     */
     fun onCaptureVolume(raw: Int) {
+        if (!Settings.values.captureVolumeMirror) return
         captureVolumeRaw = raw
         schedulePush()
     }
@@ -1475,10 +1481,10 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         }
     }
 
-    /** The volume the Sonos should have: that of the Cast volume for a capture session, else the Spotify one. */
+    /** The volume the Sonos should have: the kitchen volume setting for a capture session, else the Spotify one (see [KitchenVolume]). */
     private fun sonosVolume(): Int {
-        val raw = if (captureIsActive()) captureVolumeRaw else lastVolumeRaw
-        return if (raw < 0) -1 else VolumeCurve.sonosVolume(raw, Settings.values.kitchenBalance)
+        val v = Settings.values
+        return KitchenVolume.sonos(captureIsActive(), v.kitchenVolume, v.captureVolumeMirror, captureVolumeRaw, lastVolumeRaw, v.kitchenBalance)
     }
 
     private fun captureIsActive(): Boolean {
@@ -1492,6 +1498,19 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         if (s.cancelled) return
         val volume = sonosVolume()
         if (volume >= 0) soapFor(dev).setVolume(volume)
+    }
+
+    /**
+     * The kitchen volume was set (the slider of the phone page): the Sonos gets it now, also when nothing streams, unless something
+     * else plays on it. The volume is applied at the start of every captured stream too.
+     */
+    private fun pushKitchenVolume() {
+        val volume = Settings.values.kitchenVolume
+        if (volume < 0) return
+        val dev = device ?: return
+        if (!reachable || (session == null && busyElsewhere)) return
+        val r = soapFor(dev).setVolume(volume)
+        AppLog.add(TAG, "kitchen volume $volume: ${r.describe()}")
     }
 
     // ---- debug actions -------------------------------------------------------------------------
@@ -1592,6 +1611,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         o.put("format_capture", streamFormat(capture = true).key)
         o.put("format_ring", streamFormat(capture = false).key)
         o.put("flac_block", Settings.values.kitchenFlacBlock)
+        o.put("kitchen_volume", Settings.values.kitchenVolume)
         o.put("failed_starts", backoff.failures)
         o.put("start_failures_total", startFailuresTotal)
         o.put("backoff_s", backoff.remainingMs(nowMs()) / 1000)

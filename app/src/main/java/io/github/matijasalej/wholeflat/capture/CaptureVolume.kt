@@ -12,15 +12,17 @@ import io.github.matijasalej.wholeflat.Settings
 import org.json.JSONObject
 
 /**
- * The volume of a captured player. The phone's Cast volume sets STREAM_MUSIC on this box; the capture is
- * taken before that volume is applied, so the Sonos always gets the full signal and its volume is set by
- * hand to follow ([VolumeMirror] decides when). With "living room fixed volume" the box's own volume is put
- * back to its maximum after each change (the loudness is set on the amplifier), which for a moment makes
- * the living room quieter and then back: the brief blip, and the Cast volume in the phone jumps back to full.
+ * The volume of a captured player, for boxes where the phone's Cast volume does change STREAM_MUSIC; it is off unless the
+ * setting `capture_volume_mirror` is on, and on a box where Cast changes nothing (HDMI as a full-volume device, CEC volume control
+ * off: the one this app is built for) it never reads or touches STREAM_MUSIC at all. The capture is taken before that volume is
+ * applied, so the Sonos always gets the full signal and its volume is set by hand to follow ([VolumeMirror] decides when).
+ * With "living room fixed volume" the box's own volume is put back to its maximum after each change (the loudness is set on the
+ * amplifier), which for a moment makes the living room quieter and then back: the brief blip, and the Cast volume in the phone
+ * jumps back to full.
  *
- * It only watches while capture mode is the source ([setActive]); in the Spotify mode STREAM_MUSIC is none
- * of its business. It reads the index every [POLL_MS] and also listens for the system's volume broadcast,
- * which some devices do not send.
+ * It only watches while capture mode is the source ([setActive]) and the mirror is on; in the Spotify mode STREAM_MUSIC is none
+ * of its business. It reads the index every [POLL_MS] and also listens for the system's volume broadcast, which some devices do
+ * not send.
  */
 class CaptureVolume(context: Context, private val onVolume: (Int) -> Unit) {
     private val app = context.applicationContext
@@ -99,8 +101,23 @@ class CaptureVolume(context: Context, private val onVolume: (Int) -> Unit) {
         active = false
     }
 
-    /** On while capture mode is the source: the current volume is passed on at once, later changes as they come. */
+    /** Capture mode is the source (whether or not the mirror is on). */
+    @Volatile
+    private var wanted = false
+
+    /** Capture mode became the source or stopped being it. */
     fun setActive(on: Boolean) {
+        wanted = on
+        update()
+    }
+
+    /** The setting `capture_volume_mirror` changed. */
+    fun refresh() = update()
+
+    /** On while capture mode is the source and the mirror is switched on: the current volume is passed on at once, later changes as they come. */
+    @Synchronized
+    private fun update() {
+        val on = wanted && Settings.values.captureVolumeMirror
         if (on == active) return
         if (on) {
             val am = audio
@@ -170,6 +187,7 @@ class CaptureVolume(context: Context, private val onVolume: (Int) -> Unit) {
 
     fun statusJson(): JSONObject {
         val o = JSONObject()
+        o.put("mirror", Settings.values.captureVolumeMirror)
         o.put("watching", active)
         o.put("index", index)
         o.put("max", max)

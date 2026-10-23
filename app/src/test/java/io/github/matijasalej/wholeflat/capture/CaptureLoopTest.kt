@@ -44,6 +44,8 @@ class CaptureLoopTest {
         val dryRuns: Int = 0,
         /** The setpoint of the steer (and the state it was in) at each reading: (seconds after Play, setpoint, state). */
         val steerTrace: List<Triple<Double, Double, LagSteer.State>> = emptyList(),
+        /** The trims that were asked for: (seconds after Play, frames). */
+        val trims: List<Pair<Double, Int>> = emptyList(),
     )
 
     private fun tOf(frame: Long): Long = t0 + frame * 1_000_000_000L / rate
@@ -76,6 +78,8 @@ class CaptureLoopTest {
         floorMs: Double = Double.NaN,
         /** How long the capture has been running when Play goes out (a lead is limited by what the buffer holds). */
         playAfterS: Double = 1.23,
+        /** Synced mode: the stream is set once at this lag and left alone (NaN: the Lyrics mode's controller); [changeTargetAtS] / [newTargetMs] move it. */
+        syncedTargetMs: Double = Double.NaN,
     ): Result {
         val buffer = CaptureBuffer(rate, rate * 8)
         buffer.newGeneration(1)
@@ -114,6 +118,8 @@ class CaptureLoopTest {
         val tracker = trackerIn ?: CaptureTracker(controller, CaptureLag(), lead, rate)
         tracker.startStream(plan.plannedLagMs)
         var target = targetMs
+        var syncedNow = syncedTargetMs
+        val trims = ArrayList<Pair<Double, Int>>()
         val allStalls = ArrayList(stalls)
         var dryRuns = 0
         val steerTrace = ArrayList<Triple<Double, Double, LagSteer.State>>()
@@ -156,7 +162,9 @@ class CaptureLoopTest {
             assertTrue("the Sonos ran ahead of the stream", heardFrame(t) / 4096 <= builtAt.size)
 
             if (changeOffsetAtS >= 0 && t - tPlay >= changeOffsetAtS * 1_000_000_000L && offset != newOffsetMs) offset = newOffsetMs
-            if (changeTargetAtS >= 0 && t - tPlay >= changeTargetAtS * 1_000_000_000L) target = newTargetMs
+            if (changeTargetAtS >= 0 && t - tPlay >= changeTargetAtS * 1_000_000_000L) {
+                if (syncedTargetMs.isNaN()) target = newTargetMs else syncedNow = newTargetMs
+            }
 
             // the simulated Sonos runs dry when its lag is below its limit: it stops, fills its buffer again, and the lag is bigger by that
             if (limitLagMs > 0 && t > start && !stalledAt(t)) {
@@ -181,7 +189,11 @@ class CaptureLoopTest {
                 nextReading += 200_000_000L
                 if (!stalledAt(t)) {
                     val position = Math.round(heardFrame(t) / rate * 1000.0 + 156.0 + rnd.nextGaussian() * noiseMs)
-                    val outcome = tracker.onReading(t, position, map, { builder.unappliedBudget() }, clock, offset, lkMs, target, floorMs)
+                    val outcome = if (syncedNow.isNaN()) {
+                        tracker.onReading(t, position, map, { builder.unappliedBudget() }, clock, offset, lkMs, target, floorMs)
+                    } else {
+                        tracker.onSyncedReading(t, position, map, { builder.unappliedBudget() }, clock, syncedNow)
+                    }
                     when (outcome) {
                         is CaptureTracker.Outcome.Locked -> {
                             if (lockedAt == null) {
@@ -189,7 +201,10 @@ class CaptureLoopTest {
                                 firstLock = outcome.lagMs
                             }
                         }
-                        is CaptureTracker.Outcome.Trim -> builder.addTrim(outcome.frames)
+                        is CaptureTracker.Outcome.Trim -> {
+                            builder.addTrim(outcome.frames)
+                            trims.add((t - tPlay) / 1e9 to outcome.frames)
+                        }
                         is CaptureTracker.Outcome.Rejoin -> {
                             if (rejoinAt == null) {
                                 rejoinAt = (t - tPlay) / 1e9
@@ -209,7 +224,7 @@ class CaptureLoopTest {
         }
         return Result(
             rejoinAt, rejoinReason, lockedAt, firstLock, tracker.lag.locked ?: Double.NaN, plan.plannedLagMs,
-            tracker.relocks, lags, minMargin, tracker, { planWith() }, rejoinUnderrun, dryRuns, steerTrace,
+            tracker.relocks, lags, minMargin, tracker, { planWith() }, rejoinUnderrun, dryRuns, steerTrace, trims,
         )
     }
 
@@ -514,5 +529,83 @@ class CaptureLoopTest {
         assertEquals(0, down.relocks)
         for (lag in tail(down, 110.0)) assertEquals(2_520.0, lag, 8.0)
         assertTrue("it went at the pace of the ramp: ${steepestFall(down.lags, 10.0, 60.0)}", steepestFall(down.lags, 10.0, 60.0) <= 45.0)
+    }
+
+    // ---- Synced mode: the stream is set once and then left alone ---------------------------------
+
+    @Test
+    fun aSyncedStreamThatLandsWhereItWasPlannedIsLeftAloneForTenMinutes() {
+        // a lead of 1850 ms and Play-to-sound 290: planned 2140 ms. The Sonos is 22 ppm slow and the readings are 3.4 ms off
+        val r = simulate(seconds = 600, leadMs = 1850, playAfterS = 4.0, driftPpm = 22.0, noiseMs = 3.4, seed = 5, syncedTargetMs = 2140.0)
+        assertNull(r.rejoinAt)
+        assertEquals(2140.0, r.plannedMs, 0.5)
+        assertEquals("nothing is trimmed: ${r.trims}", 0, r.trims.size)
+        assertEquals(0, r.relocks)
+        // the drift of 22 ppm moves the lag by 13 ms in ten minutes, which is inside the band and left alone
+        for (lag in tail(r, 20.0)) assertEquals(2140.0, lag, 20.0)
+    }
+
+    @Test
+    fun aSyncedStreamThatLandsLateIsTrimmedOnceToTheTargetAndThenLeftAlone() {
+        // the speaker started 130 ms later than planned (342 ms for 217 on the device)
+        val r = simulate(seconds = 300, leadMs = 1850, playAfterS = 4.0, extraStartMs = 130.0, noiseMs = 3.0, seed = 3, syncedTargetMs = 2140.0)
+        assertNull(r.rejoinAt)
+        assertEquals(2270.0, r.lockedMs, 6.0)
+        assertEquals("one trim, to place it: ${r.trims}", 1, r.trims.size)
+        assertEquals(130.0 * 44.1, r.trims[0].second.toDouble(), 400.0)
+        assertTrue("right after the lock: ${r.trims[0].first}", r.trims[0].first < 10.0)
+        // it is there after the trim has landed (0.45 % of the stream: half a minute), and stays
+        for (lag in tail(r, 70.0)) assertEquals(2140.0, lag, 10.0)
+    }
+
+    @Test
+    fun aSyncedStreamThatLandsEarlyIsStretchedOnceToTheTarget() {
+        val r = simulate(seconds = 200, leadMs = 1850, playAfterS = 4.0, extraStartMs = -60.0, noiseMs = 2.0, seed = 4, syncedTargetMs = 2140.0)
+        assertNull(r.rejoinAt)
+        assertEquals(1, r.trims.size)
+        assertTrue("frames are repeated: ${r.trims}", r.trims[0].second < 0)
+        for (lag in tail(r, 70.0)) assertEquals(2140.0, lag, 10.0)
+    }
+
+    @Test
+    fun aNewSyncedTargetIsPlacedAtOnce() {
+        // the TV reconnected with another backlog (or the kitchen offset changed): the common delay is 30 ms more from 60 s on
+        val r = simulate(seconds = 200, leadMs = 1850, playAfterS = 4.0, noiseMs = 2.0, seed = 6, syncedTargetMs = 2140.0, changeTargetAtS = 60, newTargetMs = 2170.0)
+        assertNull(r.rejoinAt)
+        val after = r.trims.filter { it.first >= 60.0 }
+        assertEquals("one trim for the new target: ${r.trims}", 1, after.size)
+        assertTrue("it comes at once: ${after[0].first}", after[0].first < 62.0)
+        assertEquals(-30.0 * 44.1, after[0].second.toDouble(), 200.0)
+        for (lag in tail(r, 120.0)) assertEquals(2170.0, lag, 10.0)
+    }
+
+    @Test
+    fun aStepOfTheSyncedLagBeyondTheBandIsCorrectedOnceAfterThirtySeconds() {
+        // the speaker stops for 120 ms at 100 s and fills its buffer again: the lag is 120 ms more for good
+        val r = simulate(seconds = 300, leadMs = 1850, playAfterS = 4.0, noiseMs = 2.0, seed = 7, syncedTargetMs = 2140.0, stalls = listOf(Stall(100.0, 120.0)))
+        assertNull(r.rejoinAt)
+        assertEquals(1, r.trims.size)
+        // 30 s beyond the band (the first reading after the stall, about 100.2 s, plus 30 s)
+        assertTrue("the correction came at ${r.trims[0].first}", r.trims[0].first in 129.0..134.0)
+        assertEquals(120.0 * 44.1, r.trims[0].second.toDouble(), 500.0)
+        for (lag in tail(r, 100.0, 125.0)) assertEquals(2260.0, lag, 10.0)
+        for (lag in tail(r, 180.0)) assertEquals(2140.0, lag, 10.0)
+    }
+
+    @Test
+    fun aStepOfTheSyncedLagThatIsTooBigForATrimStartsTheStreamAgainAfterThirtySeconds() {
+        val r = simulate(seconds = 300, leadMs = 1850, playAfterS = 4.0, noiseMs = 2.0, seed = 8, syncedTargetMs = 2140.0, stalls = listOf(Stall(100.0, 700.0)))
+        assertTrue("re-joined", r.rejoinAt != null)
+        assertTrue("after 30 s beyond the band, not at once: ${r.rejoinAt}", r.rejoinAt!! in 129.0..134.0)
+        assertTrue(r.rejoinReason!!, r.rejoinReason.contains("more than a trim is for"))
+        assertEquals(0, r.relocks)
+    }
+
+    @Test
+    fun aSyncedStreamNeverLearnsAFloorOrSteers() {
+        val r = simulate(seconds = 120, leadMs = 1850, playAfterS = 4.0, noiseMs = 12.0, seed = 11, syncedTargetMs = 2140.0)
+        assertTrue(r.tracker.steer.learnedFloorMs.isNaN())
+        assertEquals(0, r.tracker.steer.floorEvents)
+        assertTrue(r.tracker.steer.setpointMs.isNaN())
     }
 }

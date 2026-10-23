@@ -39,6 +39,7 @@ import kotlin.concurrent.thread
  *   GET  /kitchen/rejoin        restarts the Sonos stream (only the kitchen)
  *   GET  /kitchen/search        looks for Sonos speakers again
  *   GET  /kitchen/select        ?ip=...: use this speaker
+ *   GET  /kitchen/readings      the last 10 minutes of the Sonos's readings as CSV (position, lag of each reading and its median, error, target)
  *   GET  /kitchen/last-sessions the last 10 sessions: every connection of the Sonos to the stream (method, start and end,
  *                               bytes, blocks, who closed it and why) and the transport state and status seen meanwhile
  *   GET  /capture               the capture of the Cast receiver: state, grants, level, activity, media session
@@ -234,6 +235,7 @@ object DebugServer {
                 sendJson(out, 200, JSONObject().put("ok", AppState.kitchen != null), head)
             }
             "/kitchen/last-sessions" -> sendJson(out, 200, AppState.kitchen?.lastSessionsJson() ?: JSONArray(), head)
+            "/kitchen/readings" -> sendText(out, 200, AppState.kitchen?.readingsCsv() ?: "kitchen not running\n", head)
             "/kitchen/search" -> {
                 AppState.kitchen?.searchNow()
                 sendJson(out, 200, JSONObject().put("ok", AppState.kitchen != null), head)

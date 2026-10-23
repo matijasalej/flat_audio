@@ -505,4 +505,35 @@ class LagSteerTest {
         follow(steer, 110, 25)
         assertEquals(380.0 + 25 * step, steer.setpointMs, 0.01)
     }
+
+    @Test
+    fun noFloorIsLearnedFromTroubleAtALagOfSeconds() {
+        // the lag of Synced mode: a speaker does not run dry there, so trouble there is no floor (and would keep every later stream up there)
+        val steer = steered(2_000.0, 2_300.0)
+        follow(steer, 0, 100)
+        assertTrue(steer.setpointMs > 2_200.0)
+        assertNull(steer.onUnderrun(at(101), "PLAYBACK_STATE_BUFFERING"))
+        assertTrue(steer.learnedFloorMs.isNaN())
+        assertEquals(0, steer.floorEvents)
+        // and the readings that scatter there are no sign either
+        val scatter = steered(2_000.0, 2_300.0)
+        var event: LagSteer.FloorEvent? = null
+        for (i in 0 until 60) {
+            val lag = scatter.setpointMs + (if (i % 2 == 0) 0.0 else 60.0)
+            scatter.onReading(at(i), lag, pos(i))?.let { event = it }
+        }
+        assertNull(event)
+        assertTrue(scatter.learnedFloorMs.isNaN())
+    }
+
+    @Test
+    fun aFloorOfSecondsFromAnEarlierRunIsNotTakenBackButAnHonestOneIs() {
+        val steer = LagSteer()
+        steer.restoreLearnedFloor(2_185.9)
+        assertTrue(steer.learnedFloorMs.isNaN())
+        steer.restoreLearnedFloor(Double.NaN)
+        assertTrue(steer.learnedFloorMs.isNaN())
+        steer.restoreLearnedFloor(340.0)
+        assertEquals(340.0, steer.learnedFloorMs, 0.0)
+    }
 }

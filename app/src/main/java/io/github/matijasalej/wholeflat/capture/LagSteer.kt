@@ -150,8 +150,9 @@ class LagSteer(
         lockedMs = heldMs
     }
 
-    /** The learned floor was kept from earlier today: used from the start. */
+    /** The learned floor was kept from earlier today: used from the start. One that no speaker's limit can be (see [FLOOR_LEARN_MAX_MS]) is not. */
     fun restoreLearnedFloor(ms: Double) {
+        if (ms.isNaN() || ms > FLOOR_LEARN_MAX_MS + FLOOR_STEP_MS) return
         learnedFloorMs = ms
     }
 
@@ -197,6 +198,9 @@ class LagSteer(
         // the lag where it happened, or the setpoint that was held if that was higher (the lag trails the setpoint on a way down)
         val where = maxOf(lagBefore(tNanos), setpointMs)
         quietUntilNanos = tNanos + DEBOUNCE_NANOS
+        // a speaker does not run dry at a lag of seconds: trouble there (a network hiccup, the readings of a deep buffer) is no floor, and a
+        // floor learned from it would keep the next streams, at any lag, up there
+        if (where > FLOOR_LEARN_MAX_MS) return null
         val wanted = maxOf(where + FLOOR_STEP_MS, minMs)
         val current = floorMs
         if (!current.isNaN() && wanted <= current) return null // the floor is above that lag already
@@ -332,6 +336,9 @@ class LagSteer(
 
         /** The learned floor is this far above the lag at which the speaker ran out of audio (ms). */
         const val FLOOR_STEP_MS = 15.0
+
+        /** A floor is only learned from trouble at a lag up to this (ms): the speaker's own limit is a few hundred ms. */
+        const val FLOOR_LEARN_MAX_MS = 1000.0
 
         /** The setpoint must be this far below where the steering began for trouble to be the steer's (ms). */
         const val STEER_MARGIN_MS = 5.0

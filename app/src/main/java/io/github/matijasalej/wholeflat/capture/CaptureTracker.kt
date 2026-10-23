@@ -3,6 +3,7 @@ package io.github.matijasalej.wholeflat.capture
 import io.github.matijasalej.wholeflat.sync.KitchenMap
 import io.github.matijasalej.wholeflat.sync.StreamView
 import io.github.matijasalej.wholeflat.sync.SyncController
+import io.github.matijasalej.wholeflat.sync.SyncedHold
 
 /**
  * What the readings of the Sonos mean for a captured stream.
@@ -40,7 +41,8 @@ class CaptureTracker(
 
         object Hold : Outcome()
 
-        class Trim(val frames: Int) : Outcome()
+        /** Drop [frames] frames from the stream (negative: repeat); [why] is given by the Synced rule, which logs what it does. */
+        class Trim(val frames: Int, val why: String = "") : Outcome()
 
         /** The lag moved from [fromMs] to about [toMs]: it is measured again instead of restarting the stream. */
         class Relock(val fromMs: Double, val toMs: Double) : Outcome()
@@ -49,9 +51,17 @@ class CaptureTracker(
         class Rejoin(val reason: String, val underrun: Boolean = false) : Outcome()
     }
 
+    /** The rule of a stream in Synced mode: set once, then left alone (see [SyncedHold]); [onSyncedReading] feeds it. */
+    val hold = SyncedHold(rate)
+
     /** Steps of the lag that were taken in as a new lag during this stream. */
     @Volatile
     var relocks = 0
+        private set
+
+    /** The lag of the last reading (ms), NaN before the first: for a look at the readings. */
+    @Volatile
+    var lastLagMs = Double.NaN
         private set
 
     /** The lag the next lock is compared with: the plan for a new stream, the old lag after a step. */
@@ -69,6 +79,7 @@ class CaptureTracker(
         lag.reset()
         controller.reset()
         steer.startStream()
+        hold.reset()
         relocks = 0
         expectedMs = plannedLagMs
     }
@@ -113,6 +124,7 @@ class CaptureTracker(
         val frame = map.ringOfStream(heard) ?: return Outcome.Waiting
         val captured = clock.nanosOfFrame(Math.round(frame)) ?: return Outcome.Waiting
         val lagMs = (tNanos - captured) / 1e6
+        lastLagMs = lagMs
         val ended = steer.setTarget(targetMs)
         steer.setConfiguredFloor(floorMs)
 
@@ -159,6 +171,45 @@ class CaptureTracker(
         }
     }
 
+    /**
+     * One reading of a stream in Synced mode, where the kitchen is set once at [targetMs] and then left alone (see [SyncedHold]): the
+     * first readings only measure the lag (the lock), after that the rule says whether the stream is trimmed or started again. There is
+     * no setpoint, no ramp, no floor and no controller here: the Lyrics mode's [onReading] is not touched by it.
+     */
+    @Synchronized
+    fun onSyncedReading(
+        tNanos: Long,
+        positionMs: Long,
+        map: KitchenMap,
+        unappliedBudget: () -> Int,
+        clock: CaptureClock,
+        targetMs: Double,
+    ): Outcome {
+        val heard = (positionMs - controller.deltaMs) / 1000.0 * rate
+        val frame = map.ringOfStream(heard) ?: return Outcome.Waiting
+        val captured = clock.nanosOfFrame(Math.round(frame)) ?: return Outcome.Waiting
+        val lagMs = (tNanos - captured) / 1e6
+        lastLagMs = lagMs
+        if (!lag.isLocked) {
+            if (!lag.onReading(lagMs, 0)) return Outcome.Waiting
+            val locked = lag.locked ?: return Outcome.Waiting
+            val expected = expectedMs
+            expectedMs = locked
+            return Outcome.Locked(locked, expected, false)
+        }
+        lag.onReading(lagMs, 0)
+        val recent = lag.recentMs(SYNCED_READINGS)
+        if (recent.isNaN()) return Outcome.Hold
+        // the trims that are on their way are counted as if they had landed, as the controller of the Lyrics mode does
+        val pendingMs = StreamView(map, unappliedBudget) { null }.pendingTrimFrames(heard) * 1000.0 / rate
+        val error = recent - targetMs - pendingMs
+        return when (val d = hold.onReading(tNanos, error, targetMs)) {
+            is SyncedHold.Decision.Trim -> Outcome.Trim(d.frames, d.why)
+            is SyncedHold.Decision.Restart -> Outcome.Rejoin(d.why)
+            is SyncedHold.Decision.Hold -> Outcome.Hold
+        }
+    }
+
     /** The controller wants a restart: is it the lag that moved (measure again), or something a restart is for? */
     private fun decide(reason: String): Outcome {
         val now = lag.recentMs(RECENT)
@@ -195,6 +246,9 @@ class CaptureTracker(
 
         /** The readings that say what the lag is now (1 s), as opposed to the whole window. */
         const val RECENT = 5
+
+        /** The readings the Synced rule takes the lag from (2.2 s at one reading in 200 ms: the median outvotes a stray reading). */
+        const val SYNCED_READINGS = 11
 
         /** A lag that moved by this much since the lock is a step of the speaker, not a change of the offset. */
         const val MIN_STEP_MS = 40.0

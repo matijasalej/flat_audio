@@ -12,6 +12,7 @@ import io.github.matijasalej.wholeflat.capture.LagSteer
 import io.github.matijasalej.wholeflat.capture.SourceArbiter
 import io.github.matijasalej.wholeflat.sync.ClickTrack
 import io.github.matijasalej.wholeflat.sync.DayFloor
+import io.github.matijasalej.wholeflat.sync.SyncedHold
 import io.github.matijasalej.wholeflat.sync.KitchenVolume
 import io.github.matijasalej.wholeflat.sync.PlayDelays
 import io.github.matijasalej.wholeflat.sync.SessionHistory
@@ -184,8 +185,30 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
      * In Synced mode, while the TV plays the same capture: the lag the Sonos is brought to, the delay D that both rooms are held to
      * (ms after the capture). NaN: not in Synced mode, the target of the settings counts.
      */
+    var syncedTargetMs: Double
+        get() = syncedTarget
+        set(value) {
+            val was = !syncedTarget.isNaN()
+            syncedTarget = value
+            // a change of the mode: what the speaker showed in the other one says nothing about this one
+            if (was != !value.isNaN()) post("mode change") { onModeChange(!value.isNaN()) }
+        }
+
     @Volatile
-    var syncedTargetMs = Double.NaN
+    private var syncedTarget = Double.NaN
+
+    /**
+     * How much later than planned the speaker landed at its last starts in Synced mode (ms; the first one counts fully). A stream that
+     * starts 2 s behind the capture takes the speaker longer to begin than the shallow streams the Play-to-sound delay is learned from.
+     */
+    @Volatile
+    private var syncedPlanBiasMs = Double.NaN
+
+    /** The time of the last fresh start that the Synced rule asked for (System.nanoTime), 0 if none. */
+    private var lastSyncedRestartNanos = 0L
+
+    /** Readings of the stream that is set by Synced mode, for the summary. */
+    private var syncedReadings = 0
 
     /**
      * In Synced mode, while the TV plays: the lead a captured stream is started with so that the Sonos lands near the common delay at once
@@ -578,6 +601,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         controller.offsetMs = effectiveOffsetMs()
         if (s.isCapture) {
             captureTracker.startStream(capturePlannedLagMs)
+            syncedReadings = 0
             // an error of the speaker from before this stream is not trouble of it
             seenPlaybackErrorNanos = ws.lastPlaybackErrorNanos
             lastSteerState = LagSteer.State.OFF
@@ -710,9 +734,10 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             s.healthy = true
             backoff.onHealthy()
         }
-        if (s.playingReadings == LEARN_LK_AT) learnLk(s, clock.startNanos)
+        // the Play-to-sound delay is learned from the shallow streams; a stream that starts 2 s behind the capture is another case (syncedPlanBiasMs)
+        if (s.playingReadings == LEARN_LK_AT && !s.syncedHold) learnLk(s, clock.startNanos)
         if (s.isCapture) {
-            handleCaptureReading(s, stream, clock.startNanos, tMid, p.positionMs)
+            if (s.syncedHold) handleSyncedReading(s, stream, clock.startNanos, tMid, p.positionMs) else handleCaptureReading(s, stream, clock.startNanos, tMid, p.positionMs)
             return
         }
         if (onJoinedPending && s.playingReadings >= 2) {
@@ -890,9 +915,10 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             )
             s.uri = streamUri(host, s)
             s.clickHz = ClickTrack.KITCHEN_HZ
+            s.syncedHold = !syncedTargetMs.isNaN()
             registerSession(s)
             state = State.STARTING
-            AppLog.add(TAG, "capture: getting the kitchen ready ($why), session ${s.token}")
+            AppLog.add(TAG, "capture: getting the kitchen ready ($why), session ${s.token}${if (s.syncedHold) ", set once at the common delay" else ""}")
             if (!prepare(s, soapFor(dev))) return false
             if (s.cancelled || session !== s) return false
         }
@@ -913,7 +939,9 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     private fun effectiveLeadMs(settingMs: Int): Int {
         val base = captureLead.effectiveMs(settingMs)
         val synced = syncedLeadMs
-        return if (synced.isNaN()) base else maxOf(base, Math.round(synced).toInt().coerceAtMost(SettingsModel.MAX_CAPTURE_LEAD_MS))
+        if (synced.isNaN()) return base
+        val bias = if (syncedPlanBiasMs.isNaN()) 0.0 else syncedPlanBiasMs
+        return maxOf(base, Math.round(synced - bias).toInt().coerceAtMost(SettingsModel.MAX_CAPTURE_LEAD_MS))
     }
 
     /** The part of the lag of a captured WAV stream that the lead does not make (ms): the Play-to-sound delay and the capture pipeline. */
@@ -1048,6 +1076,103 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     }
 
     /**
+     * A reading of the Sonos for a captured stream that Synced mode set at the common delay: the first readings measure the lag, then
+     * the stream is placed at the target once and left alone (see [SyncedHold]); only an error that stays beyond 40 ms for 30 s is
+     * corrected, at most once a minute. Nothing here steers, learns a floor or runs the controller of the Lyrics mode.
+     */
+    private fun handleSyncedReading(s: KitchenSession, stream: ActiveStream, startNanos: Long, tMid: Long, positionMs: Long) {
+        val feed = s.capture ?: return
+        if (feed.generation != s.captureGeneration) return // the session is about to end
+        val target = syncedTargetMs
+        // the TV has been given back: the next tick of Synced mode starts the stream again for the Lyrics mode
+        if (target.isNaN()) return
+        val hold = captureTracker.hold
+        hold.restartAllowed = lastSyncedRestartNanos == 0L || System.nanoTime() - lastSyncedRestartNanos > SYNCED_RESTART_PAUSE_NANOS
+        val outcome = captureTracker.onSyncedReading(tMid, positionMs, stream.map, { stream.builder.unappliedBudget() }, feed.clock, target)
+        recordReading(tMid, positionMs, captureTracker.lastLagMs, lagCapture.recentMs(CaptureTracker.SYNCED_READINGS), hold.errorMs, target)
+        when (outcome) {
+            is CaptureTracker.Outcome.Locked -> {
+                val planned = capturePlannedLagMs
+                if (!planned.isNaN() && Math.abs(outcome.lagMs - planned) < SYNCED_BIAS_MAX_MS) {
+                    val observed = outcome.lagMs - planned
+                    syncedPlanBiasMs = if (syncedPlanBiasMs.isNaN()) observed else syncedPlanBiasMs * 0.4 + observed * 0.6
+                }
+                AppLog.add(
+                    TAG,
+                    "synced: the kitchen sounds ${fmt(outcome.lagMs)} ms after the capture (planned ${fmt(planned)} ms, Play to sound " +
+                        "${(startNanos - s.playSentNanos) / 1_000_000L} ms); the common delay with the kitchen offset is ${fmt(target)} ms; " +
+                        "it is placed there once and then left alone (next starts are planned ${fmt(if (syncedPlanBiasMs.isNaN()) 0.0 else syncedPlanBiasMs)} ms earlier)",
+                )
+                lastSummaryReadings = 0
+            }
+            is CaptureTracker.Outcome.Trim -> {
+                stream.builder.addTrim(outcome.frames)
+                AppLog.add(
+                    TAG,
+                    "synced: ${outcome.why}: the kitchen is ${fmt(hold.errorMs)} ms from ${fmt(target)} ms (lag ${fmt(lagCapture.recentMs(CaptureTracker.SYNCED_READINGS))} ms), " +
+                        "trimming ${outcome.frames} frames (${fmt(outcome.frames * 1000.0 / s.rate)} ms), correction ${hold.corrections} of this stream",
+                )
+            }
+            is CaptureTracker.Outcome.Rejoin -> {
+                lastSyncedRestartNanos = System.nanoTime()
+                rejoin(outcome.reason, manual = true)
+            }
+            is CaptureTracker.Outcome.Hold, is CaptureTracker.Outcome.Waiting, is CaptureTracker.Outcome.Relock -> Unit
+        }
+        // one summary a while, counted in the readings of this stream
+        syncedReadings++
+        if (lagCapture.isLocked && syncedReadings % SUMMARY_EVERY_READINGS == 0) {
+            AppLog.add(
+                TAG,
+                "sync (synced): lag ${fmt(lagCapture.recentMs(CaptureTracker.SYNCED_READINGS))} ms, target ${fmt(target)} ms, error ${fmt(hold.errorMs)} ms" +
+                    (if (hold.farForMs > 0) " (beyond ${SyncedHold.FAR_MS.toInt()} ms for ${hold.farForMs / 1000} s)" else "") +
+                    ", corrections ${hold.corrections}, trim budget ${stream.builder.unappliedBudget()} frames, re-joins $rejoins, round trip ${fmt(lastRttMs)} ms",
+            )
+        }
+    }
+
+    /** The mode changed between Synced and Lyrics: the floor the speaker showed in the one says nothing of the other. */
+    private fun onModeChange(synced: Boolean) {
+        syncedReadings = 0
+        dayFloor.clear()
+        if (captureTracker.steer.clearFloor()) {
+            AppLog.add(TAG, "capture: the mode is ${if (synced) "Synced" else "Lyrics"} now: the learned floor of the lag is forgotten")
+        }
+    }
+
+    /** Whether the stream that plays was set by Synced mode and is left alone by it (the far restart of Synced mode does not apply). */
+    fun syncedHoldActive(): Boolean = session?.takeIf { it.isCapture }?.syncedHold == true && !syncedTarget.isNaN()
+
+    // ---- the readings, for a look afterwards ----------------------------------------------------------
+
+    private class Reading(val ageMs: Long, val positionMs: Long, val rawLagMs: Double, val lagMs: Double, val errorMs: Double, val targetMs: Double)
+
+    private val readings = java.util.ArrayDeque<Reading>()
+
+    /** Keeps the last readings of the stream (about 10 minutes) for [readingsCsv]. */
+    private fun recordReading(tNanos: Long, positionMs: Long, rawLagMs: Double, lagMs: Double, errorMs: Double, targetMs: Double) {
+        synchronized(readings) {
+            readings.addLast(Reading(tNanos / 1_000_000L, positionMs, rawLagMs, lagMs, errorMs, targetMs))
+            while (readings.size > MAX_RECORDED_READINGS) readings.removeFirst()
+        }
+    }
+
+    /**
+     * The recorded readings as CSV: when (ms of System.nanoTime), the position the Sonos reported, the lag of this reading, the median of
+     * the last eleven, the error that the rule or the controller works with, and the target or setpoint.
+     */
+    fun readingsCsv(): String {
+        val sb = StringBuilder("t_ms,position_ms,lag_raw_ms,lag_median_ms,error_ms,target_ms\n")
+        synchronized(readings) {
+            for (r in readings) {
+                sb.append(r.ageMs).append(',').append(r.positionMs).append(',').append(fmt(r.rawLagMs)).append(',').append(fmt(r.lagMs)).append(',')
+                    .append(fmt(r.errorMs)).append(',').append(fmt(r.targetMs)).append('\n')
+            }
+        }
+        return sb.toString()
+    }
+
+    /**
      * A reading of the Sonos for a captured stream. There is no second room to compare with: the first
      * readings measure how long after the capture the kitchen sounds (the speaker's own buffer decides),
      * and then the controller holds that lag against the drift of the speaker's clock. A step of the lag
@@ -1072,6 +1197,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             tMid, positionMs, stream.map, { stream.builder.unappliedBudget() }, feed.clock, offset, fixedLagMs(feed, s.format),
             target?.ms ?: Double.NaN, v.kitchenFloorMs.toDouble(),
         )
+        recordReading(tMid, positionMs, captureTracker.lastLagMs, lagCapture.recentMs(CaptureTracker.SYNCED_READINGS), controller.rawErrorMs, if (steer.hasSetpoint) steer.setpointMs else Double.NaN)
         when (outcome) {
             is CaptureTracker.Outcome.Locked -> {
                 AppLog.add(
@@ -1771,7 +1897,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         // how far ahead of the capture the stream was sent when it began (null for a session that is not a captured one)
         o.put("lead_ms", jsonNumber(round1(if (cs != null) captureAheadMs else Double.NaN)))
         // the lag the controller holds now: the setpoint on its way to the target, or where the lag locked
-        val held = if (steer.active && steer.hasSetpoint) steer.setpointMs else lagCapture.targetMs(0)
+        val heldSynced = cs?.syncedHold == true
+        val held = if (heldSynced) captureTracker.hold.targetMs else if (steer.active && steer.hasSetpoint) steer.setpointMs else lagCapture.targetMs(0)
         o.put("lag_target_ms", jsonNumber(round1(if (cs != null) held else Double.NaN)))
         o.put("lag_locked", cs != null && lagCapture.isLocked)
         // the lag that is wanted (kitchen_target_ms, else capture_living_latency_ms); null: the lag is left where it locked
@@ -1787,9 +1914,20 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         o.put("floor_events", steer.floorEvents)
         o.put("position_behind_ms_per_s", jsonNumber(round1(steer.rateDeficitMs)))
         // where the controller is bringing the lag now, and whether that is still down
-        o.put("setpoint_ms", jsonNumber(round1(if (cs != null) steer.setpointMs else Double.NaN)))
-        o.put("steering", if (cs != null) steer.state().label else "off")
-        o.put("descending", cs != null && steer.descending())
+        o.put("setpoint_ms", jsonNumber(round1(if (cs != null && !heldSynced) steer.setpointMs else Double.NaN)))
+        o.put("steering", if (cs == null) "off" else if (heldSynced) "synced-hold" else steer.state().label)
+        o.put("descending", cs != null && !heldSynced && steer.descending())
+        // Synced mode sets the stream once and leaves it alone: where the rule stands
+        val hold = captureTracker.hold
+        val holdJson = JSONObject()
+        holdJson.put("active", heldSynced)
+        holdJson.put("placed", heldSynced && hold.placed)
+        holdJson.put("target_ms", jsonNumber(round1(if (heldSynced) hold.targetMs else Double.NaN)))
+        holdJson.put("error_ms", jsonNumber(round1(if (heldSynced) hold.errorMs else Double.NaN)))
+        holdJson.put("beyond_band_for_s", if (heldSynced) hold.farForMs / 1000 else 0L)
+        holdJson.put("corrections", if (heldSynced) hold.corrections else 0)
+        holdJson.put("plan_bias_ms", jsonNumber(round1(syncedPlanBiasMs)))
+        o.put("synced_hold", holdJson)
         // how far the kitchen is from the target (positive: later); without a target from the living room's latency (0 if none), as before
         o.put("room_offset_ms", jsonNumber(round1(lag - (target?.ms ?: v.captureLivingLatencyMs.toDouble()))))
         o.put("capture_age_at_play_ms", jsonNumber(round1(captureAgeAtPlayMs)))
@@ -1836,7 +1974,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val lag = lagCapture.recentMs()
         if (lag.isNaN()) return ""
         val steer = captureTracker.steer
-        val moving = steer.active && steer.hasSetpoint && steer.state().let { it == LagSteer.State.DESCENDING || it == LagSteer.State.ASCENDING }
+        val moving = session?.syncedHold != true && steer.active && steer.hasSetpoint && steer.state().let { it == LagSteer.State.DESCENDING || it == LagSteer.State.ASCENDING }
         return "  lag " + Math.round(lag) + " ms" + (if (moving) " to " + Math.round(steer.goalMs) else "")
     }
 
@@ -1861,6 +1999,15 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         private const val POLL_PERIOD_MS = 3_000L
         private const val READING_PERIOD_MS = 200L
         private const val SUMMARY_EVERY_READINGS = 150
+
+        /** Readings that are kept for a look afterwards (200 ms apart: about 10 minutes). */
+        private const val MAX_RECORDED_READINGS = 3_000
+
+        /** After a fresh start asked for by the Synced rule the next error is trimmed, not answered with another start, for this long. */
+        private const val SYNCED_RESTART_PAUSE_NANOS = 90_000_000_000L
+
+        /** A lock that is further than this from the plan is not taken as the speaker's start delay (ms). */
+        private const val SYNCED_BIAS_MAX_MS = 600.0
         private const val SEARCH_EVERY_NANOS = 10_000_000_000L
         private const val SEARCH_OFFLINE_EVERY_NANOS = 30_000_000_000L
         private const val WS_RECONNECT_NANOS = 3_000_000_000L

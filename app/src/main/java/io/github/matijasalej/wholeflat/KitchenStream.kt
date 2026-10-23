@@ -55,6 +55,13 @@ class KitchenSession(
 ) {
     val isCapture: Boolean get() = capture != null
 
+    /**
+     * The stream of a captured player was made while Synced mode held the kitchen at the common delay: it is set once and left alone
+     * (see SyncedHold) instead of being steered by the controller of the Lyrics mode. Fixed when the session is made.
+     */
+    @Volatile
+    var syncedHold = false
+
     /** Frames per block of the stream: the FLAC block, or the small chunk of a WAV or L16 stream, which have no block structure. */
     val blockFrames: Int get() = if (format == StreamFormat.FLAC) flacBlock else StreamFormat.WAV_CHUNK_FRAMES
 

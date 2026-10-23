@@ -8,10 +8,13 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTimestamp
 import android.media.AudioTrack
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
 import io.github.matijasalej.wholeflat.sync.AnchorFilter
+import io.github.matijasalej.wholeflat.sync.IdleFeeder
+import io.github.matijasalej.wholeflat.sync.StallPolicy
 import io.github.matijasalej.wholeflat.sync.StartPlanner
 import io.github.matijasalej.wholeflat.sync.TrackTimeline
 import org.json.JSONObject
@@ -96,6 +99,11 @@ class LivingRoom(private val context: Context) {
     var stalls = 0
         private set
 
+    /** Times the watchdog found the track waiting for data (the writer was behind, the track is fine). */
+    @Volatile
+    var starvations = 0
+        private set
+
     @Volatile
     var recoveries = 0
         private set
@@ -160,8 +168,16 @@ class LivingRoom(private val context: Context) {
     private val timestamp = AudioTimestamp()
     private val filter = AnchorFilter()
 
-    /** Frames written to the current track since it was created or flushed. */
+    /** Frames written to the current track since it was created or flushed (the watchdog reads it too). */
+    @Volatile
     private var written = 0L
+
+    /** What the track's buffer holds at most, and the idle feeding that keeps the track going. */
+    @Volatile
+    private var capacityFrames = 0
+    private var feeder = IdleFeeder(IDLE_QUEUE_FRAMES, 8_820)
+    private var runningLogged = false
+    private var trackBornNanos = 0L
     private var flushedAtNanos = 0L
     private var lastAnchorPollNanos = 0L
     private var timestampMissingSinceNanos = 0L
@@ -459,13 +475,68 @@ class LivingRoom(private val context: Context) {
                 null
             } else {
                 bufferFrames = bytes / 4
-                AppLog.add(TAG, "AudioTrack open: $bytes bytes ($bufferFrames frames, min $minBytes), session ${created.audioSessionId}")
+                capacityFrames = try {
+                    created.bufferCapacityInFrames
+                } catch (e: Exception) {
+                    bufferFrames
+                }
+                feeder = IdleFeeder(IDLE_QUEUE_FRAMES, capacityFrames)
+                AppLog.add(
+                    TAG,
+                    "AudioTrack open: $bytes bytes ($bufferFrames frames, capacity $capacityFrames, min $minBytes), " +
+                        "session ${created.audioSessionId}",
+                )
+                lowerStartThreshold(created)
                 created
             }
         } catch (e: Exception) {
             AppLog.error(TAG, "cannot create the AudioTrack", e)
             null
         }
+    }
+
+    /**
+     * A streaming track starts when its buffer holds the start threshold, by default the whole buffer on this
+     * kind of device. A small threshold lets it start (and go on after an underrun) with little queued.
+     */
+    private fun lowerStartThreshold(t: AudioTrack) {
+        if (Build.VERSION.SDK_INT < 31) return
+        try {
+            val before = t.getStartThresholdInFrames()
+            val after = t.setStartThresholdInFrames(START_THRESHOLD_FRAMES)
+            AppLog.add(TAG, "start threshold $before -> $after frames")
+        } catch (e: Exception) {
+            AppLog.add(TAG, "cannot set the start threshold ($e), the track is filled up instead")
+        }
+    }
+
+    /** Writes silence into the track without blocking, up to [limit] frames. Returns what went in. */
+    private fun writeSilenceNonBlocking(t: AudioTrack, limit: Int): Int {
+        var total = 0
+        while (total < limit) {
+            val chunk = minOf(SILENCE_CHUNK_FRAMES, limit - total)
+            val w = try {
+                t.write(silence, 0, chunk * 2, AudioTrack.WRITE_NON_BLOCKING)
+            } catch (e: Exception) {
+                -1
+            }
+            if (w < 0) {
+                lastHeadAtBreak = headFrames(t)
+                broken = true
+                break
+            }
+            if (w == 0) break
+            total += w / 2
+            written += w / 2
+            if (w < chunk * 2) break
+        }
+        return total
+    }
+
+    /** Fills the empty track with silence, so that it can start whatever its start threshold is. */
+    private fun primeSilence(t: AudioTrack) {
+        val n = writeSilenceNonBlocking(t, capacityFrames)
+        AppLog.add(TAG, "primed the track with $n frames of silence")
     }
 
     /** Builds a new track (the first one, or after a failure). */
@@ -488,7 +559,10 @@ class LivingRoom(private val context: Context) {
         }
         try {
             created.setVolume(gain)
+            primeSilence(created)
             created.play()
+            trackBornNanos = System.nanoTime()
+            feeder.reset(trackBornNanos)
         } catch (e: Exception) {
             AppLog.error(TAG, "cannot start the new AudioTrack", e)
             try {
@@ -526,6 +600,8 @@ class LivingRoom(private val context: Context) {
         flushedAtNanos = System.nanoTime()
         lastAnchorPollNanos = 0L
         timestampMissingSinceNanos = 0L
+        feeder.reset(flushedAtNanos)
+        runningLogged = false
     }
 
     /** Pause, discard what is queued, play again: the room falls silent within a few milliseconds. */
@@ -533,12 +609,17 @@ class LivingRoom(private val context: Context) {
         try {
             t.pause()
             t.flush()
+            resetClockState()
+            // the position is 0 again and the start threshold has to be reached again: queue silence first
+            primeSilence(t)
             t.play()
+            trackBornNanos = System.nanoTime()
+            feeder.reset(trackBornNanos)
         } catch (e: IllegalStateException) {
             AppLog.error(TAG, "flush failed", e)
             broken = true
+            resetClockState()
         }
-        resetClockState()
         lastUnderrunCount = try {
             t.underrunCount
         } catch (e: Exception) {
@@ -587,12 +668,23 @@ class LivingRoom(private val context: Context) {
             flushTrack(t)
             return
         }
-        val queued = written - headFrames(t)
-        if (queued > IDLE_QUEUE_FRAMES) {
-            sleepQuietly(6)
+        // Silence is queued up to a small lead while the track runs, and up to the whole buffer while its
+        // position has not moved yet or has stopped moving (see IdleFeeder).
+        val head = headFrames(t)
+        val frames = feeder.framesToWrite(written, head, System.nanoTime())
+        if (feeder.started && !runningLogged) {
+            runningLogged = true
+            AppLog.add(
+                TAG,
+                "AudioTrack runs: the position moved ${(System.nanoTime() - trackBornNanos) / 1_000_000L} ms after play(), " +
+                    "${written - head} of $capacityFrames frames queued",
+            )
+        }
+        if (frames <= 0) {
+            sleepQuietly(5)
             return
         }
-        writeFrames(t, silence, SILENCE_CHUNK_FRAMES)
+        if (writeSilenceNonBlocking(t, minOf(frames, SILENCE_CHUNK_FRAMES)) == 0) sleepQuietly(3)
     }
 
     // ---- the clock -----------------------------------------------------------------------------
@@ -697,13 +789,24 @@ class LivingRoom(private val context: Context) {
                 lastAdvance = now
                 continue
             }
-            val allowed = if (advancedOnce) STALL_NANOS else STARTUP_STALL_NANOS
-            if (now - lastAdvance > allowed) {
+            val queued = written - head
+            val verdict = StallPolicy.judge(
+                advancedOnce, now - lastAdvance, queued, capacityFrames, STALL_NANOS, STARTUP_STALL_NANOS,
+            )
+            if (verdict == StallPolicy.Verdict.STARVING) {
+                // The writer has not filled the buffer; the track waits for data, it is not broken. The audio
+                // thread fills it up (IdleFeeder); give it another period before judging again.
+                starvations++
+                if (starvations <= 5 || starvations % 20 == 0) {
+                    AppLog.add(TAG, "AudioTrack waits for data: $queued of $capacityFrames frames queued (#$starvations)")
+                }
+                lastAdvance = now
+            } else if (verdict == StallPolicy.Verdict.STALLED) {
                 stalls++
                 AppLog.error(
                     TAG,
-                    "AudioTrack stalled: position stuck at $head for ${(now - lastAdvance) / 1_000_000L} ms (stall #$stalls)" +
-                        if (advancedOnce) "" else ", it never started",
+                    "AudioTrack stalled: position stuck at $head for ${(now - lastAdvance) / 1_000_000L} ms with a full buffer " +
+                        "(stall #$stalls)" + if (advancedOnce) "" else ", it never started",
                 )
                 lastHeadAtBreak = head
                 broken = true
@@ -728,6 +831,9 @@ class LivingRoom(private val context: Context) {
         o.put("frames_played", framesPlayed)
         o.put("underruns", underruns)
         o.put("stalls", stalls)
+        o.put("starvations", starvations)
+        o.put("buffer_capacity_frames", capacityFrames)
+        o.put("track_started", feeder.started)
         o.put("recoveries", recoveries)
         o.put("decoder_starves", starves)
         o.put("start_events", starts)
@@ -768,6 +874,9 @@ class LivingRoom(private val context: Context) {
         private const val HINT_AHEAD_NANOS = 40_000_000L
         private const val STALL_NANOS = 1_200_000_000L
         private const val STARTUP_STALL_NANOS = 8_000_000_000L
+
+        /** The frames in the buffer at which a track starts, where the device allows it to be set (Android 12). */
+        private const val START_THRESHOLD_FRAMES = 1_024
         private const val HEAD_FALLBACK_NANOS = 1_500_000_000L
         private const val KIND_CALIBRATION = 3
     }

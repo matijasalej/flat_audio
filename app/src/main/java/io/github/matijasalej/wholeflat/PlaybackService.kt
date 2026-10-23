@@ -151,6 +151,11 @@ class PlaybackService : Service() {
         AppState.capture = captureSource
         AppState.tvRenderer = tvRenderer
         AppState.synced = synced
+        // the box's own HDMI output is not fed while the TV plays our stream in its DLNA player or sleeps (and nothing of Whole Flat's own plays)
+        livingRoom.idleSuspended = {
+            AppState.source != "librespot" && AppState.playback != "playing" && AppState.playback != "loading" &&
+                (tvRenderer.state == TvRenderer.State.STARTING || tvRenderer.state == TvRenderer.State.PLAYING || tv.lastKnownPower() == "Standby")
+        }
         Settings.addListener(settingsListener)
         applyVolume()
         acquireLocks()

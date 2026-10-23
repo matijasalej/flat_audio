@@ -276,7 +276,38 @@ class LivingRoom(private val context: Context) {
         AppLog.add(TAG, "audio thread ended")
     }
 
+    /**
+     * True while the box's own HDMI output is of no use and best left alone: the TV plays our stream in its DLNA player (it is not on the
+     * HDMI input) or is in standby, and no music of Whole Flat's own is on its way. The HDMI sink does not take the idle silence then, the
+     * watchdog saw the track stand still and rebuilt it every 30 s (17 times in 9 minutes), and each rebuild is an audio route change on the
+     * box. The track is released and not made again until this is false.
+     */
+    @Volatile
+    var idleSuspended: () -> Boolean = { false }
+
+    private var suspended = false
+
     private fun step() {
+        if (!dataFlowing && idleSuspended()) {
+            if (!suspended) {
+                suspended = true
+                AppLog.add(TAG, "the idle AudioTrack is released: the TV plays our stream or is in standby, and nothing of Whole Flat's own is playing")
+                try {
+                    track?.release()
+                } catch (e: Exception) {
+                    // gone
+                }
+                track = null
+                resetClockState()
+                state = "suspended"
+            }
+            sleepQuietly(250)
+            return
+        }
+        if (suspended) {
+            suspended = false
+            AppLog.add(TAG, "the idle AudioTrack is made again")
+        }
         val t = ensureTrack()
         if (t == null) {
             sleepQuietly(500)

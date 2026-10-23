@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""The TV test of the mood lights: what the Philips Ambilight makes of the painted picture and of its own styles.
+"""The TV test of the mood lights: what the Philips Ambilight does with its own styles while music plays.
 
 Runs on the Mac against the box (the Whole Flat app with the mood lights, Synced mode playing) and the TV (JointSpace on :1925).
 It reads the lights back from the TV (GET /6/ambilight/processed, 3 a second at most: the TV's server stalls from about
 10 calls a second) and never GETs /6/ambilight/cached (reported to crash the server).
 
-    python3 lights_probe.py s1            # painted picture: the screen off and on, FOLLOW_VIDEO settings and Lumina
-    python3 lights_probe.py s2            # the TV's own styles while music plays (the look book of Lyrics mode)
-    python3 lights_probe.py s3            # style calls at 0.5, 1 and 2 a second: errors, stalls and the TV's player
-    python3 lights_probe.py all
+    python3 lights_probe.py s2 [--display ambilight]   # the TV's own styles while music plays: which light up, which react
+    python3 lights_probe.py s3                          # style calls at 0.5, 1 and 2 a second: errors, stalls and the TV's player
+
+(The first version also painted test pictures into the TV stream; with the screen off the TV ignores the picture, so that is gone.)
 
 Everything it changes is saved first and put back at the end (also after Ctrl-C): the display, the app's Ambilight style, the
 lights' settings, the TV's Ambilight configuration. Results land in results/<time>_lights_<step>/ (JSONL and summary.md).
@@ -128,7 +128,6 @@ class Saved:
         try:
             post(BOX + "/settings", {k: s[k] for k in ("display", "ambilight_style", "ambilight_menu") if k in s})
             box("/lights/set", **{k: v for k, v in self.lights.items()})
-            box("/lights/test", pattern="off")
         except Exception as e:
             print("could not put the app back:", e)
         if tv_direct:
@@ -172,111 +171,6 @@ def check_playing():
     return d
 
 
-# ---- S1: the painted picture -----------------------------------------------------------------------
-
-def s1(args):
-    d = results_dir("s1")
-    saved = Saved()
-    log = open(os.path.join(d, "s1.jsonl"), "w")
-    rows = []
-    try:
-        check_playing()
-        box("/lights/set", lights="mood")
-        for display in ("ambilight", "screen"):
-            box("/remote/action", display=display)
-            time.sleep(3)
-            for style in SYNCED_STYLES:
-                box("/lights/set", lights_synced_style=style)
-                time.sleep(2.5)
-                widths = [5] if display == "ambilight" else [3, 5, 10]
-                if display == "screen" and not style.startswith(("FOLLOW_VIDEO/GAME", "FOLLOW_AUDIO")):
-                    continue  # the band is tried with the fastest FOLLOW_VIDEO and with Lumina only
-                for w in widths:
-                    if display == "screen":
-                        box("/lights/set", lights_band_pct=w)
-                    rows.append(one_s1(display, style, w, log))
-                    print(json.dumps(rows[-1]))
-    finally:
-        log.close()
-        saved.restore(tv_direct=False)
-    write_summary(d, "S1: the painted picture", rows, s1_verdict(rows))
-
-
-def one_s1(display, style, width, log):
-    delay = (box("/tv/dlna").get("delay_ms") or 2500) / 1000.0
-    label = f"{display}|{style}|{width}"
-    # every zone its own hue: does each zone show its own colour, and in the order we think?
-    exp = [hex_rgb(h) for h in box("/lights/test", pattern="zones", seconds=8)["zones_at_start"]]
-    time.sleep(delay + 1.5)
-    rec = record(5, log, label + "|zones")
-    zone_de, order_ok = None, None
-    if rec:
-        med = [tuple(statistics.median(r[1][z][k] for r in rec) for k in range(3)) for z in range(16)]
-        zone_de = round(statistics.median(chroma_match(med[z], exp[z]) for z in range(16)), 1)
-        best = [min(range(16), key=lambda e: chroma_match(med[z], exp[e])) for z in range(16)]
-        order_ok = sum(1 for z in range(16) if best[z] == z)
-    # a 120 BPM pulse, 60 % deep: how much of it is left on the wall?
-    box("/lights/test", pattern="pulse", seconds=10, color="ffffff", bpm=120)
-    time.sleep(delay + 1.0)
-    rec = record(8, log, label + "|pulse")
-    depth = None
-    if rec:
-        b = [statistics.mean(max(c) for c in r[1]) for r in rec]
-        hi, lo = max(b), min(b)
-        depth = round((hi - lo) / hi, 2) if hi > 0 else 0.0
-    if display == "screen":
-        box("/lights/test", pattern="off")
-        return {"display": display, "style": style, "band_pct": width, "zones_dE": zone_de, "zones_in_order": order_ok,
-                "pulse_depth_left": depth, "lag_after_sound_ms": None, "tv_delay_s": delay}
-    # black and white every 500 ms: the delay from the picture's moment to the lights (from the steps the polls catch)
-    t0 = time.time()
-    box("/lights/test", pattern="steps", seconds=24, color="ffffff", step_ms=500)
-    rec = record(delay + 22, log, label + "|steps")
-    lag_ms = step_lag(rec, t0 + delay, 0.5)
-    box("/lights/test", pattern="off")
-    return {"display": display, "style": style, "band_pct": width, "zones_dE": zone_de, "zones_in_order": order_ok,
-            "pulse_depth_left": depth, "lag_after_sound_ms": lag_ms, "tv_delay_s": delay}
-
-
-def step_lag(rec, start, step):
-    """The mean delay of the light's steps after their moment ([start] + k*[step]), from polls; None if too few."""
-    lags = []
-    prev = None
-    for t, c in rec:
-        on = statistics.mean(max(z) for z in c) > 128
-        if prev is not None and on != prev:
-            k = round((t - start) / step)
-            lags.append(t - (start + k * step))
-        prev = on
-    if len(lags) < 6:
-        return None
-    # a poll sees a step up to one poll late: take off half a poll
-    return round((statistics.mean(lags) - POLL_S / 2) * 1000)
-
-
-def s1_verdict(rows):
-    lines = []
-    off = [r for r in rows if r["display"] == "ambilight"]
-    good = [r for r in off if r["style"].startswith("FOLLOW_VIDEO") and (r["zones_dE"] or 99) < 10 and (r["pulse_depth_left"] or 0) >= 0.5 * 0.6]
-    if good:
-        pick = good[0]["style"]  # the list is in order of preference (GAME first)
-        lines.append(f"Screen off: **{pick}** follows the painted picture (ΔE {good[0]['zones_dE']}, pulse depth kept "
-                     f"{good[0]['pulse_depth_left']}): set `lights_synced_style={pick}` (our pulses).")
-    else:
-        lumina = [r for r in off if r["style"].startswith("FOLLOW_AUDIO") and (r["zones_dE"] or 99) < 15]
-        if lumina:
-            lines.append("Screen off: FOLLOW_VIDEO does not follow the picture well enough; **Lumina** takes the painted colours: keep the default.")
-        else:
-            lines.append("Screen off: neither follows the painted picture: the lights go **TV-native per song** in Synced mode too.")
-    on = [r for r in rows if r["display"] == "screen" and (r["zones_dE"] or 99) < 10]
-    if on:
-        w = min(r["band_pct"] for r in on)
-        lines.append(f"Screen on: the narrowest band that carries the zones is **{w} %**: set `lights_band_pct={w}`.")
-    else:
-        lines.append("Screen on: no band width carries the zones within ΔE 10; keep 5 % and look at it by eye.")
-    return lines
-
-
 # ---- S2: the TV's own styles -----------------------------------------------------------------------
 
 def s2(args):
@@ -287,12 +181,24 @@ def s2(args):
     home, accent = {"hue": 150, "saturation": 220, "brightness": 230}, {"hue": 20, "saturation": 220, "brightness": 230}
     configs = []
     for a in AUDIO_ALGORITHMS:
-        configs.append((f"{a}", {"styleName": "FOLLOW_AUDIO", "isExpert": False, "menuSetting": a}))
-    for a in ("ENERGY_ADAPTIVE_BRIGHTNESS", "VU_METER", "KNIGHT_RIDER_CLOCKWISE", "SPECTRUM_ANALYZER"):
+        configs.append((f"plain:{a}", {"styleName": "FOLLOW_AUDIO", "isExpert": False, "menuSetting": a}))
+    for a in AUDIO_ALGORITHMS:
+        # Party only works this way (seen by the sync session)
+        configs.append((f"expert:{a}", {"styleName": "FOLLOW_AUDIO", "isExpert": True, "algorithm": a}))
+    for a in ("ENERGY_ADAPTIVE_BRIGHTNESS", "ENERGY_ADAPTIVE_COLORS"):
         configs.append((f"COLORS:{a}", {"styleName": "FOLLOW_AUDIO", "isExpert": True, "audioSettings": {"algorithm": a, "color": home, "colorDelta": accent}, "tuning": 0}))
+    configs.append(("EXPCOL:ENERGY_ADAPTIVE_BRIGHTNESS", {"styleName": "FOLLOW_AUDIO", "isExpert": True, "algorithm": "ENERGY_ADAPTIVE_BRIGHTNESS",
+                                                         "colorSettings": {"color": home, "colorDelta": accent, "speed": 255}}))
     configs.append(("COLOR", {"styleName": "FOLLOW_COLOR", "isExpert": True, "algorithm": "MANUAL_HUE",
                               "colorSettings": {"color": home, "colorDelta": {"hue": 0, "saturation": 0, "brightness": 0}, "speed": 255}}))
+    # does the TV move a held colour by itself (a delta and a speed, as its lounge light does)?
+    for speed in (60, 200):
+        configs.append((f"COLOR~{speed}", {"styleName": "FOLLOW_COLOR", "isExpert": True, "algorithm": "MANUAL_HUE",
+                                           "colorSettings": {"color": home, "colorDelta": {"hue": 20, "saturation": 0, "brightness": 120}, "speed": speed}}))
     try:
+        if args.display:
+            box("/remote/action", display=args.display)  # put back with the rest at the end
+            time.sleep(3)
         check_playing()
         for name, cfg in configs:
             tp = time.time()
@@ -303,7 +209,7 @@ def s2(args):
             WINDOWS.append((tp, time.time(), f"POST currentconfiguration {name}"))
             time.sleep(1.5)
             back, _ = get(TV + "/ambilight/currentconfiguration")
-            rec = record(8, log, name)
+            rec = record(6, log, name)
             rows.append(look_of(name, status, back, rec))
             print(json.dumps(rows[-1]))
     finally:
@@ -330,9 +236,17 @@ def look_of(name, status, back, rec):
     n = max(1, len(hues))
     distinct = sum(1 for b in buckets if b / n >= 0.08)
     react = round(statistics.pstdev(bright) / max(1e-6, statistics.mean(bright)), 2) if len(bright) > 2 else None
-    took = back is not None and (back.get("algorithm") == name.split(":")[-1] or back.get("menuSetting") == name or
-                                 (name.startswith("COLORS:") and back.get("isExpert") is True) or (name == "COLOR" and back.get("algorithm") == "MANUAL_HUE"))
-    return {"style": name, "http": status, "took": took, "distinct_hues": distinct, "reactivity": react,
+    peak = max((max(max(z) for z in c) for _, c in rec), default=0)
+    alg = name.split(":")[-1].split("~")[0]
+    if back is None:
+        took = False
+    elif name.startswith("plain:"):
+        took = back.get("menuSetting") == alg
+    elif name.startswith("COLOR"):
+        took = back.get("algorithm") == "MANUAL_HUE" or (back.get("isExpert") is True and ((back.get("audioSettings") or {}).get("algorithm") == alg or back.get("algorithm") == alg))
+    else:
+        took = back.get("isExpert") is True and back.get("algorithm") == alg
+    return {"style": name, "http": status, "took": took, "peak": peak, "distinct_hues": distinct, "reactivity": react,
             "class": "mono" if distinct <= 1 else ("duo" if distinct == 2 else "multi")}
 
 
@@ -413,9 +327,10 @@ def write_summary(d, title, rows, verdict):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("step", choices=["s1", "s2", "s3", "all"])
+    p.add_argument("step", choices=["s2", "s3"])
+    p.add_argument("--display", choices=["ambilight", "screen"], help="s2: the display to run in (the one before is put back)")
     args = p.parse_args()
-    steps = {"s1": [s1], "s2": [s2], "s3": [s3], "all": [s1, s2]}[args.step]  # s3 (many style calls) only when asked for
+    steps = {"s2": [s2], "s3": [s3]}[args.step]
     try:
         for st in steps:
             st(args)

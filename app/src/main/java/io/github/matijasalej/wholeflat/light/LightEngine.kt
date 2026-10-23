@@ -11,23 +11,31 @@ import io.github.matijasalej.wholeflat.capture.CaptureFeed
 import io.github.matijasalej.wholeflat.capture.CaptureFrames
 import io.github.matijasalej.wholeflat.capture.MediaWatch
 import io.github.matijasalej.wholeflat.sync.FrameSource
-import io.github.matijasalej.wholeflat.sync.Picture
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
 /**
- * The mood lights: they listen to the captured music on a thread of their own and decide, song by song, what the Ambilight shows.
- * - **Analysis:** an [Analyzer] reads the capture (it never slows the capture down; it reads as the kitchen does). A new song (a new key of
- *   the media session) starts it again, with the tempo the song had last time.
- * - **Look:** every half second the song's look is chosen again ([Looks]) from the analysis, the hues of the cover and his override; a new
- *   class has to hold for two seconds before it is shown.
- * - **Synced mode:** the TV picture carries the lights. The frame loop of the stream asks [LightHook] for the 16 colours of each picture's
- *   capture time, and the TV's style is [LightOptions.syncedStyle].
- * - **Lyrics mode:** the TV's own styles, one call per song or section ([NativeStyles]), through the app's Ambilight control.
+ * The mood lights. They listen to the captured music on a thread of their own and choose, song by song and phrase by phrase, which of
+ * the TV's own Ambilight styles it shows ([TvLooks]):
+ * - calm songs: the song's colour, drifting;
+ * - most songs: its colours, livelier;
+ * - energetic songs: the TV's beat-reactive modes, a new one every phrase, Party at a chorus or a drop.
  *
- * With `lights` = `tv` all of this stands aside: the picture is black and the TV's style is the app's own setting, as before.
+ * How it works:
+ * - **Analysis:** an [Analyzer] reads the capture as the kitchen does (it never slows the capture down). A new song (a new key of the media
+ *   session) starts it again, with the tempo the song had last time.
+ * - **Look:** every half second the song's look is chosen again ([Looks]) from the analysis, the hues of the cover and his override. A new
+ *   class has to hold for two seconds.
+ * - **Timing:** the TV plays the capture later (in Synced mode the delay of its stream, about 2.4 s). So every tenth of a second the look
+ *   is worked out for the frame that the room will hear when a call made now has reached the TV, and it is sent if it changed. A song
+ *   change, a chorus or a new phrase then lands when it is heard, not when it is captured. While the previous song is still being heard,
+ *   its look stays.
+ * - **Calls:** through the app's Ambilight control ([io.github.matijasalej.wholeflat.sync.AmbilightControl], which holds the lights only
+ *   while they are wanted), at most one a second.
+ *
+ * With `lights` = `tv` all of this stands aside: nothing is analysed and the TV's style is the app's own setting, as before.
  */
 class LightEngine(context: Context, private val feed: CaptureFeed, private val covers: CoverCache) {
     private val prefs = context.applicationContext.getSharedPreferences("wholeflat_lights", Context.MODE_PRIVATE)
@@ -46,8 +54,6 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
 
     private val rate = feed.rate
     private val analyzer = Analyzer(rate)
-    private val planner = LightPlanner(rate)
-    private val previewPlanner = LightPlanner(rate)
 
     @Volatile
     private var running = false
@@ -55,31 +61,30 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
     private var worker: Thread? = null
     private val tvExec = Executors.newSingleThreadExecutor { r -> Thread(r, "wf-lights-tv").also { it.isDaemon = true } }
 
-    // the song
-    @Volatile private var trackKey: String? = null
-    @Volatile private var trackTitle: String? = null
-    @Volatile private var trackArtist: String? = null
-    @Volatile private var hues: CoverHues = CoverHues.NONE
-    private var huesKey: String? = null
-    @Volatile private var look: SongLook = SongLook("", LightClass.MONO, Colors.rgb(64, 92, 140), Colors.rgb(140, 92, 64), IntArray(4) { Colors.rgb(64, 92, 140) }, "nothing plays yet")
-    private var pendingClass: LightClass? = null
-    private var pendingCount = 0
-    private var newPlay = true
-    private var lastRememberNanos = 0L
+    /** A song as it was captured: where it began, its look, and (once a newer one began) its analysis as it ended. */
+    private class Song(val key: String?, val title: String?, val artist: String?, val startFrame: Long) {
+        @Volatile var look: SongLook = SongLook(key ?: "", LightClass.MONO, DEFAULT_COLOR, Colors.hsv(250.0, 0.5, 0.6), IntArray(4) { DEFAULT_COLOR }, "nothing known yet")
+        @Volatile var hues: CoverHues = CoverHues.NONE
+        @Volatile var ended: Analysis? = null
+        var huesKnown = false
+        var pendingClass: LightClass? = null
+        var pendingCount = 0
+        var newPlay = true
+        var lastRememberNanos = 0L
+    }
 
-    // what the painter did last, for the status and the probe
-    @Volatile private var lastZones = IntArray(Zones.COUNT)
-    @Volatile private var frames = 0L
+    @Volatile private var current = Song(null, null, null, 0)
+    @Volatile private var previous: Song? = null
 
-    // a test picture in force: the pattern, the capture time it began at, and when it ends
-    @Volatile private var test: LightPatterns? = null
-    @Volatile private var testStartNanos = 0L
-    @Volatile private var testEndNanos = 0L
-
-    // the TV's style in Lyrics mode
-    @Volatile private var nativeSent: String? = null
-    private var lastRestyleNanos = 0L
-    @Volatile private var restyles = 0
+    // the TV
+    @Volatile private var wanted: TvLook? = null
+    @Volatile private var wantedSong: Song? = null
+    @Volatile private var heardFrame = -1L
+    @Volatile private var delayUsedMs = Double.NaN
+    @Volatile private var sentJson: String? = null
+    @Volatile private var sent = 0
+    @Volatile private var lastSentAt = ""
+    private var lastSendNanos = 0L
 
     // what the analysis costs
     @Volatile private var cpuMsPerS = Double.NaN
@@ -87,75 +92,21 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
     fun start() {
         if (running) return
         running = true
-        LightHook.bandShare = options.bandPct / 100.0
-        LightHook.source = { f, c, p -> frameFor(planner, f, c, p, true) }
-        LightHook.previewSource = { f, c, p -> frameFor(previewPlanner, f, c, p, false) }
         worker = thread(name = "wf-lights", isDaemon = true) { loop() }
     }
 
     fun stop() {
         running = false
-        LightHook.source = null
-        LightHook.previewSource = null
         worker?.interrupt()
         worker = null
-        rememberSong()
+        rememberSong(current)
         tvExec.shutdownNow()
     }
 
-    private var tvKey: String? = null
-    private var tvJson: String? = null
+    /** The TV's style for the app's Ambilight control: the look for what is heard now; null while `lights` is `tv` (the app's own then). */
+    fun tvConfig(): String? = if (options.mood) wanted?.json else null
 
-    /**
-     * The TV's style for the app's Ambilight control: null while `lights` is `tv` (the app's own setting is used then). The same string
-     * until the song, its class (a section) or the cover's colours change, not with every small drift of the tint: the control sends a
-     * configuration whenever it differs from the one the TV holds, and the TV's server is slow.
-     */
-    @Synchronized
-    fun tvConfig(): String? {
-        val o = options
-        if (!o.mood) return null
-        val lyrics = Settings.values.mode == "lyrics"
-        val cls = classAt(analyzer.snapshot)
-        val key = if (!lyrics) "synced|${o.syncedStyle}" else "lyrics|$trackKey|${cls.key}|${huesKey != null}|${o.nativeMono}|${o.nativeDuo}|${o.nativeMulti}"
-        if (key != tvKey) {
-            tvJson = if (!lyrics) NativeStyles.plain(o.syncedStyle) else NativeStyles.forLook(look, cls, o.nativeMono, o.nativeDuo, o.nativeMulti)
-            tvKey = key
-        }
-        return tvJson
-    }
-
-    // ---- the picture ----------------------------------------------------------------------------
-
-    private fun frameFor(p: LightPlanner, captureFrame: Long, captureNanos: Long, picture: Picture, live: Boolean): IntArray? {
-        val o = options
-        if (!o.mood || picture == Picture.SPLASH) return null
-        // the frame the picture is stamped with; before the stream has its clock, the capture's own
-        val frame = if (captureFrame >= 0) captureFrame else feed.clock.frameAtNanos(captureNanos) ?: return null
-        val t = test
-        if (t != null && System.nanoTime() < testEndNanos) {
-            // on the frames of the calibration clicks themselves, with no offset: what is measured is the whole way to the wall
-            if (t.byFrame) return t.atFrame(frame, rate).also { if (live) note(it) }
-            val elapsedMs = (captureNanos - testStartNanos) / 1_000_000L
-            if (elapsedMs < 0) return null
-            return t.at(elapsedMs).also { if (live) note(it) }
-        }
-        if (Settings.values.display == "listen") return null
-        val ahead = frame + o.offsetMs.toLong() * rate / 1000
-        val variant = if (picture == Picture.LYRICS) LightPlanner.Variant.BAND else LightPlanner.Variant.FULL
-        val strength = if (o.tvPulses) LightPlanner.Strength.NONE else LightPlanner.Strength.of(o.strength)
-        val out = IntArray(Zones.COUNT)
-        p.frame(ahead, analyzer.snapshot, look, strength, variant, out)
-        if (live) note(out)
-        return out
-    }
-
-    private fun note(zones: IntArray) {
-        lastZones = zones
-        frames++
-    }
-
-    // ---- the analysis ---------------------------------------------------------------------------
+    // ---- the analysis and the timing -----------------------------------------------------------
 
     private fun loop() {
         val buf = ShortArray(CHUNK * 2)
@@ -164,19 +115,31 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
         var cursor = 0L
         var lastTrack = 0L
         var lastLook = 0L
+        var lastTv = 0L
         var cpuFrom = SystemClock.currentThreadTimeMillis()
         var cpuAt = SystemClock.elapsedRealtime()
         while (running) {
             try {
                 if (source == null || feed.generation != gen) {
+                    val restarted = gen != Long.MIN_VALUE && feed.generation != gen
                     gen = feed.generation
                     source = CaptureFrames(feed.buffer, gen)
                     cursor = feed.buffer.writeIndex
-                    analyzer.reset(cursor, rememberedBpm())
+                    if (restarted) {
+                        // a new capture numbers its frames from 0 again: the song goes on from here
+                        val c = current
+                        current = Song(c.key, c.title, c.artist, cursor).also {
+                            it.look = c.look
+                            it.hues = c.hues
+                            it.huesKnown = c.huesKnown
+                        }
+                        previous = null
+                    }
+                    analyzer.reset(cursor, rememberedBpm(current.key))
                 }
                 val n = source.read(cursor, buf, CHUNK, 100)
                 val mood = options.mood
-                if (mood && !analysing) analyzer.reset(cursor, rememberedBpm()) // switched on: start the song's analysis afresh
+                if (mood && !analysing) analyzer.reset(cursor, rememberedBpm(current.key)) // switched on: the song's analysis starts afresh
                 analysing = mood
                 when {
                     n > 0 -> {
@@ -186,7 +149,7 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
                     n == FrameSource.EPOCH -> source = null
                     n == FrameSource.LAPPED -> {
                         cursor = feed.buffer.writeIndex
-                        analyzer.reset(cursor, rememberedBpm())
+                        analyzer.reset(cursor, rememberedBpm(current.key))
                     }
                     n == FrameSource.CLOSED -> Thread.sleep(200)
                 }
@@ -195,9 +158,13 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
                     lastTrack = now
                     checkTrack(cursor)
                 }
-                if (now - lastLook >= 500_000_000L) {
+                if (mood && now - lastLook >= 500_000_000L) {
                     lastLook = now
                     updateLook(now)
+                }
+                if (now - lastTv >= 100_000_000L) {
+                    lastTv = now
+                    tvStep(now)
                 }
                 val el = SystemClock.elapsedRealtime()
                 if (el - cpuAt >= 10_000L) {
@@ -209,7 +176,7 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
             } catch (e: InterruptedException) {
                 break
             } catch (t: Throwable) {
-                AppLog.error(TAG, "the analysis of the lights failed", t)
+                AppLog.error(TAG, "the mood lights failed", t)
                 try {
                     Thread.sleep(500)
                 } catch (e: InterruptedException) {
@@ -219,99 +186,119 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
         }
     }
 
-    private fun rememberedBpm(): Double? = trackKey?.let { memory.get(it)?.bpm }?.takeIf { !it.isNaN() }
+    private fun rememberedBpm(key: String?): Double? = key?.let { memory.get(it)?.bpm }?.takeIf { !it.isNaN() }
 
     private fun checkTrack(cursor: Long) {
         val np = AppState.nowPlaying()?.takeIf { it.hasTrack }
         val key = np?.key
-        if (key != trackKey) {
-            rememberSong()
-            trackKey = key
-            trackTitle = np?.title
-            trackArtist = np?.artist
-            hues = CoverHues.NONE
-            huesKey = null
-            pendingClass = null
-            pendingCount = 0
-            newPlay = true
-            analyzer.reset(cursor, rememberedBpm())
-            if (key != null) AppLog.add(TAG, "song ${np?.title} / ${np?.artist}: ${memory.get(key)?.let { "known, ${if (it.bpm.isNaN()) "no" else it.bpm.toInt().toString()} BPM, ${(it.override ?: it.cls)?.key}" } ?: "new"}")
+        val song = current
+        if (key != song.key) {
+            rememberSong(song)
+            song.ended = analyzer.snapshot
+            previous = song
+            val next = Song(key, np?.title, np?.artist, cursor)
+            current = next
+            analyzer.reset(cursor, rememberedBpm(key))
+            if (key != null) {
+                val m = memory.get(key)
+                if (m != null) next.look = Looks.choose(key, m.energy, m.clarity, m.mood, next.hues, m.override)
+                AppLog.add(TAG, "song ${np?.title} / ${np?.artist}: ${m?.let { "known, ${if (it.bpm.isNaN()) "no" else it.bpm.toInt().toString()} BPM, ${(it.override ?: it.cls)?.key}" } ?: "new"}")
+            }
         }
-        if (np != null && key != null && huesKey != key) {
+        val c = current
+        if (np != null && key != null && !c.huesKnown) {
             val cover = try {
                 covers.coverFor(np, MediaWatch.art)
             } catch (t: Throwable) {
                 null
             }
             if (cover != null) {
-                hues = huesOf(cover.bitmap)
-                huesKey = key
+                c.hues = huesOf(cover.bitmap)
+                c.huesKnown = true
             }
         }
     }
 
     private fun updateLook(now: Long) {
+        val song = current
+        val key = song.key ?: return
         val a = analyzer.snapshot
-        val key = trackKey ?: ""
         val mem = memory.get(key)
         val songS = a.songSeconds(rate)
         // early in a song, what it was last time; then what it is
-        val energy = if (songS >= 10 || mem == null || mem.bpm.isNaN()) a.energySong else mem.energy
-        val clarity = if (a.locked || mem == null || mem.bpm.isNaN()) a.clarity else mem.clarity
-        val mood = if (songS >= 15 || mem == null || mem.bpm.isNaN()) a.mood else mem.mood
-        val chosen = Looks.choose(key, energy, clarity, mood, hues, mem?.override)
-        val current = look
-        val cls = if (current.key != key || chosen.cls == current.cls || mem?.override != null) {
-            pendingClass = null
-            pendingCount = 0
+        val known = mem != null && !mem.bpm.isNaN()
+        val energy = if (songS >= 10 || !known) a.energySong else mem!!.energy
+        val clarity = if (a.locked || !known) a.clarity else mem!!.clarity
+        val mood = if (songS >= 15 || !known) a.mood else mem!!.mood
+        val chosen = Looks.choose(key, energy, clarity, mood, song.hues, mem?.override)
+        val shown = song.look
+        val cls = if (chosen.cls == shown.cls || mem?.override != null) {
+            song.pendingClass = null
+            song.pendingCount = 0
             chosen.cls
         } else {
             // a new class has to hold for two seconds (four readings) before it is shown
-            if (pendingClass == chosen.cls) pendingCount++ else {
-                pendingClass = chosen.cls
-                pendingCount = 1
+            if (song.pendingClass == chosen.cls) song.pendingCount++ else {
+                song.pendingClass = chosen.cls
+                song.pendingCount = 1
             }
-            if (pendingCount >= 4) chosen.cls else current.cls
+            if (song.pendingCount >= 4) chosen.cls else shown.cls
         }
-        look = if (cls == chosen.cls) chosen else SongLook(chosen.key, cls, chosen.home, chosen.accent, chosen.multi, chosen.why + " (held at ${cls.key})")
-        // the memory is written at the end of a song; while one plays, once a minute (it is a few hundred kB at most, on a small flash)
-        if (trackKey != null && songS >= 20 && now - lastRememberNanos >= 60_000_000_000L) rememberSong()
-        restyleIfNeeded(now)
+        song.look = if (cls == chosen.cls) chosen else SongLook(chosen.key, cls, chosen.home, chosen.accent, chosen.multi, chosen.why + " (held at ${cls.key})")
+        // the memory is written at the end of a song; while one plays, once a minute (a few hundred kB at most, on a small flash)
+        if (songS >= 20 && now - song.lastRememberNanos >= 60_000_000_000L) rememberSong(song)
     }
 
-    /** Notes the song that plays (if it has played long enough to say something about it), with the class the app would give it itself. */
-    private fun rememberSong() {
-        val key = trackKey ?: return
+    /** The look for the frame that will be heard when a call made now has reached the TV; sent if it changed (at most once a second). */
+    private fun tvStep(now: Long) {
+        val o = options
+        if (!o.mood) {
+            wanted = null
+            sentJson = null
+            return
+        }
+        // how long after its capture a frame is heard: the delay of the TV's stream in Synced mode; at once over HDMI in Lyrics mode
+        val delayMs = if (Settings.values.mode == "lyrics") 0.0 else AppState.tvRenderer?.takeIf { it.live }?.delayMs ?: Double.NaN
+        delayUsedMs = delayMs
+        if (delayMs.isNaN()) return // no stream: the TV's lights are not ours to set now
+        val heard = feed.clock.frameAtNanos(now + APPLY_NANOS - Math.round(delayMs * 1e6)) ?: return
+        heardFrame = heard
+        val cur = current
+        val prev = previous
+        val song: Song
+        val a: Analysis
+        if (prev != null && heard < cur.startFrame) {
+            song = prev
+            a = prev.ended ?: analyzer.snapshot
+        } else {
+            if (prev != null) previous = null
+            song = cur
+            a = analyzer.snapshot
+        }
+        if (song.key == null) return
+        val look = TvSchedule.lookAt(heard, a, song.look, rate, o.strength, o.modeLooks(), song.key.hashCode())
+        wanted = look
+        wantedSong = song
+        if (look.json != sentJson && now - lastSendNanos >= MIN_SEND_GAP_NANOS) {
+            sentJson = look.json
+            lastSendNanos = now
+            sent++
+            lastSentAt = "${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.ROOT).format(java.util.Date())} ${look.name} for ${song.title}"
+            val synced = AppState.synced
+            if (synced != null) tvExec.execute { synced.restyleAmbilight() }
+        }
+    }
+
+    /** Notes [song] (if it has played long enough to say something about it), with the class the app would give it itself. */
+    private fun rememberSong(song: Song) {
+        val key = song.key ?: return
+        if (song !== current) return
         val a = analyzer.snapshot
         if (a.songSeconds(rate) < 20) return
-        val own = Looks.classify(a.energySong, a.clarity, hues.colourful, null)
-        memory.remember(key, trackTitle, trackArtist, if (a.locked) a.bpm else Double.NaN, a.energySong, a.clarity, a.mood, own, System.currentTimeMillis(), newPlay)
-        newPlay = false
-        lastRememberNanos = System.nanoTime()
-    }
-
-    /** The class at the moment of [a]: the song's, lifted or lowered by a section (as the planner does it). */
-    private fun classAt(a: Analysis): LightClass {
-        val e = a.sections.lastOrNull() ?: return look.cls
-        val hold = if (a.periodFrames.isNaN()) 16.0 * rate else LightPlanner.HOLD_BEATS * a.periodFrames
-        if (a.frame - e.frame > hold) return look.cls
-        return if (e.up) look.cls.up() else look.cls.down()
-    }
-
-    /**
-     * In Lyrics mode a new style for a new song, a new class (a section) or when the cover's colours arrive, at most one call a second,
-     * through the app's Ambilight control. Not for every small drift of the tint: the TV's server is slow and the style is a whole call.
-     */
-    private fun restyleIfNeeded(now: Long) {
-        val want = tvConfig() ?: return
-        if (want == nativeSent || now - lastRestyleNanos < 1_000_000_000L) return
-        val first = nativeSent == null
-        nativeSent = want
-        lastRestyleNanos = now
-        if (first) return // the control puts it on when it switches the lights on
-        restyles++
-        val synced = AppState.synced ?: return
-        tvExec.execute { synced.restyleAmbilight() }
+        val own = Looks.classify(a.energySong, a.clarity, song.hues.colourful, null)
+        memory.remember(key, song.title, song.artist, if (a.locked) a.bpm else Double.NaN, a.energySong, a.clarity, a.mood, own, System.currentTimeMillis(), song.newPlay)
+        song.newPlay = false
+        song.lastRememberNanos = System.nanoTime()
     }
 
     private fun huesOf(bitmap: Bitmap): CoverHues = try {
@@ -332,13 +319,11 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
         }
     }
 
-    /** `/lights` and below (GET): the state, the history, the settings, the test pictures and his more or less colour. */
+    /** `/lights` and below (GET): the state, the history, the settings, and his less, just right or more colour. */
     fun handle(path: String, query: Map<String, String>): Reply = when (path) {
         "/lights" -> Reply.json(statusJson())
         "/lights/history" -> Reply.json(JSONArray().also { arr -> memory.all().forEach { arr.put(it.toJson()) } })
-        "/lights/zones" -> Reply.json(JSONObject().put("zones", hexes(lastZones)).put("frames", frames))
         "/lights/set" -> set(query)
-        "/lights/test" -> test(query)
         "/lights/colour" -> colour(query["step"] ?: "")
         else -> Reply.json(JSONObject().put("error", "not found"), 404)
     }
@@ -348,45 +333,25 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
         val (o, refused) = before.apply(query)
         options = o
         prefs.edit().putString(KEY_OPTIONS, o.toJson().toString()).apply()
-        LightHook.bandShare = o.bandPct / 100.0
-        if (o != before) AppLog.add(TAG, "settings ${o.toJson()}")
-        if (o.mode != before.mode || o.syncedStyle != before.syncedStyle || o.nativeMono != before.nativeMono || o.nativeDuo != before.nativeDuo || o.nativeMulti != before.nativeMulti) {
-            nativeSent = null // the next look update notes the new style; the call goes out now
-            restyles++
-            AppState.synced?.let { s -> tvExec.execute { s.restyleAmbilight() } }
+        if (o != before) {
+            AppLog.add(TAG, "settings ${o.toJson()}")
+            if (o.mode != before.mode) {
+                // the control takes the app's own style again (tv) or ours from the next look (mood)
+                sentJson = null
+                AppState.synced?.let { s -> tvExec.execute { s.restyleAmbilight() } }
+            }
         }
         return Reply.json(JSONObject().put("ok", refused.isEmpty()).put("options", o.toJson()).put("refused", JSONArray(refused)))
     }
 
-    private fun test(query: Map<String, String>): Reply {
-        val name = query["pattern"] ?: ""
-        if (name == "off" || name.isEmpty()) {
-            test = null
-            return Reply.json(JSONObject().put("ok", true).put("pattern", "off"))
-        }
-        if (name !in LightPatterns.NAMES) return Reply.json(JSONObject().put("ok", false).put("error", "pattern: one of ${LightPatterns.NAMES}"), 400)
-        val seconds = (query["seconds"]?.toIntOrNull() ?: 20).coerceIn(1, 600)
-        val p = LightPatterns(
-            name,
-            LightPatterns.parseColor(query["color"]) ?: Colors.rgb(255, 255, 255),
-            query["bpm"]?.toDoubleOrNull()?.coerceIn(30.0, 240.0) ?: 120.0,
-            query["step_ms"]?.toIntOrNull()?.coerceIn(50, 10_000) ?: 250,
-        )
-        val now = System.nanoTime()
-        testStartNanos = now
-        testEndNanos = now + seconds * 1_000_000_000L + 3_000_000_000L // the pictures of the last seconds are drawn about 2 s after their capture
-        test = p
-        AppLog.add(TAG, "test picture $name for $seconds s")
-        return Reply.json(JSONObject().put("ok", true).put("pattern", name).put("seconds", seconds).put("start_capture_ms", now / 1_000_000L).put("zones_at_start", hexes(p.at(0))))
-    }
-
     /**
-     * His choice for the song that plays: one class less or more than it shows now, the one it shows ("keep": just right, which is what
-     * tells the review that the app chose well), or back to the automatic one.
+     * His choice for the song that plays: one class less or more than it shows now, the one it shows ("keep": just right, which tells the
+     * review that the app chose well), or back to the automatic one.
      */
     private fun colour(step: String): Reply {
-        val key = trackKey ?: return Reply.json(JSONObject().put("ok", false).put("error", "no song plays"), 409)
-        val shown = look.cls
+        val song = current
+        val key = song.key ?: return Reply.json(JSONObject().put("ok", false).put("error", "no song plays"), 409)
+        val shown = song.look.cls
         val cls = when (step) {
             "less" -> shown.down()
             "more" -> shown.up()
@@ -395,27 +360,30 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
             else -> return Reply.json(JSONObject().put("ok", false).put("error", "step: less, keep, more or auto"), 400)
         }
         memory.override(key, cls, System.currentTimeMillis())
-        AppLog.add(TAG, "his choice for $trackTitle: ${cls?.key ?: "automatic"}")
+        AppLog.add(TAG, "his choice for ${song.title}: ${cls?.key ?: "automatic"}")
         updateLook(System.nanoTime())
-        return Reply.json(JSONObject().put("ok", true).put("class", look.cls.key).put("override", cls?.key ?: JSONObject.NULL))
+        return Reply.json(JSONObject().put("ok", true).put("class", song.look.cls.key).put("override", cls?.key ?: JSONObject.NULL))
     }
 
-    /** What the phone page shows of the lights: on or off, the class and the tempo. */
+    /** What the phone page shows of the lights: on or off, the class, what the TV shows, and the tempo. */
     fun phoneJson(): JSONObject {
+        val song = current
         val a = analyzer.snapshot
-        val mem = trackKey?.let { memory.get(it) }
+        val mem = song.key?.let { memory.get(it) }
         return JSONObject()
             .put("on", options.mood)
-            .put("class", look.cls.key)
+            .put("class", song.look.cls.key)
             .put("override", mem?.override?.key ?: JSONObject.NULL)
+            .put("tv", wanted?.name ?: JSONObject.NULL)
             .put("bpm", if (a.locked) Math.round(a.bpm) else JSONObject.NULL)
     }
 
     fun statusJson(): JSONObject {
         val a = analyzer.snapshot
+        val song = current
         val o = JSONObject()
         o.put("options", options.toJson())
-        o.put("track", JSONObject().put("key", trackKey ?: JSONObject.NULL).put("title", trackTitle ?: JSONObject.NULL).put("artist", trackArtist ?: JSONObject.NULL))
+        o.put("track", JSONObject().put("key", song.key ?: JSONObject.NULL).put("title", song.title ?: JSONObject.NULL).put("artist", song.artist ?: JSONObject.NULL))
         o.put(
             "analysis",
             JSONObject()
@@ -431,20 +399,28 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
                 .put("silent", a.silent)
                 .put("sections", JSONArray().also { arr -> a.sections.forEach { s -> arr.put(JSONObject().put("at_s", round((s.frame - a.firstFrame).toDouble() / rate, 1)).put("up", s.up)) } }),
         )
-        val l = look
-        o.put("look", JSONObject().put("class", l.cls.key).put("class_now", planner.classNow.key).put("home", hex(l.home)).put("accent", hex(l.accent)).put("multi", hexes(l.multi)).put("why", l.why))
-        o.put("cover", JSONObject().put("grey", hues.grey).put("colourful", hues.colourful).put("hues", JSONArray().also { arr -> hues.clusters.forEach { c -> arr.put(JSONObject().put("hue", Math.round(c.hue)).put("share", round(c.share, 2))) } }))
-        o.put("painter", JSONObject().put("frames", frames).put("pulsing", planner.pulsing).put("pulses", planner.pulsesAllowed).put("pulses_held", planner.pulsesHeld).put("zones", hexes(lastZones)))
-        o.put("tv", JSONObject().put("config", tvConfig() ?: JSONObject.NULL).put("restyles", restyles))
-        val t = test
-        o.put("test", if (t != null && System.nanoTime() < testEndNanos) JSONObject().put("pattern", t.pattern).put("left_s", (testEndNanos - System.nanoTime()) / 1_000_000_000L) else JSONObject.NULL)
+        val l = song.look
+        o.put("look", JSONObject().put("class", l.cls.key).put("home", hex(l.home)).put("accent", hex(l.accent)).put("why", l.why))
+        o.put("cover", JSONObject().put("grey", song.hues.grey).put("colourful", song.hues.colourful).put("hues", JSONArray().also { arr -> song.hues.clusters.forEach { c -> arr.put(JSONObject().put("hue", Math.round(c.hue)).put("share", round(c.share, 2))) } }))
+        val heard = heardFrame
+        val ws = wantedSong
+        val next = if (ws != null && heard >= 0) TvSchedule.nextSwitch(heard, if (ws === song) a else (ws.ended ?: a), ws.look, rate, options.strength) else -1L
+        o.put(
+            "tv",
+            JSONObject()
+                .put("look", wanted?.name ?: JSONObject.NULL)
+                .put("for", ws?.title ?: JSONObject.NULL)
+                .put("config", wanted?.json ?: JSONObject.NULL)
+                .put("delay_ms", if (delayUsedMs.isNaN()) JSONObject.NULL else Math.round(delayUsedMs))
+                .put("next_change_s", if (next < 0 || heard < 0) JSONObject.NULL else round((next - heard).toDouble() / rate, 1))
+                .put("sent", sent)
+                .put("last_sent", lastSentAt),
+        )
         o.put("cpu_ms_per_s", if (cpuMsPerS.isNaN()) JSONObject.NULL else round(cpuMsPerS, 1))
         return o
     }
 
     private fun hex(c: Int): String = String.format("#%06x", c and 0xFFFFFF)
-
-    private fun hexes(cs: IntArray): JSONArray = JSONArray().also { arr -> cs.forEach { arr.put(hex(it)) } }
 
     private fun round(v: Double, digits: Int): Double {
         if (v.isNaN() || v.isInfinite()) return 0.0
@@ -459,5 +435,13 @@ class LightEngine(context: Context, private val feed: CaptureFeed, private val c
 
         /** Frames read at a time: 40 ms. */
         const val CHUNK = 1764
+
+        /** How long a style call takes to show on the TV (the call and the TV's own step), sent this much ahead. */
+        const val APPLY_NANOS = 150_000_000L
+
+        /** The TV's server is slow: at most one style a second. */
+        const val MIN_SEND_GAP_NANOS = 1_000_000_000L
+
+        val DEFAULT_COLOR = Colors.rgb(64, 92, 140)
     }
 }

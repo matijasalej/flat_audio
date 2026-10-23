@@ -70,14 +70,14 @@ class LyricsRenderer(context: Context, private val surface: Surface, val path: P
      * Draws one picture and puts it on the surface; returns the time the encoder will give it (System.nanoTime, as its timestamp):
      * with the canvas it is the moment the picture was queued, with OpenGL it is [timestampNanos]. Throws if the surface does not take it.
      */
-    fun render(picture: Picture, scene: TvScene?, timestampNanos: Long, lights: IntArray? = null): Long {
+    fun render(picture: Picture, scene: TvScene?, timestampNanos: Long): Long {
         val t0 = System.nanoTime()
         var stamp = timestampNanos
         when (path) {
             Path.HW -> {
                 val c = surface.lockHardwareCanvas()
                 try {
-                    drawer.draw(c, picture, scene, lights)
+                    drawer.draw(c, picture, scene)
                 } finally {
                     surface.unlockCanvasAndPost(c)
                 }
@@ -86,7 +86,7 @@ class LyricsRenderer(context: Context, private val surface: Surface, val path: P
             Path.SW -> {
                 val c = surface.lockCanvas(null)
                 try {
-                    drawer.draw(c, picture, scene, lights)
+                    drawer.draw(c, picture, scene)
                 } finally {
                     surface.unlockCanvasAndPost(c)
                 }
@@ -94,7 +94,7 @@ class LyricsRenderer(context: Context, private val surface: Surface, val path: P
             }
             Path.GL -> {
                 val canvas = bitmapCanvas!!
-                drawer.draw(canvas, picture, scene, lights)
+                drawer.draw(canvas, picture, scene)
                 gl!!.post(bitmap!!, timestampNanos)
             }
         }

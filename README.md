@@ -178,34 +178,35 @@ What to watch: `/synced` (the mode manager, the screen and lights, what it last 
 
 ## Mood lights: the Ambilight follows each song
 
-The lights listen to the captured music on a thread of their own, about 5 to 10 % of one core of the box, and decide song by song what the Ambilight shows (16 zones on this TV: 4 left, 8 top, 4 right).
+The lights listen to the captured music on a thread of their own (about 10 % of one core of the box) and choose, song by song and phrase by phrase, which of the TV's own Ambilight styles it shows:
 
-- **The class:**
-  - **Mono** (one colour) for calm songs or songs without a clear beat.
-  - **Duo** (a home colour and an accent, swapping at each new section) for most songs.
-  - **Multi** (four colours, a step every four beats) for energetic songs with a clear beat.
-  - A chorus or a drop lifts the class for 32 beats, a breakdown lowers it.
-- **The colours** are the cover's (the same as behind the lyrics), tinted by the mood: more energy is more saturated and brighter, a happy song turns towards yellow-orange, a sad one towards blue.
-- **The motion** follows the tempo:
-  - a swell a beat below 75 BPM;
-  - a hit on every beat up to 150 BPM, on every second beat above;
-  - no pulses until the tempo has locked, about 5 s into a song (sooner for a song heard before), and then the brightness follows the loudness.
-- **The flash limit:** flashes never start closer than 360 ms (ITU-R BT.1702), and a saturated red never flashes deeper than 10 %.
+| The song | Class | What the TV shows |
+| --- | --- | --- |
+| calm, or no clear beat (energy below 0.35 or beat clarity below 0.3) | Mono | the cover's colour (tinted by the mood), held by the TV and drifting slowly around itself |
+| most songs | Duo | the cover's colour drifting further, towards a second colour that suits it, faster for faster songs |
+| energetic with a clear beat (energy 0.7 and clarity 0.5 or more) | Multi | the TV's beat-reactive modes: Party, Rhythm, Scanner, VU meter, Spectrum, Colora, a new one every 32 beats |
 
-**How it reaches the TV.** In Synced mode the lights are painted into the picture the TV already gets: the whole picture in the `ambilight` display (the screen is off, so only the Ambilight sees it), and a glow band at the edges of the lyrics in `screen`. The Ambilight reads the edges of that picture, and the picture carries the time stamp of its sound, so the lights come with the music; they are drawn `lights_offset_ms` ahead (default 20 ms), because a light up to 125 ms early goes unnoticed and one more than 45 ms late does not (ITU-R BT.1359). In Lyrics mode (the Spotify app over HDMI) the TV's own styles are used, one JointSpace call per song or section. JointSpace is never asked more than about once a second: the TV's server stalls at 10 calls a second.
+- **The class:** a colourful cover lifts Duo to Multi from energy 0.55. A chorus or a drop lifts the class for 32 beats (a Duo song's chorus goes to Party), a breakdown lowers it.
+- **The colours** are the cover's, tinted by the mood: more energy is more saturated and brighter, a happy song turns towards yellow-orange, a sad one towards blue.
+- **The beat:** the TV's modes react to the sound the TV itself plays, so they are on the beat by themselves. The app decides when to change: the phrases are counted on the tempo it finds, a change waits for a phrase boundary, and every change is sent ahead by the delay of the TV's stream (about 2.4 s in Synced mode), so that it lands when the song, the chorus or the phrase is heard and not when it is captured.
+- **Never used:** the strobe, and Lumina (`ENERGY_ADAPTIVE_BRIGHTNESS`), which takes its colours from the picture and is dark when the screen is off.
+- It is the same with the screen off (`ambilight`) and with the lyrics (`screen`). JointSpace gets one call when the look changes, never more than one a second (the TV's server stalls at 10 a second).
 
-**His choice.** The phone page shows the class and the tempo under **Lights**, with **Less colour**, **Just right** and **More colour**: the song keeps that class from then on (`/lights/colour?step=auto` gives it back to the app), and "just right" tells the review that the app chose well. Every song is remembered (its tempo, energy, mood, class and his choice) at `/lights/history`.
+What the TV can do was measured on 23.10.2026 with the screen off, from `/6/ambilight/processed`:
+- Lumina is dark there, and so is every expert `FOLLOW_AUDIO` style without colours except Party.
+- Party works only as `{"styleName":"FOLLOW_AUDIO","isExpert":true,"algorithm":"PARTY"}`.
+- `FOLLOW_COLOR` `MANUAL_HUE` holds a colour, and moves it by itself with a `colorDelta` and a `speed`.
+- The TV ignores the picture when the screen is off: lights painted into the picture do not reach the wall.
+
+**His choice.** The phone page shows the class, the TV's look and the tempo under **Lights**, with **Less colour**, **Just right** and **More colour**: the song keeps that class from then on (`/lights/colour?step=auto` gives it back to the app), and "just right" tells the review that the app chose well. Every song is remembered (its tempo, energy, mood, the app's class and his choice) at `/lights/history`; `spikes/lights_review.py` compares the tempo with Deezer's and the classes with his choices.
 
 | Setting (at `/lights/set?...`) | Meaning |
 | --- | --- |
-| `lights` (`mood`, `tv`) | `mood`: the mood lights. `tv`: as before (the TV's own `ambilight_style`, a black picture). |
-| `lights_strength` (`subtle`, `adaptive`, `punchy`) | How deep the pulses go. |
-| `lights_offset_ms` (-200 to 300, default 20) | How far ahead of the sound the lights are drawn. |
-| `lights_band_pct` (1 to 12, default 5) | The width of the glow band round the lyrics, in % of the width. |
-| `lights_synced_style` (default `FOLLOW_AUDIO/ENERGY_ADAPTIVE_BRIGHTNESS`) | The TV's style in Synced mode. `FOLLOW_VIDEO/<menu>` takes the painted pulses; Lumina (the default) takes the painted colours and makes its own pulses from the audio. |
-| `lights_native_mono`, `_duo`, `_multi` | The TV's style per class in Lyrics mode: `COLOR` (the home colour held), `COLORS:<algorithm>` (a FOLLOW_AUDIO algorithm in our colours) or a plain FOLLOW_AUDIO algorithm. |
+| `lights` (`mood`, `tv`) | `mood`: the mood lights. `tv`: as before (the app's own `ambilight_style`). |
+| `lights_strength` (`subtle`, `adaptive`, `punchy`) | How lively: how fast the colours drift, and how often an energetic song changes mode (every 64, 32 or 16 beats). |
+| `lights_modes` (default all: `party,rhythm,scanner,vu,scanner-cw,spectrum,colora`) | The modes an energetic song goes through. |
 
-What to watch: `/lights` (the song, tempo, lock, energy, mood, sections, the look and why, the cover's hues, the painter's pulses, the TV's style, the analysis's CPU time), `/lights/zones` (the 16 colours of the last picture), `/tv/preview.jpg` (the picture with the lights), `/log` (tag `lights`). `/lights/test?pattern=split|zones|chase|pulse|steps|solid&seconds=20&color=ff8800` paints a test picture (for checking on the TV what the Ambilight makes of it); `pattern=off` ends it.
+What to watch: `/lights` (the song, tempo, lock, energy, mood, sections, the look and why, the cover's hues, what the TV shows and for which song, the delay used, when the next change comes, the calls sent, the analysis's CPU time) and `/log` (tag `lights`).
 
 ## Free storage
 

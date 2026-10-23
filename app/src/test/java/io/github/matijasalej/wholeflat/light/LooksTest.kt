@@ -101,18 +101,4 @@ class LooksTest {
         assertTrue(Colors.deltaE(Colors.rgb(255, 0, 0), Colors.rgb(0, 0, 255)) > 100)
         assertEquals(10.0, Colors.turnToward(350.0, 40.0, 20.0), 1e-9)
     }
-
-    @Test
-    fun theZoneImageCarriesEachZoneAtItsEdge() {
-        val zones = IntArray(Zones.COUNT) { Colors.hsv(it * 360.0 / Zones.COUNT, 1.0, 1.0) }
-        val w = 64
-        val h = 36
-        val img = IntArray(w * h)
-        Zones.image(zones, w, h, img)
-        // left 0 is at the bottom of the left edge, top 0 at the left of the top, right 0 at the top of the right edge
-        assertTrue(Colors.deltaE(img[(h * 7 / 8) * w + 0], zones[0]) < 12)
-        assertTrue(Colors.deltaE(img[0 * w + w * 3 / 16], zones[Zones.index("top", 1)]) < 12)
-        assertTrue(Colors.deltaE(img[(h / 8) * w + (w - 1)], zones[Zones.index("right", 0)]) < 12)
-        assertEquals(Pair("top", 7), Zones.side(Zones.index("top", 7)))
-    }
 }

@@ -115,6 +115,7 @@
   var slider = $('#slider'), value = $('#value'), status = $('#status'), notice = $('#notice');
   var lightsBox = $('#lights'), lightsNow = $('#lightsNow');
   var CLASS = { mono: 'Mono', duo: 'Duo', multi: 'Multi' };
+  var LOOK = { calm: 'drifting', lively: 'lively', party: 'Party', rhythm: 'Rhythm', scanner: 'Scanner', 'scanner-cw': 'Scanner', vu: 'VU meter', spectrum: 'Spectrum', colora: 'Colora' };
   var dragging = false, lastVolumeSent = 0, online = true;
 
   function get(path) {
@@ -147,7 +148,7 @@
     }
     var l = s.lights;
     lightsBox.hidden = !(l && l.on);
-    if (l && l.on) lightsNow.textContent = (CLASS[l['class']] || l['class']) + (l.override ? ' (yours)' : '') + (l.bpm ? ' \u00b7 ' + l.bpm + ' BPM' : '');
+    if (l && l.on) lightsNow.textContent = (CLASS[l['class']] || l['class']) + (l.override ? ' (yours)' : '') + (l.tv ? ' \u00b7 ' + (LOOK[l.tv] || l.tv) : '') + (l.bpm ? ' \u00b7 ' + l.bpm + ' BPM' : '');
     say(s);
   }
 

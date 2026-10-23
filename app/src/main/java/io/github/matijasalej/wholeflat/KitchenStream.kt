@@ -4,7 +4,9 @@ import io.github.matijasalej.wholeflat.capture.CaptureFeed
 import io.github.matijasalej.wholeflat.capture.CaptureFrames
 import io.github.matijasalej.wholeflat.sync.Flac
 import io.github.matijasalej.wholeflat.sync.FrameSource
+import io.github.matijasalej.wholeflat.sync.HoldController
 import io.github.matijasalej.wholeflat.sync.KitchenMap
+import io.github.matijasalej.wholeflat.sync.L16
 import io.github.matijasalej.wholeflat.sync.SessionClock
 import io.github.matijasalej.wholeflat.sync.SessionRecord
 import io.github.matijasalej.wholeflat.sync.StreamBuilder
@@ -49,8 +51,8 @@ class KitchenSession(
 ) {
     val isCapture: Boolean get() = capture != null
 
-    /** Frames per block of the stream: the FLAC block, or the small chunk of a WAV stream, which has no block structure. */
-    val blockFrames: Int get() = if (format == StreamFormat.WAV) StreamFormat.WAV_CHUNK_FRAMES else flacBlock
+    /** Frames per block of the stream: the FLAC block, or the small chunk of a WAV or L16 stream, which have no block structure. */
+    val blockFrames: Int get() = if (format == StreamFormat.FLAC) flacBlock else StreamFormat.WAV_CHUNK_FRAMES
 
     /** The sample rate of the stream: the ring's 44.1 kHz, or the capture's. */
     val rate: Int get() = capture?.rate ?: RING_RATE
@@ -61,6 +63,41 @@ class KitchenSession(
 
     @Volatile
     var uri = ""
+
+    /**
+     * For a stream whose start is decided when the renderer connects (the TV's): the first source frame for a connection made at
+     * the given moment (System.nanoTime). The TV opens its connection about 2 s after Play and again later, and every connection
+     * starts at "now".
+     */
+    @Volatile
+    var startAtConnect: ((Long) -> Long)? = null
+
+    /**
+     * The stream is sent in real time from the moment each connection is made, as a renderer that pulls a live stream wants it,
+     * whether Play was sent before or not. The Sonos's streams are not (the captured one is sent as it is captured, the ring's
+     * one ahead of the speaker's position).
+     */
+    @Volatile
+    var realTime = false
+
+    /** Digital silence (frames) sent at once at the start of a real-time connection: it adds to the renderer's delay. */
+    @Volatile
+    var leadInFrames = 0
+
+    /**
+     * The delay wanted between the capture of a frame and its write to the renderer (ns); the stream is held there with frame
+     * trims, against the capture clock. Null: no hold.
+     */
+    @Volatile
+    var holdTargetNanos: (() -> Long)? = null
+
+    /** The send buffer to ask of the socket (bytes; 0: leave it as the system has it). */
+    @Volatile
+    var sendBufferBytes = 0
+
+    /** The statistics of a connection are put in the log every this many ms (0: not). */
+    @Volatile
+    var statsEveryMs = 0L
 
     @Volatile
     var armed = false
@@ -220,6 +257,9 @@ interface ClientConn {
     /** Before a stream is sent: no Nagle, no read timeout. */
     fun prepareForStream()
 
+    /** Asks for a send buffer of about [bytes], small, so that a renderer that reads slower than real time makes writes block early. */
+    fun limitSendBuffer(bytes: Int) {}
+
     /** Blocks until the peer has closed its side or the connection failed; says which ("eof", "reset: ..."). */
     fun awaitPeerClose(): String
 
@@ -234,6 +274,14 @@ class SocketConn(private val socket: Socket, override val out: OutputStream) : C
             socket.tcpNoDelay = true
         } catch (e: Exception) {
             // socket options are a nicety
+        }
+    }
+
+    override fun limitSendBuffer(bytes: Int) {
+        try {
+            socket.sendBufferSize = bytes
+        } catch (e: Exception) {
+            // a nicety
         }
     }
 
@@ -284,6 +332,10 @@ object KitchenStreams {
     /** One write never carries more than this (a burst of frames is cut here). */
     private const val MAX_WRITE_BYTES = 512 * 1024
 
+    /** The hold of a real-time stream is looked at first after this long, and then this often. */
+    private const val HOLD_FIRST_NANOS = 1_000_000_000L
+    private const val HOLD_EVERY_NANOS = 200_000_000L
+
     /** The headers of a FLAC stream: no Content-Length, no chunking, the stream ends by closing the connection. */
     const val RESPONSE_HEAD = "HTTP/1.1 200 OK\r\n" +
         "Content-Type: audio/flac\r\n" +
@@ -304,6 +356,16 @@ object KitchenStreams {
         "Server: WholeFlat\r\n\r\n"
 
     /**
+     * The headers of an L16 stream for the TV's renderer, exactly the set that worked in the manual test: the content type with
+     * the rate, a live stream, the DLNA features of LPCM, no length (the stream is endless), the connection closed at its end.
+     */
+    const val RESPONSE_HEAD_L16 = "HTTP/1.1 200 OK\r\n" +
+        "Content-Type: ${L16.CONTENT_TYPE}\r\n" +
+        "transferMode.dlna.org: Streaming\r\n" +
+        "contentFeatures.dlna.org: ${L16.CONTENT_FEATURES}\r\n" +
+        "Connection: close\r\n\r\n"
+
+    /**
      * The frames between two trims of a stream (a trim is one frame dropped or repeated): 10 ms for Spotify's, which is up to
      * 2.3 ms of correction per second; 5 ms for a captured one, up to 4.5 ms per second, which is a speed change of the kitchen
      * of 0.45 %, the most that the lag steering of the capture mode (`kitchen_target_ms`) lets itself use.
@@ -311,7 +373,11 @@ object KitchenStreams {
     fun trimSpacing(rate: Int, captured: Boolean): Int = if (captured) rate / 200 else rate / 100
 
     /** The headers of a stream of [format]; the same for a GET and a HEAD. */
-    fun responseHead(format: StreamFormat): String = if (format == StreamFormat.WAV) RESPONSE_HEAD_WAV else RESPONSE_HEAD
+    fun responseHead(format: StreamFormat): String = when (format) {
+        StreamFormat.WAV -> RESPONSE_HEAD_WAV
+        StreamFormat.L16 -> RESPONSE_HEAD_L16
+        else -> RESPONSE_HEAD
+    }
 
     /** Where the log lines go (the tests collect them). */
     @Volatile
@@ -390,10 +456,12 @@ object KitchenStreams {
         val format = session.format
         val blockFrames = session.blockFrames
         val armed = session.armed
-        val startFrame = session.startRingFrame
         val capture = session.capture
         val rate = session.rate
         val began = System.nanoTime()
+        // a real-time stream (the TV's) is live whenever it is asked for; the Sonos's is a probe until Play was sent
+        val live = armed || session.realTime
+        val startFrame = session.startAtConnect?.invoke(began) ?: session.startRingFrame
         val count = session.nextConnectionId()
         val rec = session.record?.openConnection("GET", remote, userAgent, armed, began)
         rec?.range = range
@@ -405,24 +473,26 @@ object KitchenStreams {
         }
         val source: FrameSource = when {
             frames == null -> SilenceSource
-            armed -> frames
+            live -> frames
             else -> ProbeSource(frames)
         }
         val map = KitchenMap(maxOf(0L, startFrame))
         val builder = StreamBuilder(source, map, session.channels, blockFrames = blockFrames, trimSpacing = trimSpacing(rate, capture != null))
         val active = ActiveStream(connectionId, map, builder, began)
         // A captured stream after Play is not paced: its frames exist only as they are captured, so the reads wait for them.
+        // A real-time stream is: block k is due k block lengths after the connection was made, whatever time its frames were captured at.
         val lead = LEAD_FRAMES * rate / KitchenSession.RING_RATE
         fun dueNanos(block: Long): Long = when {
+            session.realTime -> began + block * blockFrames * 1_000_000_000L / rate
             armed && capture != null -> 0L
             armed -> session.clock?.timeOfFrame(((block + 1) * blockFrames - lead).toDouble()) ?: 0L
             else -> began + maxOf(0L, block * blockFrames * 1_000_000_000L / rate - PROBE_PREBUFFER_NANOS)
         }
-        if (armed) session.attach(active)
+        if (live) session.attach(active)
         val peer = PeerWatch(conn)
         log(
             "$remote GET session ${session.token} conn $connectionId from ${if (capture != null) "captured" else "ring"} frame " +
-                "$startFrame, " + (if (armed) "the stream" else "a probe before Play") +
+                "$startFrame, " + (if (session.realTime) "a live stream" else if (armed) "the stream" else "a probe before Play") +
                 ", ${format.key}" + (if (format == StreamFormat.FLAC) " blocks of $blockFrames" else " chunks of $blockFrames") +
                 " at $rate Hz" + (if (range.isNotEmpty()) ", Range: $range" else "") + " [$userAgent]",
         )
@@ -435,26 +505,97 @@ object KitchenStreams {
         var dataBytes = 0L
         val pending = ByteArrayOutputStream(64 * 1024)
         var pendingBlocks = 0
+        var lastDue = 0L
+
+        // what the TV's renderer does with the stream, for the calibration of its timing model: how long writes block, how late they are
+        val statsEveryNanos = session.statsEveryMs * 1_000_000L
+        var intervalStart = began
+        var intervalBytes = 0L
+        var intervalWrites = 0
+        var intervalBlockedMs = 0.0
+        var intervalBlockedMax = 0.0
+        var intervalSlipMax = 0.0
+
+        // the hold: frame f is to be written one hold after it was captured (the TV's timing model); the difference is trimmed away
+        val holdTarget = session.holdTargetNanos
+        val holdControl = if (holdTarget != null && capture != null) HoldController(rate) else null
+        var nextHoldNanos = began + HOLD_FIRST_NANOS
+        var holdErrorMs = Double.NaN
+        var holdTrimmed = 0L
+        fun holdStep(due: Long) {
+            val control = holdControl ?: return
+            val now = System.nanoTime()
+            if (now < nextHoldNanos) return
+            nextHoldNanos = now + HOLD_EVERY_NANOS
+            val src = map.ringOfStream((blockNo * blockFrames).toDouble()) ?: return
+            val capturedAt = capture?.clock?.nanosOfFrame(Math.round(src)) ?: return
+            val errorMs = (due - capturedAt - (holdTarget?.invoke() ?: 0L)) / 1e6
+            holdErrorMs = errorMs
+            val trim = control.trim(errorMs, builder.unappliedBudget())
+            if (trim != 0) {
+                builder.addTrim(trim)
+                holdTrimmed += Math.abs(trim)
+            }
+            rec?.holdErrorMs = errorMs
+            rec?.trimmedFrames = holdTrimmed
+        }
+
         try {
+            if (session.sendBufferBytes > 0) conn.limitSendBuffer(session.sendBufferBytes)
             pending.write(responseHead(format).toByteArray(Charsets.ISO_8859_1))
-            pending.write(if (format == StreamFormat.WAV) Wav.header(rate) else Flac.streamHeader(rate, blockFrames))
+            when (format) {
+                StreamFormat.WAV -> pending.write(Wav.header(rate))
+                StreamFormat.FLAC -> pending.write(Flac.streamHeader(rate, blockFrames))
+                StreamFormat.L16 -> if (session.leadInFrames > 0) pending.write(L16.silence(session.leadInFrames)) // no header; a lead-in of silence, if asked for
+            }
 
             // One write for what is ready: the headers, and every frame that is due and exists at this moment.
             fun flush() {
                 val size = pending.size()
                 if (size == 0) return
+                val t0 = System.nanoTime()
                 pending.writeTo(out)
                 out.flush()
+                val t1 = System.nanoTime()
                 pending.reset()
                 bytes += size
                 session.bytesSent.addAndGet(size.toLong())
                 session.blocksSent.addAndGet(pendingBlocks.toLong())
+                val blockedMs = (t1 - t0) / 1e6
+                val slipMs = if (lastDue > 0L) (t0 - lastDue) / 1e6 else 0.0
                 if (rec != null) {
-                    if (rec.firstByteMs < 0) rec.firstByteMs = session.record?.ms(System.nanoTime()) ?: 0L
+                    if (rec.firstByteMs < 0) rec.firstByteMs = session.record?.ms(t1) ?: 0L
                     rec.bytes = bytes
                     rec.blocks = blockNo
+                    rec.writes++
+                    rec.writeMsTotal += blockedMs
+                    if (blockedMs > rec.writeMsMax) rec.writeMsMax = blockedMs
+                    if (session.realTime && slipMs > rec.slipMsMax) rec.slipMsMax = slipMs
                 }
                 pendingBlocks = 0
+                if (statsEveryNanos > 0) {
+                    intervalBytes += size
+                    intervalWrites++
+                    intervalBlockedMs += blockedMs
+                    if (blockedMs > intervalBlockedMax) intervalBlockedMax = blockedMs
+                    if (session.realTime && slipMs > intervalSlipMax) intervalSlipMax = slipMs
+                    if (t1 - intervalStart >= statsEveryNanos) {
+                        val seconds = (t1 - intervalStart) / 1e9
+                        log(
+                            "conn $connectionId, last ${"%.1f".format(java.util.Locale.US, seconds)} s: $intervalWrites writes, $intervalBytes bytes " +
+                                "(${"%.3f".format(java.util.Locale.US, intervalBytes / seconds / (rate * 4.0))} x real time), a write blocked " +
+                                "${"%.1f".format(java.util.Locale.US, intervalBlockedMs / maxOf(1, intervalWrites))} ms on average and " +
+                                "${"%.1f".format(java.util.Locale.US, intervalBlockedMax)} ms at most, up to ${"%.1f".format(java.util.Locale.US, intervalSlipMax)} ms behind " +
+                                "the schedule, hold error ${if (holdErrorMs.isNaN()) "-" else "%.1f".format(java.util.Locale.US, holdErrorMs)} ms, trimmed $holdTrimmed frames",
+                        )
+                        intervalStart = t1
+                        intervalBytes = 0
+                        intervalWrites = 0
+                        intervalBlockedMs = 0.0
+                        intervalBlockedMax = 0.0
+                        intervalSlipMax = 0.0
+                    }
+                }
             }
 
             var haveBlock = false
@@ -500,12 +641,17 @@ object KitchenStreams {
                     }
                 }
                 val due = dueNanos(blockNo)
+                holdStep(due)
                 if (due > System.nanoTime()) {
                     flush()
                     sleepUntil(due) { session.cancelled || peer.closed }
                     continue
                 }
-                val chunk = if (format == StreamFormat.WAV) Wav.pcm(builder.block, blockFrames) else Flac.frame(blockNo, builder.block, rate, blockFrames)
+                val chunk = when (format) {
+                    StreamFormat.WAV -> Wav.pcm(builder.block, blockFrames)
+                    StreamFormat.L16 -> L16.pcm(builder.block, blockFrames)
+                    StreamFormat.FLAC -> Flac.frame(blockNo, builder.block, rate, blockFrames)
+                }
                 if (format == StreamFormat.WAV) {
                     if (!Wav.fits(dataBytes, chunk.size)) {
                         // the length that the header claimed (about 3.4 h) is used up: the stream ends as it said it would
@@ -517,6 +663,7 @@ object KitchenStreams {
                     dataBytes += chunk.size
                 }
                 pending.write(chunk)
+                lastDue = due
                 pendingBlocks++
                 blockNo++
                 haveBlock = false
@@ -530,7 +677,7 @@ object KitchenStreams {
             closedBy = "server"
         } finally {
             val wasCurrent = session.stream === active
-            if (armed) session.detach(active)
+            if (live) session.detach(active)
             val ended = System.nanoTime()
             if (rec != null) {
                 rec.bytes = bytes
@@ -539,9 +686,9 @@ object KitchenStreams {
             }
             log(
                 "session ${session.token} conn $connectionId closed after ${(ended - began) / 1_000_000L} ms, " +
-                    "$blockNo blocks, $bytes bytes, by the ${if (closedBy == "peer") "Sonos" else "app"} ($reason)",
+                    "$blockNo blocks, $bytes bytes, by the ${if (closedBy == "peer") (if (session.realTime) "TV" else "Sonos") else "app"} ($reason)",
             )
-            if (armed && lost && wasCurrent) host.streamLost(session, reason)
+            if (live && lost && wasCurrent) host.streamLost(session, reason)
         }
     }
 

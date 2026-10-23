@@ -178,6 +178,13 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         },
     ) { DayFloor.dayOf(System.currentTimeMillis(), java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()).toLong()) }
 
+    /**
+     * In Synced mode, while the TV plays the same capture: the lag the Sonos is brought to, the delay D that both rooms are held to
+     * (ms after the capture). NaN: not in Synced mode, the target of the settings counts.
+     */
+    @Volatile
+    var syncedTargetMs = Double.NaN
+
     /** The state of the lag steering that was last put in the log, to note only its changes. */
     private var lastSteerState = LagSteer.State.OFF
 
@@ -269,6 +276,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     // ---- life cycle ----------------------------------------------------------------------------
 
     fun start() {
+        StreamRouter.add(this)
         captureTracker.onFloor = { e ->
             dayFloor.save(e.floorMs)
             AppLog.add(
@@ -291,6 +299,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     }
 
     fun stop() {
+        StreamRouter.remove(this)
         Settings.removeListener(settingsListener)
         finder.stop()
         post("stop") {
@@ -949,7 +958,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val v = Settings.values
         // in capture mode only the target and the lead settings count: the kitchen offset moves neither the start nor the lag
         val offset = 0
-        val target = CaptureTarget.of(v.kitchenTargetMs, v.captureLivingLatencyMs)
+        val target = currentTarget()
         val steer = captureTracker.steer
         expireFloor()
         val outcome = captureTracker.onReading(
@@ -1113,6 +1122,33 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         sessions[s.token] = s
         session = s
         s.record = history.begin(s.token, if (s.isCapture) "capture" else "ring", System.nanoTime(), System.currentTimeMillis())
+    }
+
+    /** The lag the kitchen is brought to now: the common delay of Synced mode while it holds, else the target of the settings; null: none. */
+    private fun currentTarget(): CaptureTarget.Target? {
+        val synced = syncedTargetMs
+        if (!synced.isNaN()) return CaptureTarget.Target(synced, "synced")
+        val v = Settings.values
+        return CaptureTarget.of(v.kitchenTargetMs, v.captureLivingLatencyMs)
+    }
+
+    /** The floor in force (ms): the setting, or what an underrun showed today if that is higher. */
+    fun floorNowMs(): Double {
+        val configured = Settings.values.kitchenFloorMs.toDouble()
+        val learned = captureTracker.steer.learnedFloorMs
+        return if (learned.isNaN()) configured else maxOf(configured, learned)
+    }
+
+    /**
+     * The lag the Sonos is kept to in Lyrics mode (ms after the capture): the target of the settings, not below the floor. Without a
+     * target the lag it locked at last, else the 350 ms it usually has. This is what the common delay of Synced mode is built on.
+     */
+    fun lyricsTargetMs(): Double {
+        val v = Settings.values
+        val target = CaptureTarget.of(v.kitchenTargetMs, v.captureLivingLatencyMs)?.ms
+            ?: lagCapture.locked
+            ?: NATURAL_LAG_MS
+        return maxOf(target, floorNowMs())
     }
 
     /** The log of the last sessions, newest first: what the speaker did with each stream and what it showed. */
@@ -1621,7 +1657,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val cs = session?.takeIf { it.isCapture }
         val v = Settings.values
         val lag = if (cs != null) lagCapture.recentMs() else Double.NaN
-        val target = CaptureTarget.of(v.kitchenTargetMs, v.captureLivingLatencyMs)
+        val target = currentTarget()
         val steer = captureTracker.steer
         // how far behind the captured moment the kitchen sounds
         o.put("lag_ms", jsonNumber(round1(lag)))
@@ -1705,6 +1741,9 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         private const val TAG = "kitchen"
         private const val TITLE = "Whole Flat"
         private const val KIND_CALIBRATION = 3
+
+        /** The lag a captured stream usually settles at (ms), for a first guess when nothing was measured. */
+        private const val NATURAL_LAG_MS = 350.0
 
         /** The kind and the epoch of a session of the capture mode (there is no ring epoch behind it). */
         private const val KIND_CAPTURE = 100

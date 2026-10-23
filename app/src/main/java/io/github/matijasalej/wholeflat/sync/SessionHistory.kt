@@ -31,6 +31,16 @@ class ConnRecord(
     @Volatile var bytes = 0L
     @Volatile var blocks = 0L
 
+    /** Writes to the renderer, the time they blocked (ms, total and longest) and, for a stream paced in real time, how late the latest write was against its schedule (ms). */
+    @Volatile var writes = 0L
+    @Volatile var writeMsTotal = 0.0
+    @Volatile var writeMsMax = 0.0
+    @Volatile var slipMsMax = 0.0
+
+    /** For a stream that is held to a delay after the capture: the last error of the hold (ms, positive: late) and the frames trimmed to remove it. */
+    @Volatile var holdErrorMs = Double.NaN
+    @Volatile var trimmedFrames = 0L
+
     /** "peer" or "server" once it is closed. */
     @Volatile var closedBy = ""
     @Volatile var reason = ""
@@ -58,6 +68,16 @@ class ConnRecord(
         }
         o.put("bytes", bytes)
         o.put("blocks", blocks)
+        if (writes > 0) {
+            o.put("writes", writes)
+            o.put("write_ms_avg", Math.round(writeMsTotal / writes * 10.0) / 10.0)
+            o.put("write_ms_max", Math.round(writeMsMax * 10.0) / 10.0)
+            o.put("slip_ms_max", Math.round(slipMsMax * 10.0) / 10.0)
+        }
+        if (!holdErrorMs.isNaN()) {
+            o.put("hold_error_ms", Math.round(holdErrorMs * 10.0) / 10.0)
+            o.put("trimmed_frames", trimmedFrames)
+        }
         o.put("closed_by", if (closedBy.isEmpty()) JSONObject.NULL else closedBy)
         o.put("reason", if (reason.isEmpty()) JSONObject.NULL else reason)
         return o
@@ -133,6 +153,9 @@ class SessionRecord(
             return c
         }
     }
+
+    /** The connections so far, oldest first. */
+    fun connections(): List<ConnRecord> = synchronized(lock) { ArrayList(conns) }
 
     fun closeConnection(c: ConnRecord, nowNanos: Long, by: String, why: String) {
         synchronized(lock) {

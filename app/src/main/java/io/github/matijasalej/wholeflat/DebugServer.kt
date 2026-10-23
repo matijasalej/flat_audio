@@ -179,12 +179,11 @@ object DebugServer {
         val head = req.method == "HEAD"
         val kitchenToken = KitchenStreams.tokenOf(req.path)
         if (kitchenToken != null) {
-            val kitchen = AppState.kitchen
-            if (kitchen == null || (req.method != "GET" && !head)) {
-                sendText(out, 404, "no kitchen\n", head)
+            if (StreamRouter.isEmpty || (req.method != "GET" && !head)) {
+                sendText(out, 404, "no streams\n", head)
                 return
             }
-            KitchenStreams.serve(kitchen, kitchenToken, req.method, req.remote, req.headers["user-agent"] ?: "", SocketConn(client, out), req.headers["range"] ?: "")
+            KitchenStreams.serve(StreamRouter, kitchenToken, req.method, req.remote, req.headers["user-agent"] ?: "", SocketConn(client, out), req.headers["range"] ?: "")
             return
         }
         if (req.method != "GET" && !head && !(req.method == "POST" && req.path == "/settings")) {

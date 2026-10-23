@@ -1,6 +1,7 @@
 package io.github.matijasalej.wholeflat.capture
 
 import io.github.matijasalej.wholeflat.sync.AnchorFilter
+import io.github.matijasalej.wholeflat.sync.FrameTimes
 
 /**
  * When each captured frame was captured: ties the frame numbers of a generation to the System.nanoTime
@@ -8,7 +9,7 @@ import io.github.matijasalej.wholeflat.sync.AnchorFilter
  * the device gives none, from the moments its reads return; they are smoothed like the living room's audio
  * timestamps (the median of the offsets of the last few).
  */
-class CaptureClock(private val rate: Int) {
+class CaptureClock(private val rate: Int) : FrameTimes {
     private val filter = AnchorFilter(window = 9, rate = rate)
     private var anchorFrame = 0L
     private var anchorNanos = 0L
@@ -34,7 +35,7 @@ class CaptureClock(private val rate: Int) {
 
     /** When frame [frame] was captured; null before the first anchor. */
     @Synchronized
-    fun nanosOfFrame(frame: Long): Long? =
+    override fun nanosOfFrame(frame: Long): Long? =
         if (!hasAnchor) null else anchorNanos + (frame - anchorFrame) * NANOS / rate
 
     /** The readings of the timestamps that were ignored as outliers, and the times the clock started over on a step (see [AnchorFilter]). */

@@ -1,5 +1,6 @@
 package io.github.matijasalej.wholeflat.capture
 
+import io.github.matijasalej.wholeflat.sync.FrameTimes
 import io.github.matijasalej.wholeflat.sync.KitchenMap
 import io.github.matijasalej.wholeflat.sync.StreamView
 import io.github.matijasalej.wholeflat.sync.SyncController
@@ -114,7 +115,7 @@ class CaptureTracker(
         positionMs: Long,
         map: KitchenMap,
         unappliedBudget: () -> Int,
-        clock: CaptureClock,
+        clock: FrameTimes,
         offsetMs: Int,
         lkMs: Double,
         targetMs: Double = Double.NaN,
@@ -182,7 +183,7 @@ class CaptureTracker(
         positionMs: Long,
         map: KitchenMap,
         unappliedBudget: () -> Int,
-        clock: CaptureClock,
+        clock: FrameTimes,
         targetMs: Double,
     ): Outcome {
         val heard = (positionMs - controller.deltaMs) / 1000.0 * rate

@@ -62,6 +62,10 @@ class KitchenSession(
     @Volatile
     var syncedHold = false
 
+    /** The clock the lag of a stream that is set once is counted from (the TV's stream, see Kitchen.syncedClock); null: the capture's. */
+    @Volatile
+    var refClock: io.github.matijasalej.wholeflat.sync.FrameTimes? = null
+
     /** Frames per block of the stream: the FLAC block, or the small chunk of a WAV or L16 stream, which have no block structure. */
     val blockFrames: Int get() = if (format == StreamFormat.FLAC) flacBlock else StreamFormat.WAV_CHUNK_FRAMES
 

@@ -71,4 +71,28 @@ class SlewClockTest {
         c.update(1 * s - 5, 1.0 * rate + 100)
         assertEquals(a, c.adjustMs, 1e-9)
     }
+
+    @Test
+    fun aStepOfTheCaptureClockIsNotFollowedAtAllButASlowDriftIs() {
+        val c = SlewClock(rate, 0, 0, maxSlewPpm = 10.0, stepMs = 8.0)
+        // 2 ms off: inside the band, taken in at the slew rate
+        c.update(1 * s, 1.0 * rate + 88)
+        assertEquals(0, c.stepsIgnored)
+        assertTrue(c.adjustMs > 0.0 && c.adjustMs < 0.02)
+        val before = c.adjustMs
+        // the timestamps step by 46.8 ms: ignored, however long it lasts
+        for (i in 2..2000) c.update(i * s / 10, i * s / 10.0 / s * rate + 2064)
+        assertTrue(c.stepsIgnored > 1000)
+        assertEquals("not followed: ${c.adjustMs}", before, c.adjustMs, 0.01)
+        // and when they come back the clock goes on as before
+        c.update(300 * s, 300.0 * rate + 88)
+        assertTrue(c.stepsIgnored > 0)
+    }
+
+    @Test
+    fun theClockIsTheFrameTimesOfTheStream() {
+        val c: FrameTimes = SlewClock(rate, 1_000, 5 * s)
+        assertEquals(5 * s, c.nanosOfFrame(1_000))
+        assertEquals(6 * s, c.nanosOfFrame(1_000L + rate))
+    }
 }

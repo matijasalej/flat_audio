@@ -59,7 +59,7 @@ import kotlin.concurrent.thread
  *   GET  /tune                  the fine tuning of the debug page: ?tv_extra=%2B|-, ?fine=%2B|- (the kitchen against the TV), ?lyrics=%2B|-, ?display=...
  *   GET  /tv/reanchor           restarts the TV's stream now (with its warm-up); `?at=boundary` waits for the next song boundary
  *   GET  /tv/preview.jpg        what the picture of the TV's stream shows now (a small JPEG)
- *   GET  /tv/frames             the last ten seconds of the lyrics video as CSV: every picture drawn (draw ms, how late the loop woke) and
+ *   GET  /tv/frames             the last ten seconds of the lyrics video as CSV: every picture drawn (draw ms, how late the loop woke, the position in the song) and
  *                               every picture the encoder gave (bytes, key, ms from the picture to its bytes)
  *   GET  /tv/clicks             ?seconds=N (default 30): the click track in both streams instead of the music, for calibrating the rooms:
  *                               the TV's stream 2 kHz (4 kHz every 10th click), the kitchen's 3 kHz (6 kHz); `/tv/clicks/stop` ends it

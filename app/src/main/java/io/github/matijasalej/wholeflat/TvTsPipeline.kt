@@ -9,6 +9,7 @@ import io.github.matijasalej.wholeflat.sync.Adts
 import io.github.matijasalej.wholeflat.sync.CalibrationClicks
 import io.github.matijasalej.wholeflat.sync.ClickTrack
 import io.github.matijasalej.wholeflat.sync.FrameLabels
+import io.github.matijasalej.wholeflat.sync.FrameTimes
 import io.github.matijasalej.wholeflat.sync.H264
 import io.github.matijasalej.wholeflat.sync.LyricsLayout
 import io.github.matijasalej.wholeflat.sync.Picture
@@ -132,6 +133,13 @@ class TvTsPipeline(
 
     override fun leadNanos(): Long = params().burstMs * 1_000_000L
 
+    /**
+     * The clock of this stream: when capture frame f is to be written to the TV is this plus the hold, and the kitchen counts its lag from
+     * it in Synced mode (what the capture's own timestamps do, steps of a period or two included, does not move the rooms against each other).
+     * Null before the stream has started.
+     */
+    fun frameTimes(): FrameTimes? = if (::slew.isInitialized) slew else null
+
     override fun requestSync() {
         venc?.requestSync()
     }
@@ -149,7 +157,7 @@ class TvTsPipeline(
         val newest = feed.buffer.writeIndex
         f0 = maxOf(feed.buffer.validStart + rate, (exact ?: (newest - (holdNanos - START_DELAY_NANOS) * rate / 1e9)).toLong())
         cap0Nanos = feed.clock.nanosOfFrame(f0) ?: (now - (newest - f0) * 1_000_000_000L / rate)
-        slew = SlewClock(rate, f0, cap0Nanos)
+        slew = SlewClock(rate, f0, cap0Nanos, SLEW_PPM, SLEW_STEP_MS)
         startedNanos = now
         // slot 0 is the write of the first audio block, whose PCR is a lead behind its PTS
         mux.pcrBase27 = (PTS_BASE - leadTicks) * 300L
@@ -420,13 +428,13 @@ class TvTsPipeline(
         val stamp = r.render(pic, scene, System.nanoTime())
         labels.add(stamp, captureNanos, pts)
         synchronized(drawn) {
-            drawn.addLast(Drawn(stamp / 1_000_000L, stamp / 1000L, r.lastRenderMs, wakeLateMs))
+            drawn.addLast(Drawn(stamp / 1_000_000L, stamp / 1000L, r.lastRenderMs, wakeLateMs, scene?.positionMs ?: -1L))
             while (drawn.size > RECENT_DRAWN) drawn.removeFirst()
         }
     }
 
     /** One picture drawn: when it was put on the surface (ms of System.nanoTime) and its time for the encoder (us), how long drawing took, and how late the loop woke for it (ms). */
-    private class Drawn(val wallMs: Long, val stampUs: Long, val drawMs: Double, val lateMs: Double)
+    private class Drawn(val wallMs: Long, val stampUs: Long, val drawMs: Double, val lateMs: Double, val positionMs: Long)
 
     private val drawn = java.util.ArrayDeque<Drawn>()
 
@@ -434,8 +442,9 @@ class TvTsPipeline(
     private var wakeLateMs = 0.0
 
     /**
-     * The last ten seconds or so of the video as CSV lines, for a look at where a scroll goes wrong: `draw,wall_ms,stamp_us,draw_ms,late_ms`
-     * for every picture drawn (late: how long after its time the loop woke) and `enc,wall_ms,pts_us,bytes,key,encode_ms` for every picture the
+     * The last ten seconds or so of the video as CSV lines, for a look at where a scroll goes wrong: `draw,wall_ms,stamp_us,draw_ms,late_ms,pos_ms`
+     * for every picture drawn (late: how long after its time the loop woke; pos: the position in the song that the picture was made for, which
+     * should advance by 33.3 ms from one picture to the next at 30 a second, or the scroll jerks) and `enc,wall_ms,pts_us,bytes,key,encode_ms` for every picture the
      * encoder gave (encode: from the stamp of the picture to its bytes). The pts of an `enc` line is the stamp of a `draw` line.
      */
     fun framesCsv(): String {
@@ -443,7 +452,7 @@ class TvTsPipeline(
         synchronized(drawn) {
             for (d in drawn) {
                 sb.append("draw,").append(d.wallMs).append(',').append(d.stampUs).append(',')
-                    .append(String.format(java.util.Locale.US, "%.1f,%.1f", d.drawMs, d.lateMs)).append('\n')
+                    .append(String.format(java.util.Locale.US, "%.1f,%.1f,%d", d.drawMs, d.lateMs, d.positionMs)).append('\n')
             }
         }
         sb.append(venc?.recentCsv() ?: "")
@@ -576,6 +585,7 @@ class TvTsPipeline(
         o.put("mux_rate_kbit_s", mux.muxRate / 1000)
         o.put("padding_percent", Math.round(mux.nullPackets * 1000.0 / maxOf(1L, mux.packets)) / 10.0)
         o.put("hold_ms", holdNanos / 1_000_000L)
+        o.put("clock_steps_ignored", if (::slew.isInitialized) slew.stepsIgnored else 0L)
         o.put("first_audio_frame", f0)
         o.put("age_s", (System.nanoTime() - startedNanos) / 1_000_000_000L)
         o.put("trouble", captureTrouble ?: JSONObject.NULL)
@@ -590,6 +600,14 @@ class TvTsPipeline(
         private const val HISTORY_BYTES = 16L shl 20
         private const val HISTORY_NANOS = 12_000_000_000L
         const val AUDIO_BITRATE = 192_000
+
+        /**
+         * How fast the clock of the stream follows the capture's (ppm): the capture clock of this box has been seen to hold the system clock to
+         * under 1 ppm for minutes, so only a slow real drift is meant to be followed. A step of its timestamps (46.8 ms once, a period of the
+         * audio path or two) is not followed at all: [SLEW_STEP_MS].
+         */
+        const val SLEW_PPM = 10.0
+        const val SLEW_STEP_MS = 8.0
         private const val BLOCK = 1024
 
         /** The first PTS of the stream (90 kHz): 2 s, so that the PCR (which runs a lead behind it) is never negative. */

@@ -249,6 +249,8 @@ class SyncedController(
         val d = renderer.delayMs
         if (!d.isNaN()) {
             val target = d + v.kitchenOffsetMs
+            // the clock of the TV's stream, before the target: a stream that is made when the target appears counts its lag from it
+            kitchen.syncedClock = renderer.pipelineClock()
             kitchen.syncedTargetMs = target
             kitchen.syncedLeadMs = maxOf(0.0, target - kitchen.fixedLagMs())
         }
@@ -312,6 +314,7 @@ class SyncedController(
             val d = renderer.delayMs
             if (!d.isNaN()) {
                 val target = d + offset
+                renderer.pipelineClock()?.let { kitchen.syncedClock = it }
                 kitchen.syncedTargetMs = target
                 // the lead that puts the lag at the common delay at once: the target less the Play-to-sound delay and the pipeline
                 kitchen.syncedLeadMs = maxOf(0.0, target - kitchen.fixedLagMs())
@@ -319,6 +322,7 @@ class SyncedController(
         } else if (!keepTarget) {
             kitchen.syncedTargetMs = Double.NaN
             kitchen.syncedLeadMs = Double.NaN
+            kitchen.syncedClock = null
         }
         // far from where it is to be: its stream is started again with the right lead (once in a while)
         val lag = kitchen.lagNowMs()

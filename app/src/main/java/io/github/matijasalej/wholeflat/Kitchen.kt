@@ -198,6 +198,14 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     private var syncedTarget = Double.NaN
 
     /**
+     * In Synced mode: the clock of the TV's stream. The lag of the kitchen is counted from it (a function of the number of the captured
+     * frame alone, which the TV's stream follows), and not from the timestamps of the capture, which step by a period of the audio path or
+     * two without anything being heard: the kitchen, which was steady to the millisecond, was then moved by a correction of 47 ms.
+     */
+    @Volatile
+    var syncedClock: io.github.matijasalej.wholeflat.sync.FrameTimes? = null
+
+    /**
      * How much later than planned the speaker landed at its last starts in Synced mode (ms; the first one counts fully). A stream that
      * starts 2 s behind the capture takes the speaker longer to begin than the shallow streams the Play-to-sound delay is learned from.
      */
@@ -916,6 +924,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             s.uri = streamUri(host, s)
             s.clickHz = ClickTrack.KITCHEN_HZ
             s.syncedHold = !syncedTargetMs.isNaN()
+            if (s.syncedHold) s.refClock = syncedClock
             registerSession(s)
             state = State.STARTING
             AppLog.add(TAG, "capture: getting the kitchen ready ($why), session ${s.token}${if (s.syncedHold) ", set once at the common delay" else ""}")
@@ -1088,7 +1097,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         if (target.isNaN()) return
         val hold = captureTracker.hold
         hold.restartAllowed = lastSyncedRestartNanos == 0L || System.nanoTime() - lastSyncedRestartNanos > SYNCED_RESTART_PAUSE_NANOS
-        val outcome = captureTracker.onSyncedReading(tMid, positionMs, stream.map, { stream.builder.unappliedBudget() }, feed.clock, target)
+        val outcome = captureTracker.onSyncedReading(tMid, positionMs, stream.map, { stream.builder.unappliedBudget() }, s.refClock ?: feed.clock, target)
         recordReading(tMid, positionMs, captureTracker.lastLagMs, lagCapture.recentMs(CaptureTracker.SYNCED_READINGS), hold.errorMs, target)
         when (outcome) {
             is CaptureTracker.Outcome.Locked -> {

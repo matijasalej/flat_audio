@@ -1,6 +1,7 @@
 package io.github.matijasalej.wholeflat.capture
 
 import io.github.matijasalej.wholeflat.KitchenStreams
+import io.github.matijasalej.wholeflat.sync.FrameTimes
 import io.github.matijasalej.wholeflat.sync.KitchenMap
 import io.github.matijasalej.wholeflat.sync.StreamBuilder
 import io.github.matijasalej.wholeflat.sync.SyncController
@@ -80,6 +81,11 @@ class CaptureLoopTest {
         playAfterS: Double = 1.23,
         /** Synced mode: the stream is set once at this lag and left alone (NaN: the Lyrics mode's controller); [changeTargetAtS] / [newTargetMs] move it. */
         syncedTargetMs: Double = Double.NaN,
+        /** From [clockStepAtS] seconds after Play the timestamps of the capture say [clockStepMs] later (a step of the clock, nothing is heard of it). */
+        clockStepAtS: Double = -1.0,
+        clockStepMs: Double = 0.0,
+        /** Synced mode: the clock the lag is counted from (null: the capture's own clock, as the Lyrics mode does). */
+        syncedClock: FrameTimes? = null,
     ): Result {
         val buffer = CaptureBuffer(rate, rate * 8)
         buffer.newGeneration(1)
@@ -95,7 +101,8 @@ class CaptureLoopTest {
                 }
                 buffer.write(pcm, chunk)
                 written += chunk
-                clock.add(written - 1, tOf(written - 1))
+                val stepped = clockStepAtS >= 0 && tOf(written - 1) >= t0 + ((playAfterS + clockStepAtS) * 1e9).toLong()
+                clock.add(written - 1, tOf(written - 1) + if (stepped) (clockStepMs * 1e6).toLong() else 0L)
             }
         }
         fun framesAt(t: Long): Long = Math.floorDiv((t - t0) * rate, 1_000_000_000L)
@@ -192,7 +199,7 @@ class CaptureLoopTest {
                     val outcome = if (syncedNow.isNaN()) {
                         tracker.onReading(t, position, map, { builder.unappliedBudget() }, clock, offset, lkMs, target, floorMs)
                     } else {
-                        tracker.onSyncedReading(t, position, map, { builder.unappliedBudget() }, clock, syncedNow)
+                        tracker.onSyncedReading(t, position, map, { builder.unappliedBudget() }, syncedClock ?: clock, syncedNow)
                     }
                     when (outcome) {
                         is CaptureTracker.Outcome.Locked -> {
@@ -217,7 +224,9 @@ class CaptureLoopTest {
                     steerTrace.add(Triple((t - tPlay) / 1e9, tracker.steer.setpointMs, tracker.steer.state()))
                     // the real lag of the frame the Sonos plays now
                     val trueFrame = map.ringOfStream(heardFrame(t))!!
-                    lags.add(Pair((t - tPlay) / 1e9, (t - clock.nanosOfFrame(Math.round(trueFrame))!!) / 1e6))
+                    // (a clock that steps is not the truth: the frames were captured when they were)
+                    val capturedAt = if (clockStepMs != 0.0) tOf(Math.round(trueFrame)) else clock.nanosOfFrame(Math.round(trueFrame))!!
+                    lags.add(Pair((t - tPlay) / 1e9, (t - capturedAt) / 1e6))
                 }
             }
             t += 20_000_000L
@@ -607,5 +616,30 @@ class CaptureLoopTest {
         assertTrue(r.tracker.steer.learnedFloorMs.isNaN())
         assertEquals(0, r.tracker.steer.floorEvents)
         assertTrue(r.tracker.steer.setpointMs.isNaN())
+    }
+
+    @Test
+    fun aStepOfTheCaptureClockMovesASyncedKitchenThatCountsFromItButNotOneThatCountsFromTheTvsClock() {
+        // the timestamps of the capture step by 46.8 ms at 50 s (as on the device) while the Sonos plays steadily
+        val tvClock = object : FrameTimes {
+            override fun nanosOfFrame(frame: Long): Long? = tOf(frame)
+        }
+        val steady = simulate(
+            seconds = 200, leadMs = 1850, playAfterS = 4.0, noiseMs = 2.0, seed = 21, syncedTargetMs = 2140.0,
+            clockStepAtS = 50.0, clockStepMs = 46.8, syncedClock = tvClock,
+        )
+        assertNull(steady.rejoinAt)
+        assertEquals("nothing is trimmed: ${steady.trims}", 0, steady.trims.size)
+        for (lag in tail(steady, 20.0)) assertEquals(2140.0, lag, 10.0)
+
+        // counted from the capture's own clock the same stream is moved by the step, 30 s after it, and the real kitchen with it
+        val followed = simulate(
+            seconds = 200, leadMs = 1850, playAfterS = 4.0, noiseMs = 2.0, seed = 21, syncedTargetMs = 2140.0,
+            clockStepAtS = 50.0, clockStepMs = 46.8,
+        )
+        assertEquals("the step is followed: ${followed.trims}", 1, followed.trims.size)
+        assertTrue("after the step and 30 s: ${followed.trims[0].first}", followed.trims[0].first in 80.0..86.0)
+        assertEquals(-46.8 * 44.1, followed.trims[0].second.toDouble(), 250.0)
+        for (lag in tail(followed, 130.0)) assertEquals(2140.0 + 46.8, lag, 10.0)
     }
 }

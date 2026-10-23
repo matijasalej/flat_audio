@@ -8,6 +8,7 @@ import io.github.matijasalej.wholeflat.sync.ClickTrack
 import io.github.matijasalej.wholeflat.sync.CoverColor
 import io.github.matijasalej.wholeflat.sync.Display
 import io.github.matijasalej.wholeflat.sync.DmrDescription
+import io.github.matijasalej.wholeflat.sync.FrameTimes
 import io.github.matijasalej.wholeflat.sync.SessionHistory
 import io.github.matijasalej.wholeflat.sync.SettingsModel
 import io.github.matijasalej.wholeflat.sync.SonosXml
@@ -796,6 +797,9 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             restart("re-anchor: $reason")
         }
     }
+
+    /** The clock of the TV's stream (see [TvTsPipeline.frameTimes]); null when there is no lyrics video. */
+    fun pipelineClock(): FrameTimes? = pipeline?.frameTimes()
 
     /** The last ten seconds or so of the video as CSV lines (see [TvTsPipeline.framesCsv]); empty if there is no lyrics video. */
     fun framesCsv(): String = pipeline?.framesCsv() ?: ""

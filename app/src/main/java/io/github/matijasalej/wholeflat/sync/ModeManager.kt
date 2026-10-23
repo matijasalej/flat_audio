@@ -83,6 +83,12 @@ class ModeManager(
         val foreground: Foreground,
         val backoffRemainingMs: Long,
         val failedGrabs: Int,
+        /**
+         * How long nothing has played, for the rules that fall back to the default after a long silence: since the last sound, but not
+         * longer than the app has run (a start without music is not ten minutes of silence). The grab and the release of the TV go by
+         * [silentForMs], for which "no sound yet" is no sound.
+         */
+        val idleForMs: Long = silentForMs,
     )
 
     sealed class Action {
@@ -199,7 +205,7 @@ class ModeManager(
         }
 
         // 6. Lyrics goes back to Synced after a long silence
-        if (mode == Mode.LYRICS && i.mode == Mode.LYRICS && i.silentForMs >= resetAfterMs && actions.none { it is Action.SetMode }) {
+        if (mode == Mode.LYRICS && i.mode == Mode.LYRICS && i.idleForMs >= resetAfterMs && actions.none { it is Action.SetMode }) {
             actions.add(Action.SetMode(Mode.SYNCED, "more than ${resetAfterMs / 60_000} minutes of silence"))
         }
         actions.filterIsInstance<Action.SetMode>().lastOrNull()?.let { ownSetMode = it.mode }

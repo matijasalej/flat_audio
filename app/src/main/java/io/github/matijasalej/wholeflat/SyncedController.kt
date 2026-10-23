@@ -164,6 +164,9 @@ class SyncedController(
 
     private fun nowMs(): Long = SystemClock.elapsedRealtime()
 
+    /** When this controller was made (elapsedRealtime): the silence of a start without music counts from here. */
+    private val startedMs = SystemClock.elapsedRealtime()
+
     // ---- the step --------------------------------------------------------------------------------
 
     private fun tick() {
@@ -173,6 +176,8 @@ class SyncedController(
         val source = AppState.source
         val captureAlive = AppState.capture?.state == "running"
         val silent = if (source == "librespot") 0L else (AppState.capture?.silentForMs() ?: (Long.MAX_VALUE / 4))
+        // for the fall back to the defaults after a long silence the app's own age counts: a start without music is not ten minutes without
+        val idle = minOf(silent, now - startedMs)
         val tvState = when (renderer.state) {
             TvRenderer.State.IDLE -> ModeManager.Tv.IDLE
             TvRenderer.State.STARTING -> ModeManager.Tv.STARTING
@@ -190,7 +195,7 @@ class SyncedController(
         val inputs = ModeManager.Inputs(
             nowMs = now, mode = mode, source = source, captureAlive = captureAlive, silentForMs = silent,
             tvKnown = tv.currentIp() != null, tv = tvState, leftCount = renderer.leftCount, leftKind = leftKind,
-            foreground = foreground, backoffRemainingMs = renderer.backoffRemainingMs(), failedGrabs = renderer.failedGrabs(),
+            foreground = foreground, backoffRemainingMs = renderer.backoffRemainingMs(), failedGrabs = renderer.failedGrabs(), idleForMs = idle,
         )
         lastInputs = "mode ${mode.key}, source $source, capture ${if (captureAlive) "alive" else "gone"}, silent ${if (silent > 86_400_000L) "never" else "${silent / 1000} s"}, " +
             "TV ${renderer.state.label}, in front ${foreground.name.lowercase()}"
@@ -202,9 +207,12 @@ class SyncedController(
                     renderer.grab(manager.lastWhy)
                 }
                 is ModeManager.Action.Release -> {
-                    AppLog.add(TAG, "giving the TV back: ${action.why}")
-                    lastDecision = "release: ${action.why}"
-                    renderer.release(action.why)
+                    // the way back to HDMI takes seconds, and the manager asks every second while the TV still counts as held: once is enough
+                    if (!renderer.releasing) {
+                        AppLog.add(TAG, "giving the TV back: ${action.why}")
+                        lastDecision = "release: ${action.why}"
+                        renderer.release(action.why)
+                    }
                 }
                 is ModeManager.Action.SetMode -> {
                     AppLog.add(TAG, "the mode becomes ${action.mode.key}: ${action.why}")
@@ -214,8 +222,8 @@ class SyncedController(
             }
         }
         // ten minutes without music: back to Listening (the screen and the lights are not left on for an empty room)
-        if (silent >= DISPLAY_RESET_MS && source != "librespot" && Settings.values.display != Display.DEFAULT.key) {
-            AppLog.add(TAG, "no music for ${silent / 60_000} min: the display goes back to ${Display.DEFAULT.label}")
+        if (idle >= DISPLAY_RESET_MS && source != "librespot" && Settings.values.display != Display.DEFAULT.key) {
+            AppLog.add(TAG, "no music for ${idle / 60_000} min: the display goes back to ${Display.DEFAULT.label}")
             Settings.set("display", Display.DEFAULT.key)
         }
         val effectiveMode = Mode.of(Settings.values.mode) ?: mode
@@ -315,7 +323,9 @@ class SyncedController(
         // far from where it is to be: its stream is started again with the right lead (once in a while)
         val lag = kitchen.lagNowMs()
         val target = kitchen.currentTargetMs()
-        if (!lag.isNaN() && !target.isNaN() && Math.abs(lag - target) > RESTART_FAR_MS && now - lastRestartMs > RESTART_EVERY_MS) {
+        // a stream that Synced mode set at the common delay is left alone (it has its own rule: one correction after 30 s beyond 40 ms, at most
+        // once a minute); this restart is for a stream of the other mode, which has to be made again to land at the new delay
+        if (!kitchen.syncedHoldActive() && !lag.isNaN() && !target.isNaN() && Math.abs(lag - target) > RESTART_FAR_MS && now - lastRestartMs > RESTART_EVERY_MS) {
             lastRestartMs = now
             AppLog.add(TAG, "the kitchen is ${Math.round(lag)} ms behind the capture and is to be at ${Math.round(target)} ms: its stream starts again")
             kitchen.restartStream("the lag of the kitchen is to be ${Math.round(target)} ms")

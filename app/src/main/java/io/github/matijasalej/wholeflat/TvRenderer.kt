@@ -314,10 +314,23 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         post("grab") { doGrab(reason) }
     }
 
+    /** A release is under way (asked for, not finished: the way back to HDMI takes seconds): it is not asked for again. */
+    @Volatile
+    var releasing = false
+        private set
+
     /** Gives the TV back (Stop). */
     fun release(reason: String) {
         cancelRequested = true
-        post("release") { doRelease(reason) }
+        if (releasing) return
+        releasing = true
+        post("release") {
+            try {
+                doRelease(reason)
+            } finally {
+                releasing = false
+            }
+        }
     }
 
     /** The time the next start may begin after failed ones or a TV that was not on (ms), 0 if it may begin. */
@@ -327,7 +340,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     fun failedGrabs(): Int = backoff.failures
 
     /** The settings that the timing is built from changed: the common delay is worked out again. */
-    fun settingsChanged() = post("settings") { refreshTiming(force = true) }
+    fun settingsChanged() = post("settings") { if (state == State.PLAYING || state == State.STARTING) refreshTiming(force = true) }
 
     // ---- the grab --------------------------------------------------------------------------------
 
@@ -428,7 +441,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             s.ts = pipe
             s.onGet = { t -> warmup.onGet(t) }
             // the TV's latency is the backlog of the connection it plays: when it makes another (or drops one) the common delay is worked out again
-            s.onTsChange = { post("connections changed") { refreshTiming(force = false) } }
+            s.onTsChange = { post("connections changed") { if (session === s) refreshTiming(force = false) } }
             s.sendBufferBytes = TS_SEND_BUFFER_BYTES
         } else {
             s.startAtConnect = { began -> startFrameAt(feed, began) }
@@ -642,6 +655,8 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
      */
     private fun refreshTiming(force: Boolean) {
         val feed = captureFeed ?: return
+        // without a connection of the TV there is no backlog to work the delay out from: it is worked out when the TV connects (or reconnects)
+        if (!force && session == null) return
         val x = tvLatencyMs().toDouble()
         val frozen = frozenHoldMs
         val d: Double
@@ -799,6 +814,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
      */
     private fun returnToHdmi() {
         val t0 = nowMs()
+        hdmiReturn = "on its way: Stop was sent, waiting for the TV to show HDMI"
         fun onHdmi(): Boolean = tv.context() == HDMI_CONTEXT
         fun waitHdmi(ms: Long): Boolean {
             val end = nowMs() + ms

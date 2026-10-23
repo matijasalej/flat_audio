@@ -18,6 +18,7 @@ class ModeManagerTest {
         source: String = "capture",
         alive: Boolean = true,
         silent: Long = 0L,
+        idle: Long = silent,
         known: Boolean = true,
         tv: Tv = Tv.IDLE,
         leftCount: Int = 0,
@@ -25,7 +26,7 @@ class ModeManagerTest {
         foreground: Foreground = Foreground.UNKNOWN,
         backoff: Long = 0L,
         failed: Int = 0,
-    ) = ModeManager.Inputs(now, mode, source, alive, silent, known, tv, leftCount, leftKind, foreground, backoff, failed)
+    ) = ModeManager.Inputs(now, mode, source, alive, silent, known, tv, leftCount, leftKind, foreground, backoff, failed, idle)
 
     private fun List<Action>.grabs() = count { it is Action.Grab }
     private fun List<Action>.releases() = filterIsInstance<Action.Release>()
@@ -225,6 +226,17 @@ class ModeManagerTest {
         // synced again by the reset: the TV is not taken for the silence, only when music begins
         assertEquals(0, m.decide(inputs(22 * minute + 1_000L, mode = Mode.SYNCED, silent = 11 * minute + 1_000L)).grabs())
         assertEquals(1, m.decide(inputs(23 * minute, mode = Mode.SYNCED, silent = 0L)).grabs())
+    }
+
+    @Test
+    fun aStartWithoutMusicIsNotTenMinutesOfSilence() {
+        // the app was just started in Lyrics mode (the user chose it): no sound yet is "never" for the capture, but the app is seconds old
+        val m = ModeManager()
+        assertTrue(m.decide(inputs(2_000L, mode = Mode.LYRICS, silent = never, idle = 2_000L)).isEmpty())
+        assertTrue(m.decide(inputs(9 * minute, mode = Mode.LYRICS, silent = never, idle = 9 * minute)).isEmpty())
+        // after ten minutes of the app's life without music the rule applies
+        val a = m.decide(inputs(11 * minute, mode = Mode.LYRICS, silent = never, idle = 11 * minute))
+        assertEquals(Mode.SYNCED, a.modes()[0].mode)
     }
 
     @Test

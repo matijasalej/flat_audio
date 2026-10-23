@@ -670,8 +670,10 @@ class CaptureLoopTest {
         // After a power cycle the speaker may answer the first Play with 701 (the transition is not available): the Play goes out 60 ms later,
         // twice at most, and when it does not take, the whole start is made again some seconds later. Whatever the delay of the sound against
         // the plan (a retry of 120 ms, a start made again that is a second and more late), the stream that is counted from the TV's clock is
-        // brought to the common delay once and left there: it is not a Lyrics-mode stream that is steered down to the lag of 322 ms (that is
-        // the lag the kitchen showed 1.85 s ahead of the TV, 2171 - 322)
+        // brought to the common delay once and left there, and it is not steered like a Lyrics stream. (The 1.85 s offset seen after a power
+        // cycle is not this: the session in question was Synced from its creation and held within 2.5 ms of its delay, so the offset is
+        // physical, either the TV's start-to-sound that differed from the backlog plus 631 ms or the speaker skipping its lead; the app
+        // cannot see either.)
         val tvClock = object : FrameTimes {
             override fun nanosOfFrame(frame: Long): Long? = tOf(frame)
         }
@@ -685,5 +687,33 @@ class CaptureLoopTest {
             assertTrue("Play $late ms late: never near the Lyrics lag", r.lags.none { it.first > 5.0 && it.second < 1000.0 })
             assertFalse("Play $late ms late: the speaker was not steered like a Lyrics stream", r.tracker.steer.hasSetpoint)
         }
+    }
+
+    @Test
+    fun aNewStreamThroughTheSameTrackerIsPlacedAgainAndTakenForNothingOfTheOneBefore() {
+        val tvClock = object : FrameTimes {
+            override fun nanosOfFrame(frame: Long): Long? = tOf(frame)
+        }
+        val first = simulate(
+            seconds = 60, leadMs = 2200, playAfterS = 4.0, noiseMs = 2.0, seed = 51, syncedTargetMs = 2490.0, syncedClock = tvClock, extraStartMs = 25.0,
+        )
+        val tracker = first.tracker
+        assertEquals("placed once", 1, first.trims.size)
+        assertTrue(tracker.hold.placed)
+        assertTrue(tracker.lag.isLocked)
+        assertEquals(1, tracker.hold.corrections)
+        // a new stream (the speaker came back): nothing of the one before is kept, neither the placing nor the lock nor the target
+        tracker.startStream(2490.0)
+        assertFalse(tracker.hold.placed)
+        assertFalse(tracker.lag.isLocked)
+        assertEquals(0, tracker.hold.corrections)
+        assertTrue(tracker.hold.targetMs.isNaN())
+        // and the next stream through the same tracker, landing 70 ms late, is placed again, once, and held
+        val second = simulate(
+            seconds = 60, leadMs = 2200, playAfterS = 40.0, noiseMs = 2.0, seed = 52, syncedTargetMs = 2490.0, syncedClock = tvClock, extraStartMs = 70.0,
+            trackerIn = tracker,
+        )
+        assertEquals("placed again: ${second.trims}", 1, second.trims.size)
+        for (lag in tail(second, 30.0)) assertEquals(2490.0, lag, 8.0)
     }
 }

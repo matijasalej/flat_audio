@@ -146,10 +146,6 @@ class LivingRoom(private val context: Context) {
     @Volatile
     private var broken = false
 
-    /** The watchdog should see the head position advance. */
-    @Volatile
-    private var expectAdvance = false
-
     @Volatile
     private var lastHeadAtBreak = -1L
 
@@ -472,7 +468,6 @@ class LivingRoom(private val context: Context) {
         val wasActive = dataFlowing
         // the ring frame that was heard last, for the restart
         val heardRing = if (lastHeadAtBreak >= 0) timeline.ringOfTrack(lastHeadAtBreak) else heardHintNow()
-        expectAdvance = false
         track = null
         try {
             old?.release()
@@ -501,7 +496,6 @@ class LivingRoom(private val context: Context) {
         track = created
         broken = false
         lastHeadAtBreak = -1L
-        expectAdvance = true
         lastUnderrunCount = created.underrunCount
         if (reason != "initial") {
             recoveries++
@@ -647,25 +641,40 @@ class LivingRoom(private val context: Context) {
     // ---- the watchdog --------------------------------------------------------------------------
 
     private fun watchdogLoop() {
+        var seen: AudioTrack? = null
         var lastHead = -1L
         var lastAdvance = System.nanoTime()
+        var advancedOnce = false
         while (running) {
             sleepQuietly(250)
             val t = track
-            if (t == null || !expectAdvance || broken) {
-                lastHead = -1L
+            if (t == null || broken) {
+                seen = null
                 continue
             }
-            val head = headFrames(t)
             val now = System.nanoTime()
+            if (t !== seen) {
+                // a new track gets time to start: an HDMI sink can take seconds to wake up
+                seen = t
+                lastHead = -1L
+                lastAdvance = now
+                advancedOnce = false
+            }
+            val head = headFrames(t)
             if (head != lastHead) {
+                if (lastHead >= 0) advancedOnce = true
                 lastHead = head
                 lastAdvance = now
                 continue
             }
-            if (now - lastAdvance > STALL_NANOS) {
+            val allowed = if (advancedOnce) STALL_NANOS else STARTUP_STALL_NANOS
+            if (now - lastAdvance > allowed) {
                 stalls++
-                AppLog.error(TAG, "AudioTrack stalled: position stuck at $head for ${(now - lastAdvance) / 1_000_000L} ms (stall #$stalls)")
+                AppLog.error(
+                    TAG,
+                    "AudioTrack stalled: position stuck at $head for ${(now - lastAdvance) / 1_000_000L} ms (stall #$stalls)" +
+                        if (advancedOnce) "" else ", it never started",
+                )
                 lastHeadAtBreak = head
                 broken = true
                 try {
@@ -673,8 +682,7 @@ class LivingRoom(private val context: Context) {
                 } catch (e: Exception) {
                     // already gone
                 }
-                lastHead = -1L
-                lastAdvance = now
+                seen = null
             }
         }
     }
@@ -728,6 +736,7 @@ class LivingRoom(private val context: Context) {
         private const val ANCHOR_POLL_NANOS = 200_000_000L
         private const val HINT_AHEAD_NANOS = 40_000_000L
         private const val STALL_NANOS = 1_200_000_000L
+        private const val STARTUP_STALL_NANOS = 8_000_000_000L
         private const val KIND_CALIBRATION = 3
     }
 }

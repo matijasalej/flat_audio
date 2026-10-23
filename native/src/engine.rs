@@ -45,8 +45,6 @@ use crate::ring::{FrameRing, PlayerEvents, RingSink};
 /// vendored librespot-core uses the session's id for the client token as well.
 pub const CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
 
-/// Size limit of the audio cache in the app cache dir.
-const AUDIO_CACHE_LIMIT: u64 = 256 * 1024 * 1024;
 const DISCOVERY_RETRY: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(40);
 const GOODBYE_GRACE: Duration = Duration::from_millis(1500);
@@ -146,31 +144,20 @@ pub async fn run(
 ) -> Result<(), String> {
     let events = shared.events.clone();
 
-    // Credentials and volume live in filesDir (they must survive), the audio cache in cacheDir.
+    // Credentials and volume live in filesDir (they must survive). There is no audio cache: the
+    // Google TV's storage is nearly full, and every track is streamed anyway.
     let state_dir = cfg.files_dir.join("librespot");
-    let audio_dir = cfg.cache_dir.join("audio");
-    let cache = match Cache::new(
+    let cache = Cache::new(
         Some(state_dir.clone()),
         Some(state_dir.clone()),
-        Some(audio_dir),
-        Some(AUDIO_CACHE_LIMIT),
-    ) {
-        Ok(c) => Some(c),
-        Err(e) => {
-            warn!("cache with audio dir unavailable ({e}), trying credentials and volume only");
-            events.push(
-                "error",
-                json!({ "where": "cache", "message": e.to_string() }),
-            );
-            Cache::new(
-                Some(state_dir.clone()),
-                Some(state_dir.clone()),
-                None::<PathBuf>,
-                None,
-            )
-            .ok()
-        }
-    };
+        None::<PathBuf>,
+        None,
+    )
+    .map_err(|e| {
+        warn!("no credentials cache: {e}");
+        events.push("error", json!({ "where": "cache", "message": e.to_string() }));
+    })
+    .ok();
     if cache.is_none() {
         events.push(
             "error",

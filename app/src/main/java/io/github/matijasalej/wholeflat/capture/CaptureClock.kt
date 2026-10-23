@@ -37,6 +37,17 @@ class CaptureClock(private val rate: Int) {
     fun nanosOfFrame(frame: Long): Long? =
         if (!hasAnchor) null else anchorNanos + (frame - anchorFrame) * NANOS / rate
 
+    /** The readings of the timestamps that were ignored as outliers, and the times the clock started over on a step (see [AnchorFilter]). */
+    val outliers: Int get() = filter.outliers
+    val restarts: Int get() = filter.restarts
+
+    /**
+     * The time that frame 0 would have been captured at, by the anchor now (ns): the offset of the capture clock against System.nanoTime.
+     * Its changes are the steps and the drift of the clock (a frame's time is this plus its number over the rate); null before the first anchor.
+     */
+    @Synchronized
+    fun offsetNanos(): Long? = if (!hasAnchor) null else anchorNanos - anchorFrame * NANOS / rate
+
     /** The frame captured at [nanos] (rounded down); null before the first anchor. */
     @Synchronized
     fun frameAtNanos(nanos: Long): Long? =

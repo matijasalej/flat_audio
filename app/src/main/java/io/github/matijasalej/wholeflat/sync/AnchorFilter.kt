@@ -21,6 +21,15 @@ class AnchorFilter(
     private val offsets = ArrayList<Double>()
     private var stepStreak = 0
 
+    /** Readings that were far off the median and ignored, and times the window started over on a step, since the start (for a look at the clock). */
+    @Volatile
+    var outliers = 0
+        private set
+
+    @Volatile
+    var restarts = 0
+        private set
+
     val size: Int get() = offsets.size
 
     fun reset() {
@@ -43,8 +52,10 @@ class AnchorFilter(
             stepStreak++
             if (stepStreak < stepCount) {
                 // an outlier: answer with what the window says
+                outliers++
                 return Anchor(frame, (median() + nanosPerFrame(frame)).toLong())
             }
+            restarts++
             offsets.clear()
         }
         stepStreak = 0

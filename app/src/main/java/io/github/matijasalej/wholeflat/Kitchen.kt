@@ -1145,28 +1145,35 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
 
     // ---- the readings, for a look afterwards ----------------------------------------------------------
 
-    private class Reading(val ageMs: Long, val positionMs: Long, val rawLagMs: Double, val lagMs: Double, val errorMs: Double, val targetMs: Double)
+    private class Reading(val ageMs: Long, val positionMs: Long, val rawLagMs: Double, val lagMs: Double, val errorMs: Double, val targetMs: Double, val clockMs: Double)
+
+    /** The offset of the capture clock at the first recorded reading (ns): the clock column of the readings is counted from it. */
+    private var clockBaselineNanos = Long.MIN_VALUE
 
     private val readings = java.util.ArrayDeque<Reading>()
 
     /** Keeps the last readings of the stream (about 10 minutes) for [readingsCsv]. */
     private fun recordReading(tNanos: Long, positionMs: Long, rawLagMs: Double, lagMs: Double, errorMs: Double, targetMs: Double) {
+        val offset = captureFeed?.clock?.offsetNanos()
         synchronized(readings) {
-            readings.addLast(Reading(tNanos / 1_000_000L, positionMs, rawLagMs, lagMs, errorMs, targetMs))
+            if (offset != null && clockBaselineNanos == Long.MIN_VALUE) clockBaselineNanos = offset
+            val clockMs = if (offset == null || clockBaselineNanos == Long.MIN_VALUE) Double.NaN else (offset - clockBaselineNanos) / 1e6
+            readings.addLast(Reading(tNanos / 1_000_000L, positionMs, rawLagMs, lagMs, errorMs, targetMs, clockMs))
             while (readings.size > MAX_RECORDED_READINGS) readings.removeFirst()
         }
     }
 
     /**
      * The recorded readings as CSV: when (ms of System.nanoTime), the position the Sonos reported, the lag of this reading, the median of
-     * the last eleven, the error that the rule or the controller works with, and the target or setpoint.
+     * the last eleven, the error that the rule or the controller works with, the target or setpoint, and how far the offset of the capture
+     * clock against System.nanoTime has moved since the first reading (a step or a drift of the clock shows here, a step of the speaker does not).
      */
     fun readingsCsv(): String {
-        val sb = StringBuilder("t_ms,position_ms,lag_raw_ms,lag_median_ms,error_ms,target_ms\n")
+        val sb = StringBuilder("t_ms,position_ms,lag_raw_ms,lag_median_ms,error_ms,target_ms,capture_clock_ms\n")
         synchronized(readings) {
             for (r in readings) {
                 sb.append(r.ageMs).append(',').append(r.positionMs).append(',').append(fmt(r.rawLagMs)).append(',').append(fmt(r.lagMs)).append(',')
-                    .append(fmt(r.errorMs)).append(',').append(fmt(r.targetMs)).append('\n')
+                    .append(fmt(r.errorMs)).append(',').append(fmt(r.targetMs)).append(',').append(String.format(java.util.Locale.US, "%.2f", r.clockMs)).append('\n')
             }
         }
         return sb.toString()

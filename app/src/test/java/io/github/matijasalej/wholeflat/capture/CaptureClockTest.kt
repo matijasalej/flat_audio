@@ -21,6 +21,19 @@ class CaptureClockTest {
     }
 
     @Test
+    fun theOffsetOfTheClockIsWhenFrameZeroWasCapturedAndMovesWithTheClock() {
+        val c = CaptureClock(rate)
+        assertNull(c.offsetNanos())
+        c.add(48_000, nanosOf(48_000))
+        assertEquals(nanosOf(0), c.offsetNanos())
+        assertEquals(c.nanosOfFrame(0), c.offsetNanos())
+        // the clock steps by 30 ms (three readings in a row): the offset moves by that much
+        for (i in 1..3) c.add(48_000L + i * 4_800L, nanosOf(48_000L + i * 4_800L, 30_000_000L))
+        assertEquals(nanosOf(0, 30_000_000L), c.offsetNanos())
+        assertEquals(1, c.restarts)
+    }
+
+    @Test
     fun framesAndTimesConvertBothWays() {
         val c = CaptureClock(rate)
         c.add(48_000, nanosOf(48_000))

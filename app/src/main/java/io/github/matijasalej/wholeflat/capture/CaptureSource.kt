@@ -804,6 +804,9 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
         o.put("frames", feed.buffer.writeIndex)
         o.put("generation", feed.generation)
         o.put("clock", feed.clockSource)
+        // the timestamps of the capture that were ignored as stray, and the times the clock started over on a step of them
+        o.put("clock_outliers", feed.clock.outliers)
+        o.put("clock_restarts", feed.clock.restarts)
         o.put("longest_gap_ms", feed.maxGapMs)
         // the pipeline from the capture point to this app: how old the newest frame is when it has been read (from the timestamps of
         // AudioRecord), and how old it was when Play was sent (the part of the kitchen's lag that the capture itself takes)

@@ -55,6 +55,19 @@ class AnchorFilterTest {
     }
 
     @Test
+    fun strayReadingsAndStepsAreCounted() {
+        val f = AnchorFilter()
+        for (i in 1..9) f.add(4_410L * i, nanosOf(4_410L * i, 0))
+        assertEquals(0, f.outliers)
+        f.add(4_410L * 10, nanosOf(4_410L * 10, 40_000_000L)) // stray
+        assertEquals(1, f.outliers)
+        assertEquals(0, f.restarts)
+        f.add(4_410L * 11, nanosOf(4_410L * 11, 40_000_000L))
+        f.add(4_410L * 12, nanosOf(4_410L * 12, 40_000_000L)) // the third in a row: a step
+        assertEquals(1, f.restarts)
+    }
+
+    @Test
     fun resetForgetsEverything() {
         val f = AnchorFilter()
         for (i in 1..9) f.add(4_410L * i, nanosOf(4_410L * i, 0))

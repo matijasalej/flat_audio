@@ -10,6 +10,7 @@ import io.github.matijasalej.wholeflat.capture.CaptureTarget
 import io.github.matijasalej.wholeflat.capture.CaptureTracker
 import io.github.matijasalej.wholeflat.capture.LagSteer
 import io.github.matijasalej.wholeflat.capture.SourceArbiter
+import io.github.matijasalej.wholeflat.sync.DayFloor
 import io.github.matijasalej.wholeflat.sync.PlayDelays
 import io.github.matijasalej.wholeflat.sync.SessionHistory
 import io.github.matijasalej.wholeflat.sync.SonosPolicy
@@ -163,6 +164,19 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     @Volatile
     private var captureAgeAtPlayMs = Double.NaN
 
+    /** The floor that an underrun showed, kept in the prefs for the rest of the local day. */
+    private val dayFloor = DayFloor(
+        object : DayFloor.Store {
+            override fun read(key: String): String? = prefs.getString(key, null)
+
+            override fun write(values: Map<String, String?>) {
+                val e = prefs.edit()
+                for ((k, v) in values) if (v == null) e.remove(k) else e.putString(k, v)
+                e.apply()
+            }
+        },
+    ) { DayFloor.dayOf(System.currentTimeMillis(), java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()).toLong()) }
+
     /** The state of the lag steering that was last put in the log, to note only its changes. */
     private var lastSteerState = LagSteer.State.OFF
 
@@ -255,11 +269,16 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
 
     fun start() {
         captureTracker.onFloor = { e ->
+            dayFloor.save(e.floorMs)
             AppLog.add(
                 TAG,
                 "capture: the speaker ran out of audio at a lag of ${fmt(e.lagMs)} ms (${e.why}); the lag will not be brought below " +
-                    "${fmt(e.floorMs)} ms from now on (floor ${captureTracker.steer.floorEvents})",
+                    "${fmt(e.floorMs)} ms for the rest of today (floor event ${captureTracker.steer.floorEvents}), the stream starts again",
             )
+        }
+        dayFloor.load()?.let {
+            captureTracker.steer.restoreLearnedFloor(it)
+            AppLog.add(TAG, "capture: the floor of the lag from earlier today is ${fmt(it)} ms")
         }
         finder.listener = this
         finder.startNotifyListener()
@@ -858,7 +877,6 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             validStart = feed.buffer.validStart,
             rate = feed.rate,
             leadMs = captureLead.effectiveMs(v.captureLeadMs),
-            offsetMs = v.kitchenOffsetMs,
             lkMs = fixedLagMs(feed, format),
         )
     }
@@ -928,12 +946,14 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val feed = s.capture ?: return
         if (feed.generation != s.captureGeneration) return // the session is about to end
         val v = Settings.values
-        val offset = v.kitchenOffsetMs
-        val target = CaptureTarget.of(v.kitchenTargetMs, v.captureLivingLatencyMs, offset)
+        // in capture mode only the target and the lead settings count: the kitchen offset moves neither the start nor the lag
+        val offset = 0
+        val target = CaptureTarget.of(v.kitchenTargetMs, v.captureLivingLatencyMs)
         val steer = captureTracker.steer
+        expireFloor()
         val outcome = captureTracker.onReading(
             tMid, positionMs, stream.map, { stream.builder.unappliedBudget() }, feed.clock, offset, fixedLagMs(feed, s.format),
-            target?.ms ?: Double.NaN,
+            target?.ms ?: Double.NaN, v.kitchenFloorMs.toDouble(),
         )
         when (outcome) {
             is CaptureTracker.Outcome.Locked -> {
@@ -962,7 +982,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
                         "measuring it again instead of restarting the stream",
                 )
             }
-            is CaptureTracker.Outcome.Rejoin -> rejoin(outcome.reason)
+            // a speaker that ran dry is no failed start: it is started again at once, with the new floor
+            is CaptureTracker.Outcome.Rejoin -> rejoin(outcome.reason, manual = outcome.underrun)
             is CaptureTracker.Outcome.Hold, is CaptureTracker.Outcome.Waiting -> Unit
         }
         val state = steer.state()
@@ -983,7 +1004,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
                 TAG,
                 "sync (capture): lag ${fmt(lagCapture.recentMs())} ms (held at ${fmt(held)}" +
                     (if (steer.active) ", ${state.label} to ${fmt(steer.goalMs)}, floor ${fmt(steer.floorMs)}" else "") + "), " +
-                    "error ${fmt(controller.errorMs)} ms, drift ${fmt(controller.driftPpm)} ppm, " +
+                    "error ${fmt(controller.errorMs)} ms, drift ${fmt(controller.driftPpm)} ppm, position behind real time ${fmt(steer.rateDeficitMs)} ms/s, " +
                     "trimmed ${controller.trimmedFrames} frames, re-joins $rejoins, round trip ${fmt(lastRttMs)} ms",
             )
         }
@@ -1001,7 +1022,27 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             else -> null
         }
         seenPlaybackErrorNanos = errorAt
-        if (why != null) captureTracker.onSpeakerTrouble(System.nanoTime(), why)
+        if (why != null) speakerTrouble(why)
+    }
+
+    /**
+     * The speaker said it ran out of audio. If the lag was brought down to that, the floor is raised (and kept for the rest of the
+     * day) and the stream is started again: raising the setpoint does not cure a speaker that was driven that low, a fresh start does.
+     */
+    private fun speakerTrouble(why: String) {
+        val e = captureTracker.onSpeakerTrouble(System.nanoTime(), why) ?: return
+        rejoin(
+            "the speaker runs dry at a lag of ${Math.round(e.lagMs)} ms ($why); the floor is ${Math.round(e.floorMs)} ms from now on",
+            manual = true,
+        )
+    }
+
+    /** The floor that was learned on an earlier day is dropped (the stored one is checked against the date). */
+    private fun expireFloor() {
+        if (captureTracker.steer.learnedFloorMs.isNaN()) return
+        if (dayFloor.load() == null && captureTracker.steer.clearFloor()) {
+            AppLog.add(TAG, "capture: a new day, the learned floor of the lag is forgotten")
+        }
     }
 
     // ---- failed starts -------------------------------------------------------------------------
@@ -1232,7 +1273,11 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     }
 
     private fun setDevice(d: SonosDevice) {
-        if (device?.udn != d.udn) captureTracker.steer.clearFloor() // the floor is a property of the speaker
+        if (device?.udn != d.udn) {
+            // the floor is a property of the speaker
+            dayFloor.clear()
+            captureTracker.steer.clearFloor()
+        }
         device = d
         reachable = false
         busyElsewhere = false
@@ -1302,7 +1347,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             return
         }
         if (ours && s.isCapture && r.transport == "TRANSITIONING") {
-            captureTracker.onSpeakerTrouble(System.nanoTime(), "the transport is TRANSITIONING")
+            speakerTrouble("the transport is TRANSITIONING")
         }
         if (!ours && kind == SonosPolicy.Availability.BUSY) {
             AppLog.add(TAG, "the speaker plays something else now (${r.transport}), leaving it alone")
@@ -1371,9 +1416,10 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val v = Settings.values
         controller.offsetMs = effectiveOffsetMs()
         if (changed.contains("capture_lead_ms")) captureLead.reset()
-        if (changed.contains("kitchen_target_ms") || changed.contains("kitchen_format")) {
-            // the floor is what this speaker allowed with the target and the format of the time
-            if (captureTracker.steer.clearFloor()) AppLog.add(TAG, "capture: the floor of the lag is forgotten (the target or the format changed)")
+        if (changed.contains("kitchen_floor_ms") || changed.contains("kitchen_format")) {
+            // the learned floor is what this speaker allowed with the format of the time, and the floor setting is a decision about it
+            dayFloor.clear()
+            if (captureTracker.steer.clearFloor()) AppLog.add(TAG, "capture: the floor of the lag is forgotten (the floor setting or the format changed)")
         }
         val sessionNow = session
         if (sessionNow != null && !sessionNow.cancelled) {
@@ -1405,7 +1451,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
      */
     private fun effectiveOffsetMs(): Double {
         val offset = Settings.values.kitchenOffsetMs
-        return if (session?.isCapture == true) captureTracker.controllerOffsetMs(offset) else offset.toDouble()
+        return if (session?.isCapture == true) captureTracker.controllerOffsetMs(0) else offset.toDouble()
     }
 
     /** The Connect volume changed (0 to 65535). */
@@ -1554,24 +1600,29 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         o.put("ws_description", ws.describe())
         val cs = session?.takeIf { it.isCapture }
         val v = Settings.values
-        val offset = v.kitchenOffsetMs
         val lag = if (cs != null) lagCapture.recentMs() else Double.NaN
-        val target = CaptureTarget.of(v.kitchenTargetMs, v.captureLivingLatencyMs, offset)
+        val target = CaptureTarget.of(v.kitchenTargetMs, v.captureLivingLatencyMs)
         val steer = captureTracker.steer
-        // how far behind the captured moment the kitchen sounds; it includes the kitchen offset, which moves it
+        // how far behind the captured moment the kitchen sounds
         o.put("lag_ms", jsonNumber(round1(lag)))
         // how far ahead of the capture the stream was sent when it began (null for a session that is not a captured one)
         o.put("lead_ms", jsonNumber(round1(if (cs != null) captureAheadMs else Double.NaN)))
-        // the lag the controller holds now: the setpoint on its way to the target, or where the lag locked (moved by the kitchen offset)
-        val held = if (steer.active && steer.hasSetpoint) steer.setpointMs else lagCapture.targetMs(offset)
+        // the lag the controller holds now: the setpoint on its way to the target, or where the lag locked
+        val held = if (steer.active && steer.hasSetpoint) steer.setpointMs else lagCapture.targetMs(0)
         o.put("lag_target_ms", jsonNumber(round1(if (cs != null) held else Double.NaN)))
         o.put("lag_locked", cs != null && lagCapture.isLocked)
-        // the lag that is wanted (kitchen_target_ms, else capture_living_latency_ms, plus the kitchen offset); null: the lag is left where it locked
+        // the lag that is wanted (kitchen_target_ms, else capture_living_latency_ms); null: the lag is left where it locked
         o.put("target_ms", jsonNumber(round1(target?.ms ?: Double.NaN)))
         o.put("target_from", target?.source ?: "off")
-        // the lowest lag the speaker has shown it allows, plus 20 ms (null: no trouble yet); kept across streams until the target or format changes
-        o.put("floor_ms", jsonNumber(round1(steer.floorMs)))
+        // the floor: the lowest lag aimed for. The setting (kitchen_floor_ms) or, if higher, what an underrun showed (the lag where it
+        // happened plus 15 ms), which is kept for the rest of the local day and across streams and restarts of the app
+        val learned = steer.learnedFloorMs
+        o.put("floor_ms", jsonNumber(round1(if (learned.isNaN()) v.kitchenFloorMs.toDouble() else maxOf(learned, v.kitchenFloorMs.toDouble()))))
+        o.put("floor_configured_ms", v.kitchenFloorMs)
+        o.put("floor_learned_ms", jsonNumber(round1(learned)))
+        o.put("floor_day", dayFloor.savedDay()?.let { java.time.LocalDate.ofEpochDay(it).toString() } ?: JSONObject.NULL)
         o.put("floor_events", steer.floorEvents)
+        o.put("position_behind_ms_per_s", jsonNumber(round1(steer.rateDeficitMs)))
         // where the controller is bringing the lag now, and whether that is still down
         o.put("setpoint_ms", jsonNumber(round1(if (cs != null) steer.setpointMs else Double.NaN)))
         o.put("steering", if (cs != null) steer.state().label else "off")

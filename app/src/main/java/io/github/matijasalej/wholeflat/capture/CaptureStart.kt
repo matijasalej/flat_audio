@@ -5,9 +5,10 @@ package io.github.matijasalej.wholeflat.capture
  *
  * The speaker starts as soon as it can: the stream begins a little in the past, so that the speaker has
  * something to start with and the beginning of what just started playing is not lost. The distance is the
- * "lead" (audio sent ahead at the start) plus the kitchen offset, counted back from the newest frame at the
- * moment Play is sent. This is only the plan: what the speaker really does with it is measured afterwards
- * (see [CaptureLag]).
+ * "lead" (audio sent ahead at the start), counted back from the newest frame at the moment Play is sent. The
+ * kitchen offset is not part of it: a persistent negative offset would make every start later (the Sonos
+ * starts when it has about 270 ms buffered, and a smaller lead only makes that take longer). This is only
+ * the plan: what the speaker really does with it is measured afterwards (see [CaptureLag]).
  */
 object CaptureStart {
     /** Frame [startFrame] is the first of the stream; the plan expects the kitchen to be [plannedLagMs] behind. */
@@ -35,12 +36,11 @@ object CaptureStart {
         validStart: Long,
         rate: Int,
         leadMs: Int,
-        offsetMs: Int,
         lkMs: Double,
     ): Plan {
         val perMs = rate / 1000.0
         val minAhead = Math.round(MIN_LEAD_MS * perMs)
-        val wantAhead = Math.round((leadMs + offsetMs) * perMs)
+        val wantAhead = Math.round(leadMs * perMs)
         var limited = false
         // the newest frame at Play, as far as the clock of the reads can be believed
         var now = nowFrame

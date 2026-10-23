@@ -7,15 +7,20 @@ package io.github.matijasalej.wholeflat.capture
  * and with a target (the setting `kitchen_target_ms`, or the living room's latency) the steer moves it there afterwards: a
  * **setpoint** starts at the locked lag and moves toward the target at [RAMP_MS_PER_S], and the controller (see SyncController)
  * holds the lag at the setpoint with the frame trims. Downward, a trim drops a frame of the stream, so the speaker's buffer
- * shrinks by that much; upward, a trim repeats one. At most 4.5 ms of lag per second are moved, a speed change of 0.45 % that
- * cannot be heard. The setpoint never runs more than [MAX_AHEAD_MS] ahead of the lag that is measured, so a controller that
- * cannot follow (nothing to trim) does not build up an error.
+ * shrinks by that much; upward, a trim repeats one. At most 3 ms of lag per second are moved, a speed change of 0.3 % that
+ * cannot be heard (the trims could do 4.5). The setpoint never runs more than [MAX_AHEAD_MS] ahead of the lag that is measured,
+ * so a controller that cannot follow (nothing to trim) does not build up an error.
  *
- * **The floor.** A speaker has a lowest lag below which it runs out of audio: it reports buffering, an error, or the lag readings
- * jump (it stopped and filled its buffer again). Whatever is steered down finds that limit by hitting it. The steer then raises the
- * **floor** to [FLOOR_STEP_MS] above the lag where it happened, and the setpoint never goes below the floor again; the floor is kept
- * for later streams (the speaker does not change) until [clearFloor]. Trouble of the speaker at a lag that the steer did not bring
- * down, say a hiccup of the network at the lag the speaker chose, is not the steer's doing and moves nothing.
+ * **The floor.** The lag is never aimed below the **configured floor** (the setting `kitchen_floor_ms`, 316 ms on the device: the
+ * lowest lag that was heard clean) and not below the **learned floor**. A speaker has a lowest lag below which it runs out of
+ * audio, and what is steered down finds it by hitting it: the speaker reports buffering or an error, the lag readings jump up (it
+ * stopped and filled its buffer again) or scatter, or the position it reports advances slower than real time (it stutters, and the
+ * controller, which keeps the lag where it is told by dropping frames, hides every pause it makes: this can be heard without any of
+ * the others showing). The steer then sets the learned floor to [FLOOR_STEP_MS] above the lag where it
+ * happened, and the caller starts the stream again: a speaker that has been driven that low stays degraded, and raising the
+ * setpoint does not cure it, only a fresh start does. The learned floor is kept (the caller stores it for the rest of the day)
+ * until [clearFloor]. Trouble at a lag that the steer did not bring down, say a hiccup of the network at the lag the speaker chose
+ * itself, is not the steer's doing and moves nothing.
  *
  * Plain Kotlin; the tracker feeds it the lag readings and the Kitchen the speaker's own signals.
  */
@@ -34,19 +39,24 @@ class LagSteer(
         HOLDING("holding"),
     }
 
-    /** The floor was raised to [floorMs] because trouble came at a lag of [lagMs]. */
+    /** The learned floor was raised to [floorMs] because trouble came at a lag of [lagMs]. */
     class FloorEvent(val floorMs: Double, val lagMs: Double, val why: String)
 
-    private class Reading(val nanos: Long, val lagMs: Double)
+    private class Reading(val nanos: Long, val lagMs: Double, val positionMs: Long)
 
-    /** The lag that is wanted (ms after the capture, with the kitchen offset in it), NaN: no target. */
+    /** The lag that is wanted (ms after the capture), NaN: no target. */
     @Volatile
     var targetMs = Double.NaN
         private set
 
+    /** The floor of the settings (ms), NaN: none. */
+    @Volatile
+    var configuredFloorMs = Double.NaN
+        private set
+
     /** The lowest lag the speaker has shown it allows, plus the step (ms); NaN until trouble came. */
     @Volatile
-    var floorMs = Double.NaN
+    var learnedFloorMs = Double.NaN
         private set
 
     /** The lag the controller holds now on its way to the goal (ms); NaN without a target or before the lock. */
@@ -54,9 +64,14 @@ class LagSteer(
     var setpointMs = Double.NaN
         private set
 
-    /** Times the floor was raised in this run. */
+    /** Times the learned floor was raised in this run. */
     @Volatile
     var floorEvents = 0
+        private set
+
+    /** The last deficit of the position against real time (ms per second, median of five 1 s windows); NaN before enough readings. */
+    @Volatile
+    var rateDeficitMs = Double.NaN
         private set
 
     /** The setpoint of the lock: trouble counts for the steer only when the setpoint is below it. */
@@ -68,6 +83,18 @@ class LagSteer(
     val active: Boolean get() = !targetMs.isNaN()
 
     val hasSetpoint: Boolean get() = !setpointMs.isNaN()
+
+    /** The floor in force: the higher of the configured and the learned one (ms); NaN if there is neither. */
+    val floorMs: Double
+        get() {
+            val a = configuredFloorMs
+            val b = learnedFloorMs
+            return when {
+                a.isNaN() -> b
+                b.isNaN() -> a
+                else -> maxOf(a, b)
+            }
+        }
 
     /** Where the setpoint is going: the target, but not below the floor and not below the least lag there is (ms); NaN without a target. */
     val goalMs: Double
@@ -93,11 +120,16 @@ class LagSteer(
         return false
     }
 
-    /** A new stream (a re-join, a new session): the lag is measured again; the target and the floor stay. */
+    /** The floor of the settings is [ms] (NaN: none). */
+    fun setConfiguredFloor(ms: Double) {
+        configuredFloorMs = ms
+    }
+
+    /** A new stream (a re-join, a new session): the lag is measured again; the target and the floors stay. */
     @Synchronized
     fun startStream() = forgetStream()
 
-    /** The lag is measured again within the stream (it stepped); the target and the floor stay. */
+    /** The lag is measured again within the stream (it stepped); the target and the floors stay. */
     @Synchronized
     fun startLock() = forgetStream()
 
@@ -107,6 +139,7 @@ class LagSteer(
         history.clear()
         lastNanos = 0L
         quietUntilNanos = 0L
+        rateDeficitMs = Double.NaN
     }
 
     /** The lag is held at [heldMs] now (just locked, or the target was switched on): the setpoint starts there. */
@@ -117,23 +150,30 @@ class LagSteer(
         lockedMs = heldMs
     }
 
-    /** The floor is forgotten (another target, another format, another speaker). True if there was one. */
+    /** The learned floor was kept from earlier today: used from the start. */
+    fun restoreLearnedFloor(ms: Double) {
+        learnedFloorMs = ms
+    }
+
+    /** The learned floor is forgotten (another floor setting, another format, another speaker). True if there was one. */
     @Synchronized
     fun clearFloor(): Boolean {
-        val had = !floorMs.isNaN()
-        floorMs = Double.NaN
+        val had = !learnedFloorMs.isNaN()
+        learnedFloorMs = Double.NaN
         return had
     }
 
     /**
-     * One reading of the lag at [tNanos] (ms after the capture): moves the setpoint, and looks at the readings themselves. A lag that
-     * jumps, or readings that scatter, are the speaker running out of audio: the floor is raised and the event returned.
+     * One reading at [tNanos]: the lag (ms after the capture) and the position the speaker reported ([positionMs]). Moves the
+     * setpoint, and looks at the readings themselves. A lag that jumps, readings that scatter or a position that falls behind real
+     * time are the speaker running out of audio: the learned floor is raised and the event returned (the stream is to be restarted).
      */
     @Synchronized
-    fun onReading(tNanos: Long, lagMs: Double): FloorEvent? {
+    fun onReading(tNanos: Long, lagMs: Double, positionMs: Long = -1L): FloorEvent? {
         if (!active || !hasSetpoint) return null
-        history.addLast(Reading(tNanos, lagMs))
+        history.addLast(Reading(tNanos, lagMs, positionMs))
         while (history.size > MAX_HISTORY || (history.size > 1 && tNanos - history.first().nanos > HISTORY_NANOS)) history.removeFirst()
+        rateDeficitMs = positionDeficit()
         var event: FloorEvent? = null
         if (steered() && tNanos >= quietUntilNanos) {
             val trouble = troubleInReadings()
@@ -154,12 +194,13 @@ class LagSteer(
     private fun steered(): Boolean = !lockedMs.isNaN() && setpointMs < lockedMs - STEER_MARGIN_MS
 
     private fun raiseFloor(tNanos: Long, why: String): FloorEvent? {
-        val where = lagBefore(tNanos)
+        // the lag where it happened, or the setpoint that was held if that was higher (the lag trails the setpoint on a way down)
+        val where = maxOf(lagBefore(tNanos), setpointMs)
         quietUntilNanos = tNanos + DEBOUNCE_NANOS
         val wanted = maxOf(where + FLOOR_STEP_MS, minMs)
         val current = floorMs
         if (!current.isNaN() && wanted <= current) return null // the floor is above that lag already
-        floorMs = wanted
+        learnedFloorMs = wanted
         floorEvents++
         return FloorEvent(wanted, where, why)
     }
@@ -177,9 +218,34 @@ class LagSteer(
     }
 
     /**
-     * A jump of the lag that stays (three readings in a row far above the ones before), or readings that scatter (several of the last
-     * few far above their median; one or two stray readings of a slow round trip are not); null if all is well. Only a lag that
-     * rises is the speaker running dry: it stops, and what comes after is later in the stream.
+     * How far the reported position falls behind real time (ms per second): the median of the slopes between all pairs of the last ten
+     * readings (a Theil-Sen estimate over about 1.8 s), each slope being (time between them) minus (position between them) per second of
+     * time. The median outvotes a stray reading (a slow round trip moves one time stamp by up to its half) where a fit through all of
+     * them would be pulled, and a real dropout, a step of the position, moves it as soon as it is in a good third of the pairs. The
+     * readings are good to about 3.4 ms, which makes this estimate good to about 2 ms per second. NaN with fewer than eight readings
+     * or less than 1.2 s of them.
+     */
+    private fun positionDeficit(): Double {
+        val recent = history.toList().takeLast(RATE_READINGS).filter { it.positionMs >= 0 }
+        if (recent.size < RATE_MIN_READINGS) return Double.NaN
+        if (recent.last().nanos - recent.first().nanos < RATE_MIN_SPAN_NANOS) return Double.NaN
+        val slopes = ArrayList<Double>()
+        for (i in recent.indices) {
+            for (j in i + 1 until recent.size) {
+                val dt = (recent[j].nanos - recent[i].nanos) / 1e6
+                if (dt < RATE_MIN_PAIR_MS) continue // two readings this close say nothing about a rate
+                val dpos = (recent[j].positionMs - recent[i].positionMs).toDouble()
+                slopes.add((dt - dpos) * 1000.0 / dt)
+            }
+        }
+        return if (slopes.size >= RATE_MIN_PAIRS) median(slopes) else Double.NaN
+    }
+
+    /**
+     * Trouble in the readings: a jump of the lag that stays (three readings in a row far above the ones before), readings that scatter
+     * (several of the last few far above their median; one or two stray readings of a slow round trip are not), or a position that
+     * advances slower than real time. Null if all is well. Only a lag that rises is the speaker running dry: it stops, and what comes
+     * after is later in the stream.
      */
     private fun troubleInReadings(): String? {
         val all = history.map { it.lagMs }
@@ -198,6 +264,10 @@ class LagSteer(
             // one of the last two must be among them: readings from before a step down are above the median of the new level, and are no trouble
             val now = recent.takeLast(2).any { it - middle > ERRATIC_MS }
             if (off >= ERRATIC_COUNT && now) return "$off of the last $ERRATIC_READINGS lag readings are more than ${Math.round(ERRATIC_MS)} ms above their median"
+        }
+        val deficit = rateDeficitMs
+        if (!deficit.isNaN() && deficit > RATE_DEFICIT_MS) {
+            return "the position advances ${Math.round(deficit)} ms per second slower than real time"
         }
         return null
     }
@@ -254,14 +324,14 @@ class LagSteer(
     }
 
     companion object {
-        /** The lag moves at most this much per second (ms): a speed change of 0.4 %, under the 0.45 % a trim every 220 frames can make. */
-        const val RAMP_MS_PER_S = 4.0
+        /** The lag moves at most this much per second (ms): a speed change of 0.3 %, well under the 0.45 % a trim every 220 frames can make. */
+        const val RAMP_MS_PER_S = 3.0
 
         /** The setpoint is never further than this from the lag that is measured (ms). */
         const val MAX_AHEAD_MS = 30.0
 
-        /** The floor is this far above the lag at which the speaker ran out of audio (ms). */
-        const val FLOOR_STEP_MS = 20.0
+        /** The learned floor is this far above the lag at which the speaker ran out of audio (ms). */
+        const val FLOOR_STEP_MS = 15.0
 
         /** The setpoint must be this far below where the steering began for trouble to be the steer's (ms). */
         const val STEER_MARGIN_MS = 5.0
@@ -271,10 +341,22 @@ class LagSteer(
         private const val JUMP_READINGS = 3
         private const val JUMP_REFERENCE = 6
 
-        /** [ERRATIC_COUNT] of the last [ERRATIC_READINGS] readings this far above their median are erratic (ms; a ramp adds up to 4, the noise 10). */
+        /** [ERRATIC_COUNT] of the last [ERRATIC_READINGS] readings this far above their median are erratic (ms; a ramp adds up to 3, the noise 10). */
         const val ERRATIC_MS = 20.0
         private const val ERRATIC_READINGS = 8
         private const val ERRATIC_COUNT = 3
+
+        /**
+         * The position falls behind real time by more than this (ms per second, see [positionDeficit]): the speaker stutters. The
+         * estimate is good to about 2 ms per second, so 12 is six sigma; a stutter of 40 ms lost per second, or a dropout of 20 ms or
+         * more, is well above it.
+         */
+        const val RATE_DEFICIT_MS = 12.0
+        private const val RATE_READINGS = 10
+        private const val RATE_MIN_READINGS = 8
+        private const val RATE_MIN_SPAN_NANOS = 1_200_000_000L
+        private const val RATE_MIN_PAIR_MS = 100.0
+        private const val RATE_MIN_PAIRS = 10
 
         /** Trouble within this time of the last is the same event (several signals of one stall). */
         private const val DEBOUNCE_NANOS = 5_000_000_000L

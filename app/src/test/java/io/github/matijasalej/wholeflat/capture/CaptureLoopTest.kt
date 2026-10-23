@@ -37,7 +37,9 @@ class CaptureLoopTest {
         val lags: List<Pair<Double, Double>>,
         val minMarginMs: Double,
         val tracker: CaptureTracker,
-        val planFor: (Int) -> CaptureStart.Plan,
+        val planFor: () -> CaptureStart.Plan,
+        /** The stream ended because the speaker ran dry at the lag it was brought to (the floor was raised, the stream is to start again). */
+        val rejoinUnderrun: Boolean = false,
         /** Times the simulated Sonos ran dry because the lag went below its limit. */
         val dryRuns: Int = 0,
         /** The setpoint of the steer (and the state it was in) at each reading: (seconds after Play, setpoint, state). */
@@ -70,6 +72,8 @@ class CaptureLoopTest {
         tellTheTracker: Boolean = true,
         /** A tracker to continue with (a floor that was learned stays), else a new one. */
         trackerIn: CaptureTracker? = null,
+        /** The lowest lag aimed for, from the settings (NaN: none). */
+        floorMs: Double = Double.NaN,
     ): Result {
         val buffer = CaptureBuffer(rate, rate * 8)
         buffer.newGeneration(1)
@@ -97,11 +101,11 @@ class CaptureLoopTest {
         // what a stream planned at the moment of Play sees (a later plan, as after a restart, has its own numbers)
         val writtenAtPlay = written
         val validStartAtPlay = buffer.validStart
-        fun planWith(offsetNow: Int): CaptureStart.Plan = CaptureStart.plan(
+        fun planWith(): CaptureStart.Plan = CaptureStart.plan(
             nowFrame = framesAt(tPlay), writeIndex = writtenAtPlay, validStart = validStartAtPlay, rate = rate,
-            leadMs = lead.effectiveMs(leadMs), offsetMs = offsetNow, lkMs = lkMs,
+            leadMs = lead.effectiveMs(leadMs), lkMs = lkMs,
         )
-        val plan = planWith(offset)
+        val plan = planWith()
         val map = KitchenMap(plan.startFrame)
         val builder = StreamBuilder(CaptureFrames(buffer, 1), map, StreamBuilder.ChannelMode.STEREO, trimSpacing = KitchenStreams.trimSpacing(rate, captured = true))
         val controller = SyncController(CaptureTracker.controllerParams(rate))
@@ -128,6 +132,7 @@ class CaptureLoopTest {
 
         var rejoinAt: Double? = null
         var rejoinReason: String? = null
+        var rejoinUnderrun = false
         var lockedAt: Double? = null
         var firstLock = Double.NaN
         var minMargin = Double.MAX_VALUE
@@ -158,7 +163,15 @@ class CaptureLoopTest {
                 if (capturedAt != null && (t - capturedAt) / 1e6 < limitLagMs) {
                     allStalls.add(Stall((t - tPlay) / 1e9, limitStallMs))
                     dryRuns++
-                    if (tellTheTracker) tracker.onSpeakerTrouble(t, "PLAYBACK_STATE_BUFFERING")
+                    if (tellTheTracker) {
+                        // the Kitchen starts the stream again when the speaker's own signal raised the floor
+                        val e = tracker.onSpeakerTrouble(t, "PLAYBACK_STATE_BUFFERING")
+                        if (e != null) {
+                            rejoinAt = (t - tPlay) / 1e9
+                            rejoinReason = "the speaker said so: " + e.why
+                            rejoinUnderrun = true
+                        }
+                    }
                 }
             }
 
@@ -166,7 +179,7 @@ class CaptureLoopTest {
                 nextReading += 200_000_000L
                 if (!stalledAt(t)) {
                     val position = Math.round(heardFrame(t) / rate * 1000.0 + 156.0 + rnd.nextGaussian() * noiseMs)
-                    val outcome = tracker.onReading(t, position, map, { builder.unappliedBudget() }, clock, offset, lkMs, target)
+                    val outcome = tracker.onReading(t, position, map, { builder.unappliedBudget() }, clock, offset, lkMs, target, floorMs)
                     when (outcome) {
                         is CaptureTracker.Outcome.Locked -> {
                             if (lockedAt == null) {
@@ -176,8 +189,11 @@ class CaptureLoopTest {
                         }
                         is CaptureTracker.Outcome.Trim -> builder.addTrim(outcome.frames)
                         is CaptureTracker.Outcome.Rejoin -> {
-                            rejoinAt = (t - tPlay) / 1e9
-                            rejoinReason = outcome.reason
+                            if (rejoinAt == null) {
+                                rejoinAt = (t - tPlay) / 1e9
+                                rejoinReason = outcome.reason
+                                rejoinUnderrun = outcome.underrun
+                            }
                         }
                         else -> Unit
                     }
@@ -191,7 +207,7 @@ class CaptureLoopTest {
         }
         return Result(
             rejoinAt, rejoinReason, lockedAt, firstLock, tracker.lag.locked ?: Double.NaN, plan.plannedLagMs,
-            tracker.relocks, lags, minMargin, tracker, { o -> planWith(o) }, dryRuns, steerTrace,
+            tracker.relocks, lags, minMargin, tracker, { planWith() }, rejoinUnderrun, dryRuns, steerTrace,
         )
     }
 
@@ -225,7 +241,7 @@ class CaptureLoopTest {
         // 440 + 350 = 790 ms after the capture; minus Play-to-sound 290 ms leaves 500 ms of lead
         assertEquals(500.0, lead.learnedMs.toDouble(), 6.0)
         // the next stream starts that far ahead
-        assertEquals(790.0, r.planFor(0).plannedLagMs, 6.0)
+        assertEquals(790.0, r.planFor().plannedLagMs, 6.0)
     }
 
     @Test
@@ -263,15 +279,16 @@ class CaptureLoopTest {
         assertTrue("re-joined", r.rejoinAt != null)
         assertTrue("within a few seconds of the change: ${r.rejoinAt}", r.rejoinAt!! in 20.0..26.0)
         assertEquals(0, r.relocks)
-        // and the restart is planned with the new offset
-        assertEquals(r.plannedMs + 80.0, r.planFor(80).plannedLagMs, 0.5)
+        // and the restart is planned with the lead alone: the offset is no part of the plan
+        assertEquals(r.plannedMs, r.planFor().plannedLagMs, 0.5)
     }
 
     @Test
-    fun theKitchenOffsetAtTheStartIsPartOfThePlan() {
+    fun theKitchenOffsetAtTheStartIsNoPartOfThePlan() {
+        // the tracker still knows an offset (it moves the lag that was locked), but the plan of a stream is the lead and nothing else
         val r = simulate(seconds = 30, offsetMs = 100)
-        assertEquals(540.0, r.plannedMs, 0.5)
-        assertEquals(540.0, r.lockedMs, 4.0)
+        assertEquals(440.0, r.plannedMs, 0.5)
+        assertEquals(440.0, r.lockedMs, 4.0)
         assertNull(r.rejoinAt)
     }
 
@@ -329,32 +346,33 @@ class CaptureLoopTest {
 
     @Test
     fun aTargetBelowTheLockedLagIsReachedGraduallyWithoutARestart() {
-        // locked at 442 ms (lk 290 + lead 150), wanted 300 ms: 142 ms at a few ms per second
-        val r = simulate(seconds = 150, targetMs = 300.0, noiseMs = 3.4, seed = 3)
+        // locked at 442 ms (lk 290 + lead 150), wanted 300 ms: 142 ms at 3 ms per second
+        val r = simulate(seconds = 200, targetMs = 300.0, noiseMs = 3.4, seed = 3)
         assertNull("no restart: ${r.rejoinReason}", r.rejoinAt)
         assertEquals(0, r.relocks)
         assertEquals(442.0, r.lockedMs, 4.0)
-        // it gets there, and stays within the tolerance of the controller
-        for (lag in tail(r, 70.0)) assertEquals(300.0, lag, 7.0)
-        // never faster than 5 ms per second (0.5 % of the speed), in any 10 s
-        assertTrue("fell ${steepestFall(r.lags, 10.0)} ms in 10 s", steepestFall(r.lags, 10.0) <= 50.0)
-        assertTrue("it did fall at about 4 ms per second: ${steepestFall(r.lags, 10.0)}", steepestFall(r.lags, 10.0) >= 30.0)
-        // the steer says what it does: descending on the way, holding at the end, no floor
+        // it gets there (47 s of ramp and a little more for the controller), and stays within the tolerance of the controller
+        for (lag in tail(r, 90.0)) assertEquals(300.0, lag, 7.0)
+        // never faster than 4.5 ms per second (the trims) and not much slower than the ramp, in any 10 s
+        assertTrue("fell ${steepestFall(r.lags, 10.0)} ms in 10 s", steepestFall(r.lags, 10.0) <= 45.0)
+        assertTrue("it did fall at about 3 ms per second: ${steepestFall(r.lags, 10.0)}", steepestFall(r.lags, 10.0) >= 20.0)
+        // the steer says what it does: descending on the way, holding at the end, no learned floor
         assertTrue(r.steerTrace.any { it.third == LagSteer.State.DESCENDING })
         assertEquals(LagSteer.State.HOLDING, r.steerTrace.last().third)
-        assertTrue(r.tracker.steer.floorMs.isNaN())
+        assertTrue(r.tracker.steer.learnedFloorMs.isNaN())
         assertEquals(300.0, r.steerTrace.last().second, 0.001)
     }
 
     @Test
     fun aTargetAboveTheLockedLagIsReachedByAddingFrames() {
-        val r = simulate(seconds = 150, targetMs = 520.0, noiseMs = 3.4, seed = 4)
+        val r = simulate(seconds = 200, targetMs = 520.0, noiseMs = 3.4, seed = 4)
         assertNull(r.rejoinAt)
         assertEquals(0, r.relocks)
-        for (lag in tail(r, 70.0)) assertEquals(520.0, lag, 7.0)
+        for (lag in tail(r, 90.0)) assertEquals(520.0, lag, 7.0)
         assertTrue(r.steerTrace.any { it.third == LagSteer.State.ASCENDING })
-        // up at no more than 5 ms per second either
-        assertTrue("rose ${-steepestFall(r.lags.map { Pair(it.first, -it.second) }, 10.0)}", steepestFall(r.lags.map { Pair(it.first, -it.second) }, 10.0) <= 50.0)
+        // up at no more than 4.5 ms per second either
+        val rose = steepestFall(r.lags.map { Pair(it.first, -it.second) }, 10.0)
+        assertTrue("rose $rose ms in 10 s", rose <= 45.0)
     }
 
     @Test
@@ -366,56 +384,82 @@ class CaptureLoopTest {
     }
 
     @Test
-    fun theLagStopsAtTheFloorThatTheSpeakerShowedAndDoesNotRunDryAgain() {
-        // the simulated Sonos runs dry below 330 ms: it stops for 400 ms and fills its buffer again, 400 ms later in the stream
-        val r = simulate(seconds = 300, targetMs = 250.0, limitLagMs = 330.0, noiseMs = 3.4, seed = 3)
-        assertEquals("it ran dry once, then the floor held", 1, r.dryRuns)
-        assertNull("no restart: ${r.rejoinReason}", r.rejoinAt)
-        val steer = r.tracker.steer
-        assertEquals(1, steer.floorEvents)
-        // 20 ms above the lag where it happened (the limit, and the little by which the readings trail the real lag)
-        assertTrue("floor ${steer.floorMs}", steer.floorMs in 345.0..365.0)
-        // the stall was taken for a step of the lag: measured again, not restarted, and not taken for a speaker that needs a bigger lead
-        assertEquals(1, r.relocks)
-        assertEquals(0, r.tracker.lead.learnedMs)
-        // after the descent it holds at the floor, not at the target
-        for (lag in tail(r, 200.0)) assertEquals(steer.floorMs, lag, 7.0)
-        assertEquals(steer.floorMs, r.steerTrace.last().second, 0.001)
-        assertEquals(LagSteer.State.HOLDING, r.steerTrace.last().third)
-    }
-
-    @Test
-    fun aSpeakerThatSaysNothingIsFoundOutFromTheJumpOfTheLag() {
-        val r = simulate(seconds = 300, targetMs = 250.0, limitLagMs = 330.0, noiseMs = 3.4, seed = 3, tellTheTracker = false)
-        assertEquals(1, r.dryRuns)
+    fun theConfiguredFloorIsWhereTheLagStopsWhateverTheTarget() {
+        // a target of 300 under a floor of 316
+        val r = simulate(seconds = 200, targetMs = 300.0, floorMs = 316.0, noiseMs = 3.4, seed = 3)
         assertNull(r.rejoinAt)
-        val steer = r.tracker.steer
-        assertEquals(1, steer.floorEvents)
-        assertTrue("floor ${steer.floorMs}", steer.floorMs in 345.0..365.0)
-        for (lag in tail(r, 200.0)) assertEquals(steer.floorMs, lag, 7.0)
+        for (lag in tail(r, 90.0)) assertEquals(316.0, lag, 7.0)
+        assertEquals(316.0, r.steerTrace.last().second, 0.001)
+        assertTrue(r.tracker.steer.learnedFloorMs.isNaN())
     }
 
     @Test
-    fun aFloorThatWasLearnedIsKeptForTheNextStream() {
-        val lead = CaptureLead()
-        val first = simulate(seconds = 200, targetMs = 250.0, limitLagMs = 330.0, noiseMs = 3.4, seed = 3, lead = lead)
-        val floor = first.tracker.steer.floorMs
-        assertFalse(floor.isNaN())
-        // a new stream (a re-join): the same tracker, a new simulated Sonos with the same limit
-        val second = simulate(seconds = 200, targetMs = 250.0, limitLagMs = 330.0, noiseMs = 3.4, seed = 7, lead = lead, trackerIn = first.tracker)
+    fun aSpeakerThatRunsDryEndsTheStreamAndTheNextOneStopsAtTheNewFloor() {
+        // the simulated Sonos runs dry below 330 ms: it stops for 400 ms and fills its buffer again, 400 ms later in the stream.
+        // The controller would hide it (a steady lag), a raised setpoint would not cure it: the stream is started again, with a floor.
+        val first = simulate(seconds = 300, targetMs = 250.0, floorMs = 200.0, limitLagMs = 330.0, noiseMs = 3.4, seed = 3)
+        assertEquals("it ran dry once", 1, first.dryRuns)
+        assertTrue("the stream was ended: ${first.rejoinReason}", first.rejoinAt != null)
+        assertTrue("as an underrun, not a failed start", first.rejoinUnderrun)
+        val steer = first.tracker.steer
+        assertEquals(1, steer.floorEvents)
+        // 15 ms above the lag where it happened: the limit, and the little by which the readings trail the real lag
+        val floor = steer.learnedFloorMs
+        assertTrue("floor $floor", floor in 340.0..360.0)
+        // the speaker was on its way down from 442 at 3 ms per second when it hit 330
+        assertTrue("after about 37 s of descent: ${first.rejoinAt}", first.rejoinAt!! in 30.0..50.0)
+        assertEquals("a stall is not a lead the speaker needs", 0, first.tracker.lead.learnedMs)
+
+        // the new stream: the same tracker (the floor stays), a new simulated Sonos with the same limit
+        val second = simulate(seconds = 200, targetMs = 250.0, floorMs = 200.0, limitLagMs = 330.0, noiseMs = 3.4, seed = 7, trackerIn = first.tracker)
         assertEquals("the speaker did not run dry again", 0, second.dryRuns)
-        assertEquals(floor, second.tracker.steer.floorMs, 0.0)
-        for (lag in tail(second, 130.0)) assertEquals(floor, lag, 7.0)
+        assertNull("and the stream was not ended: ${second.rejoinReason}", second.rejoinAt)
+        assertEquals(floor, second.tracker.steer.learnedFloorMs, 0.0)
+        for (lag in tail(second, 100.0)) assertEquals(floor, lag, 7.0)
+        assertEquals(floor, second.steerTrace.last().second, 0.001)
+        assertEquals(LagSteer.State.HOLDING, second.steerTrace.last().third)
+    }
+
+    @Test
+    fun aSpeakerThatSaysNothingIsFoundOutFromTheReadings() {
+        val r = simulate(seconds = 300, targetMs = 250.0, floorMs = 200.0, limitLagMs = 330.0, noiseMs = 3.4, seed = 3, tellTheTracker = false)
+        assertEquals(1, r.dryRuns)
+        assertTrue("the stream was ended: ${r.rejoinReason}", r.rejoinAt != null)
+        assertTrue(r.rejoinUnderrun)
+        val steer = r.tracker.steer
+        assertEquals(1, steer.floorEvents)
+        assertTrue("floor ${steer.learnedFloorMs}", steer.learnedFloorMs in 340.0..365.0)
+        // found out within about a second of the stall, from the lag that jumped or the position that fell behind
+        assertTrue(r.rejoinReason!!.contains("jumped") || r.rejoinReason!!.contains("slower"))
+    }
+
+    @Test
+    fun aSmallStallIsFoundFromThePositionAloneToo() {
+        // 40 ms: the lag rises by 40, which is a jump too; the position falls behind real time by the same
+        val r = simulate(seconds = 300, targetMs = 250.0, floorMs = 200.0, limitLagMs = 330.0, limitStallMs = 40.0, noiseMs = 3.4, seed = 5, tellTheTracker = false)
+        assertTrue("the stream was ended: ${r.rejoinReason}", r.rejoinAt != null)
+        assertTrue(r.rejoinUnderrun)
+        assertTrue("floor ${r.tracker.steer.learnedFloorMs}", r.tracker.steer.learnedFloorMs in 340.0..365.0)
+    }
+
+    @Test
+    fun noiseDoesNotMakeTheSpeakerLookLikeItRunsDry() {
+        // seeds and noise well above what the readings have, on the way down and at the target: not one false alarm
+        for (seed in 1L..6L) {
+            val r = simulate(seconds = 200, targetMs = 300.0, floorMs = 200.0, noiseMs = 5.0, seed = seed)
+            assertNull("seed $seed: ${r.rejoinReason}", r.rejoinAt)
+            assertEquals("seed $seed", 0, r.tracker.steer.floorEvents)
+        }
     }
 
     @Test
     fun aTargetThatIsChangedLaterIsFollowedAtTheSameSpeed() {
-        val r = simulate(seconds = 200, targetMs = 400.0, changeTargetAtS = 50, newTargetMs = 330.0, noiseMs = 3.4, seed = 6)
+        val r = simulate(seconds = 220, targetMs = 400.0, changeTargetAtS = 50, newTargetMs = 330.0, noiseMs = 3.4, seed = 6)
         assertNull(r.rejoinAt)
         assertEquals(0, r.relocks)
         for (lag in tail(r, 40.0, 50.0)) assertEquals(400.0, lag, 7.0)
         for (lag in tail(r, 100.0)) assertEquals(330.0, lag, 7.0)
-        assertTrue("fell ${steepestFall(r.lags, 10.0, 50.0)} ms in 10 s", steepestFall(r.lags, 10.0, 50.0) <= 50.0)
+        assertTrue("fell ${steepestFall(r.lags, 10.0, 50.0)} ms in 10 s", steepestFall(r.lags, 10.0, 50.0) <= 45.0)
     }
 
     @Test
@@ -425,7 +469,7 @@ class CaptureLoopTest {
         assertNull(r.rejoinAt)
         assertEquals(0, r.relocks)
         val atSwitch = tail(r, 21.0, 24.0).average()
-        assertTrue("it was on its way down: $atSwitch", atSwitch in 380.0..420.0)
+        assertTrue("it was on its way down: $atSwitch", atSwitch in 390.0..430.0)
         for (lag in tail(r, 40.0)) assertEquals(atSwitch, lag, 8.0)
         assertTrue(r.steerTrace.last().third == LagSteer.State.OFF)
         assertTrue(r.steerTrace.last().second.isNaN())
@@ -433,19 +477,10 @@ class CaptureLoopTest {
 
     @Test
     fun theTargetCanBeSwitchedOnLater() {
-        val r = simulate(seconds = 160, targetMs = Double.NaN, changeTargetAtS = 30, newTargetMs = 350.0, noiseMs = 3.4, seed = 9)
+        val r = simulate(seconds = 200, targetMs = Double.NaN, changeTargetAtS = 30, newTargetMs = 350.0, noiseMs = 3.4, seed = 9)
         assertNull(r.rejoinAt)
         assertEquals(0, r.relocks)
         for (lag in tail(r, 25.0, 30.0)) assertEquals(r.lockedMs, lag, 7.0)
-        for (lag in tail(r, 110.0)) assertEquals(350.0, lag, 7.0)
-    }
-
-    @Test
-    fun theTargetMovesTheStreamEvenIfTheKitchenOffsetIsPartOfIt() {
-        // the target 300 plus an offset of -20 is 280
-        val target = CaptureTarget.of(300, 0, -20)!!.ms
-        val r = simulate(seconds = 150, targetMs = target, offsetMs = -20, noiseMs = 3.4, seed = 10)
-        assertNull(r.rejoinAt)
-        for (lag in tail(r, 80.0)) assertEquals(280.0, lag, 7.0)
+        for (lag in tail(r, 130.0)) assertEquals(350.0, lag, 7.0)
     }
 }

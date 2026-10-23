@@ -18,7 +18,9 @@ import io.github.matijasalej.wholeflat.sync.SyncController
  *
  * With a target lag (the `targetMs` of a reading) the lag is not held where it locked but brought to the target, slowly, by the
  * [LagSteer]: its setpoint moves toward the target and the controller holds the lag at the setpoint. The steer also learns the
- * floor, the lowest lag the speaker allows (see [LagSteer]); a step of the lag then is measured against the setpoint.
+ * floor, the lowest lag the speaker allows (see [LagSteer]): a sign that the speaker runs dry while the lag is brought down ends
+ * the stream with a re-join ([Outcome.Rejoin] with `underrun`), because a speaker driven that low stays degraded and only a fresh
+ * start cures it. A step of the lag that is no such sign is measured against the setpoint.
  *
  * Plain Kotlin; the Kitchen feeds it and does what the outcome says.
  */
@@ -43,7 +45,8 @@ class CaptureTracker(
         /** The lag moved from [fromMs] to about [toMs]: it is measured again instead of restarting the stream. */
         class Relock(val fromMs: Double, val toMs: Double) : Outcome()
 
-        class Rejoin(val reason: String) : Outcome()
+        /** Start the stream again. With [underrun] the speaker ran dry at the lag it was brought to: the floor was raised, and it is no failed start. */
+        class Rejoin(val reason: String, val underrun: Boolean = false) : Outcome()
     }
 
     /** Steps of the lag that were taken in as a new lag during this stream. */
@@ -91,7 +94,8 @@ class CaptureTracker(
     /**
      * One reading: at [tNanos] the Sonos reported [positionMs]. [map] and [unappliedBudget] are the stream's,
      * [clock] says when each captured frame was captured, [offsetMs] is the kitchen offset in force and [lkMs]
-     * the delay from Play to the first sound. [targetMs] is the lag to bring the kitchen to (NaN: hold what it locked).
+     * the delay from Play to the first sound. [targetMs] is the lag to bring the kitchen to (NaN: hold what it locked) and
+     * [floorMs] the lowest lag to aim for (NaN: none).
      */
     @Synchronized
     fun onReading(
@@ -103,12 +107,14 @@ class CaptureTracker(
         offsetMs: Int,
         lkMs: Double,
         targetMs: Double = Double.NaN,
+        floorMs: Double = Double.NaN,
     ): Outcome {
         val heard = (positionMs - controller.deltaMs) / 1000.0 * rate
         val frame = map.ringOfStream(heard) ?: return Outcome.Waiting
         val captured = clock.nanosOfFrame(Math.round(frame)) ?: return Outcome.Waiting
         val lagMs = (tNanos - captured) / 1e6
         val ended = steer.setTarget(targetMs)
+        steer.setConfiguredFloor(floorMs)
 
         if (!lag.isLocked) {
             if (!lag.onReading(lagMs, offsetMs)) return Outcome.Waiting
@@ -135,8 +141,14 @@ class CaptureTracker(
         if (steer.active && !steer.hasSetpoint) steer.onLock(lag.targetMs(offsetMs))
 
         lag.onReading(lagMs, offsetMs)
-        val floorEvent = steer.onReading(tNanos, lagMs)
-        if (floorEvent != null) onFloor?.invoke(floorEvent)
+        val floorEvent = steer.onReading(tNanos, lagMs, positionMs)
+        if (floorEvent != null) {
+            onFloor?.invoke(floorEvent)
+            return Outcome.Rejoin(
+                "the speaker runs dry at a lag of ${Math.round(floorEvent.lagMs)} ms (${floorEvent.why}); the floor is ${Math.round(floorEvent.floorMs)} ms from now on",
+                underrun = true,
+            )
+        }
         controller.offsetMs = controllerOffsetMs(offsetMs)
         val base = lag.baseNanos()
         val view = StreamView(map, unappliedBudget) { f -> clock.nanosOfFrame(f)?.plus(base) }

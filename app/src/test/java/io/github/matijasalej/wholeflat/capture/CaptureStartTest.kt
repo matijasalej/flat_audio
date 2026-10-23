@@ -10,7 +10,7 @@ class CaptureStartTest {
 
     @Test
     fun theStreamStartsTheLeadBeforeNow() {
-        val p = CaptureStart.plan(nowFrame = 480_000, writeIndex = 478_000, validStart = 94_000, rate = rate, leadMs = 200, offsetMs = 0, lkMs = 290.0)
+        val p = CaptureStart.plan(nowFrame = 480_000, writeIndex = 478_000, validStart = 94_000, rate = rate, leadMs = 200, lkMs = 290.0)
         assertEquals(480_000L - 9_600L, p.startFrame)
         assertEquals(9_600L, p.aheadFrames)
         assertEquals(490.0, p.plannedLagMs, 0.001)
@@ -18,20 +18,22 @@ class CaptureStartTest {
     }
 
     @Test
-    fun aKitchenOffsetMovesTheStartBackOrForward() {
-        val later = CaptureStart.plan(480_000, 478_000, 94_000, rate, leadMs = 200, offsetMs = 100, lkMs = 290.0)
-        assertEquals(480_000L - 14_400L, later.startFrame)
-        assertEquals(590.0, later.plannedLagMs, 0.001)
-        val earlier = CaptureStart.plan(480_000, 478_000, 94_000, rate, leadMs = 200, offsetMs = -100, lkMs = 290.0)
-        assertEquals(480_000L - 4_800L, earlier.startFrame)
-        assertEquals(390.0, earlier.plannedLagMs, 0.001)
+    fun theLeadIsTheLeadSettingAlone() {
+        // the kitchen offset used to be added to it; a persistent negative offset made every start later (the Sonos starts when it has
+        // about 270 ms buffered, and a smaller lead only makes that take longer), so the plan takes the lead and nothing else
+        val short = CaptureStart.plan(480_000, 478_000, 94_000, rate, leadMs = 80, lkMs = 190.0)
+        assertEquals(480_000L - 3_840L, short.startFrame)
+        assertEquals(270.0, short.plannedLagMs, 0.001)
+        val long = CaptureStart.plan(480_000, 478_000, 94_000, rate, leadMs = 300, lkMs = 190.0)
+        assertEquals(480_000L - 14_400L, long.startFrame)
+        assertEquals(490.0, long.plannedLagMs, 0.001)
     }
 
     @Test
     fun theLeadIsNeverLessThanTheMinimum() {
         assertEquals(10, CaptureStart.MIN_LEAD_MS)
-        // a lead of 5 ms (100 less 95 of offset) is raised to the minimum of 10 ms
-        val p = CaptureStart.plan(480_000, 480_000, 94_000, rate, leadMs = 100, offsetMs = -95, lkMs = 290.0)
+        // a lead of 5 ms is raised to the minimum of 10 ms
+        val p = CaptureStart.plan(480_000, 480_000, 94_000, rate, leadMs = 5, lkMs = 290.0)
         assertEquals(480_000L - 480L, p.startFrame)
         assertEquals(480L, p.aheadFrames)
         assertTrue(p.limited)
@@ -40,7 +42,7 @@ class CaptureStartTest {
 
     @Test
     fun aLeadOfTenMillisecondsIsTenMilliseconds() {
-        val p = CaptureStart.plan(480_000, 480_000, 94_000, rate, leadMs = 10, offsetMs = 0, lkMs = 190.0)
+        val p = CaptureStart.plan(480_000, 480_000, 94_000, rate, leadMs = 10, lkMs = 190.0)
         assertEquals(480L, p.aheadFrames)
         assertFalse(p.limited)
         assertEquals(200.0, p.plannedLagMs, 0.001)
@@ -51,7 +53,7 @@ class CaptureStartTest {
         // the last read was 20 ms ago: the clock is 20 ms past the written frames, and the stream still starts only the lead before it
         // (a minimum lead measured from the written frames made a lead of 40 ms come out as 84 to 89)
         val written = 480_000L
-        val p = CaptureStart.plan(nowFrame = written + 960, writeIndex = written, validStart = 94_000, rate = rate, leadMs = 10, offsetMs = 0, lkMs = 190.0)
+        val p = CaptureStart.plan(nowFrame = written + 960, writeIndex = written, validStart = 94_000, rate = rate, leadMs = 10, lkMs = 190.0)
         assertEquals(480L, p.aheadFrames)
         assertEquals(written + 960 - 480, p.startFrame)
         assertFalse(p.limited)
@@ -60,7 +62,7 @@ class CaptureStartTest {
     @Test
     fun aClockThatRunsOnWithoutFramesIsNotBelievedBeyondAReadOrTwo() {
         // the capture stalled: the clock thinks it is 20000 frames further on than what has been written
-        val p = CaptureStart.plan(nowFrame = 500_000, writeIndex = 480_000, validStart = 96_000, rate = rate, leadMs = 20, offsetMs = 0, lkMs = 290.0)
+        val p = CaptureStart.plan(nowFrame = 500_000, writeIndex = 480_000, validStart = 96_000, rate = rate, leadMs = 20, lkMs = 290.0)
         val latest = 480_000L + CaptureStart.MAX_RUN_ON_MS * 48L
         assertEquals(latest - 960L, p.startFrame)
         assertEquals(960L, p.aheadFrames)
@@ -69,8 +71,8 @@ class CaptureStartTest {
 
     @Test
     fun theStartIsNeverBeforeWhatTheBufferHolds() {
-        // the buffer holds only the last 2 s; an offset of 2 s wants more than that
-        val p = CaptureStart.plan(nowFrame = 1_000_000, writeIndex = 998_000, validStart = 902_000, rate = rate, leadMs = 200, offsetMs = 2_000, lkMs = 290.0)
+        // the buffer holds only the last 2 s; a lead of 2.2 s wants more than that
+        val p = CaptureStart.plan(nowFrame = 1_000_000, writeIndex = 998_000, validStart = 902_000, rate = rate, leadMs = 2_200, lkMs = 290.0)
         assertEquals(902_000L + 12_000L, p.startFrame)
         assertTrue(p.limited)
         assertEquals(290.0 + (1_000_000L - 914_000L) / 48.0, p.plannedLagMs, 0.001)
@@ -78,7 +80,7 @@ class CaptureStartTest {
 
     @Test
     fun aCaptureThatJustStartedBeginsAtItsFirstFrame() {
-        val p = CaptureStart.plan(nowFrame = 3_000, writeIndex = 2_000, validStart = 0, rate = rate, leadMs = 200, offsetMs = 0, lkMs = 290.0)
+        val p = CaptureStart.plan(nowFrame = 3_000, writeIndex = 2_000, validStart = 0, rate = rate, leadMs = 200, lkMs = 290.0)
         assertEquals(0L, p.startFrame)
         assertTrue(p.limited)
         assertTrue(p.aheadFrames >= 0)
@@ -86,7 +88,7 @@ class CaptureStartTest {
 
     @Test
     fun theStartIsNeverNegative() {
-        val p = CaptureStart.plan(nowFrame = 100, writeIndex = 90, validStart = 0, rate = rate, leadMs = 200, offsetMs = 0, lkMs = 290.0)
+        val p = CaptureStart.plan(nowFrame = 100, writeIndex = 90, validStart = 0, rate = rate, leadMs = 200, lkMs = 290.0)
         assertEquals(0L, p.startFrame)
     }
 }

@@ -195,4 +195,44 @@ class AmbilightControlTest {
         val odd = AmbilightControl.plan(AmbilightControl.Saved("On", "not json"))
         assertEquals(2, odd.size)
     }
+
+    @Test
+    fun aWholeConfigurationFromAnotherPartIsUsedInsteadOfTheStyle() {
+        val tv = FakeTv()
+        var config: String? = AmbilightControl.configJson("FOLLOW_AUDIO", algorithm = "PARTY")
+        val c = AmbilightControl(tv, MemoryStore(), { "FOLLOW_AUDIO" }, { "ENERGY_ADAPTIVE_BRIGHTNESS" }, { config })
+        assertTrue(c.enter())
+        val o = JSONObject(tv.config!!)
+        assertEquals("FOLLOW_AUDIO", o.getString("styleName"))
+        assertEquals(true, o.getBoolean("isExpert"))
+        assertEquals("PARTY", o.getString("algorithm"))
+        assertFalse(o.has("menuSetting"))
+        assertTrue(c.lastAction, c.lastAction.contains("FOLLOW_AUDIO/PARTY"))
+        // a new song: another configuration, put on while the lights are on
+        config = AmbilightControl.configJson("FOLLOW_COLOR", algorithm = "HOT_LAVA")
+        c.restyle()
+        assertEquals("HOT_LAVA", JSONObject(tv.config!!).getString("algorithm"))
+        assertTrue(c.lastAction, c.lastAction.contains("FOLLOW_COLOR/HOT_LAVA"))
+        // none from the other part: the style of the settings
+        config = null
+        c.restyle()
+        assertEquals("ENERGY_ADAPTIVE_BRIGHTNESS", JSONObject(tv.config!!).getString("menuSetting"))
+        assertEquals(false, JSONObject(tv.config!!).getBoolean("isExpert"))
+    }
+
+    @Test
+    fun theConfigurationOfAStyleIsPlainWithAMenuSettingOrExpertWithAnAlgorithm() {
+        val plain = JSONObject(AmbilightControl.configJson("FOLLOW_AUDIO", "ENERGY_ADAPTIVE_BRIGHTNESS"))
+        assertEquals(false, plain.getBoolean("isExpert"))
+        assertEquals("ENERGY_ADAPTIVE_BRIGHTNESS", plain.getString("menuSetting"))
+        val bare = JSONObject(AmbilightControl.configJson("RANDOM_PIXEL_FLASH"))
+        assertEquals(false, bare.getBoolean("isExpert"))
+        assertFalse(bare.has("menuSetting"))
+        val expert = JSONObject(AmbilightControl.configJson("FOLLOW_AUDIO", "IGNORED", "PARTY"))
+        assertEquals(true, expert.getBoolean("isExpert"))
+        assertEquals("PARTY", expert.getString("algorithm"))
+        assertFalse(expert.has("menuSetting"))
+        assertEquals("FOLLOW_AUDIO/PARTY", AmbilightControl.styleName(expert.toString()))
+        assertEquals("OFF", AmbilightControl.styleName("""{"styleName":"OFF","isExpert":false}"""))
+    }
 }

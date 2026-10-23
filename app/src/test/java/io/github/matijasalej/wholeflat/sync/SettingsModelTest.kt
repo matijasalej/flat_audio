@@ -46,6 +46,23 @@ class SettingsModelTest {
         assertEquals(false, o.getBoolean("tv_audio_only"))
         assertEquals("C0:D2:F3:87:BF:F4", o.getString("tv_mac"))
         assertEquals(true, o.getBoolean("tv_position_probe"))
+        assertEquals("FOLLOW_AUDIO", o.getString("ambilight_dark_style"))
+        assertEquals("PARTY", o.getString("ambilight_dark_algorithm"))
+        assertEquals("", o.getString("ambilight_dark_menu"))
+    }
+
+    @Test
+    fun theLightsOfTheScreenOffDisplayTakeAStyleAnAlgorithmAndAMenuSetting() {
+        val m = SettingsModel()
+        assertEquals(setOf("ambilight_dark_style", "ambilight_dark_algorithm"), m.applyJson(JSONObject("""{"ambilight_dark_style": "follow_color", "ambilight_dark_algorithm": "hot_lava"}""")))
+        assertEquals("FOLLOW_COLOR", m.values().ambilightDarkStyle)
+        assertEquals("HOT_LAVA", m.values().ambilightDarkAlgorithm)
+        // an empty algorithm is the plain form, with a menu setting
+        assertEquals(setOf("ambilight_dark_algorithm", "ambilight_dark_menu"), m.applyJson(JSONObject("""{"ambilight_dark_algorithm": "", "ambilight_dark_menu": "party"}""")))
+        assertEquals("", m.ambilightDarkAlgorithm)
+        assertEquals("PARTY", m.ambilightDarkMenu)
+        // nonsense is ignored
+        assertEquals(emptySet<String>(), m.applyJson(JSONObject("""{"ambilight_dark_style": "not a style", "ambilight_dark_algorithm": "x y"}""")))
     }
 
     @Test
@@ -78,6 +95,7 @@ class SettingsModelTest {
                 "kitchen_volume", "capture_volume_mirror", "kitchen_format", "kitchen_flac_block",
                 "mode", "tv_latency_ms", "tv_format", "tv_burst_ms", "tv_extra_ms", "tv_preroll_ms", "tv_pcr_lead_ms", "tv_reanchor_min", "tv_render", "tv_video", "lyrics_offset_ms", "display", "background_cleanup",
                 "ambilight_style", "ambilight_menu", "tv_pause_ms", "tv_quiet", "tv_audio_only", "tv_mac", "tv_position_probe",
+                "ambilight_dark_style", "ambilight_dark_algorithm", "ambilight_dark_menu",
             ),
             keys,
         )

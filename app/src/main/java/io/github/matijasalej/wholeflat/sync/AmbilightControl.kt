@@ -28,6 +28,7 @@ interface AmbilightStore {
  * is overridden by the style that the power-on restores: seen on the TV); leaving puts back what was remembered, and if that was
  * "off" (the power was Off or the style was "OFF") it just switches the power off. The remembered state is stored before anything is
  * changed, so that an app that crashed in Synced mode puts the lights back at its next start ([recover]) instead of leaving them on.
+ * The mood lights may give a whole configuration of their own ([config]); without one, the style is [style] with [menuSetting].
  *
  * Plain Kotlin behind two small interfaces.
  */
@@ -36,6 +37,7 @@ class AmbilightControl(
     private val store: AmbilightStore,
     private val style: () -> String,
     private val menuSetting: () -> String,
+    private val config: () -> String? = { null },
 ) {
     /** The state the lights were in before Synced mode: the power ("On" / "Off") and the raw configuration JSON. */
     class Saved(val power: String, val config: String)
@@ -78,9 +80,10 @@ class AmbilightControl(
         remembered = saved
         store.write(saved)
         val on = api.setPower(true)
-        val set = api.setConfig(styleJson())
+        val json = styleJson()
+        val set = api.setConfig(json)
         entered = true
-        note("Ambilight on (was ${saved.power}, ${styleName(saved.config)}), power ${ok(on)}, style ${style()} ${ok(set)}", on && set)
+        note("Ambilight on (was ${saved.power}, ${styleName(saved.config)}), power ${ok(on)}, style ${styleName(json)} ${ok(set)}", on && set)
         return true
     }
 
@@ -106,8 +109,9 @@ class AmbilightControl(
     @Synchronized
     fun restyle() {
         if (!entered) return
-        val set = api.setConfig(styleJson())
-        note("Ambilight style ${style()} ${ok(set)}", set)
+        val json = styleJson()
+        val set = api.setConfig(json)
+        note("Ambilight style ${styleName(json)} ${ok(set)}", set)
     }
 
     private fun restore(saved: Saved, why: String) {
@@ -126,6 +130,7 @@ class AmbilightControl(
     }
 
     private fun styleJson(): String {
+        config()?.let { return it }
         val o = JSONObject()
         o.put("styleName", style())
         o.put("isExpert", false)
@@ -150,11 +155,32 @@ class AmbilightControl(
             return if (off) listOf(Step.Power(false)) else listOf(Step.Power(true), Step.Config(saved.config))
         }
 
-        /** The `styleName` of a configuration JSON, "" if there is none. */
+        /** The `styleName` of a configuration JSON, "" if there is none; with the `algorithm` after a slash for an expert configuration (for the log). */
         fun styleName(config: String): String = try {
-            JSONObject(config).optString("styleName", "")
+            val o = JSONObject(config)
+            val name = o.optString("styleName", "")
+            val algorithm = o.optString("algorithm", "")
+            if (o.optBoolean("isExpert", false) && algorithm.isNotEmpty()) "$name/$algorithm" else name
         } catch (e: Exception) {
             ""
+        }
+
+        /**
+         * A configuration JSON of the TV for [style]: with an [algorithm] it is the expert form `{"styleName":"FOLLOW_AUDIO","isExpert":true,
+         * "algorithm":"PARTY"}` (the plain menu setting PARTY does nothing on this TV, and Lumina is dark while the screen is off); else the
+         * plain form with the [menu] setting if there is one.
+         */
+        fun configJson(style: String, menu: String = "", algorithm: String = ""): String {
+            val o = JSONObject()
+            o.put("styleName", style)
+            if (algorithm.isNotEmpty()) {
+                o.put("isExpert", true)
+                o.put("algorithm", algorithm)
+            } else {
+                o.put("isExpert", false)
+                if (menu.isNotEmpty()) o.put("menuSetting", menu)
+            }
+            return o.toString()
         }
     }
 }

@@ -69,7 +69,31 @@ class SyncedController(
         },
         { Settings.values.ambilightStyle },
         { Settings.values.ambilightMenu },
+        { ambilightConfig() },
     )
+
+    /**
+     * A whole Ambilight configuration of another part of the app (the mood lights choose the style of a song), asked first; null: the
+     * display decides (see [ambilightConfig]). The hook is set once, from the service.
+     */
+    @Volatile
+    var configHook: (() -> String?)? = null
+
+    /**
+     * The configuration of the Ambilight now: the hook's if it gives one; else, with the screen off (display "ambilight"), the `ambilight_dark_*`
+     * settings (expert PARTY by default: Lumina is dark without a picture); else null, which is the style of `ambilight_style` and
+     * `ambilight_menu` (Lumina: it follows the picture and the beat).
+     */
+    private fun ambilightConfig(): String? {
+        try {
+            configHook?.invoke()?.let { return it }
+        } catch (t: Throwable) {
+            AppLog.error(TAG, "the Ambilight hook failed", t)
+        }
+        val v = Settings.values
+        if (Display.of(v.display) != Display.AMBILIGHT) return null
+        return AmbilightControl.configJson(v.ambilightDarkStyle, v.ambilightDarkMenu, v.ambilightDarkAlgorithm)
+    }
 
     @Volatile
     private var screenOffByUs = prefs.getBoolean(SCREEN_OFF_KEY, false)
@@ -114,7 +138,7 @@ class SyncedController(
     private val settingsListener: (Set<String>) -> Unit = { changed ->
         if (changed.any { it in WATCHED }) {
             if (changed.contains("tv_latency_ms") || changed.contains("tv_format") || changed.any { it.startsWith("kitchen_") }) renderer.settingsChanged()
-            if (changed.contains("ambilight_style") || changed.contains("ambilight_menu")) post { ambilight.restyle() }
+            if (changed.any { it.startsWith("ambilight_") } || changed.contains("display")) post { ambilight.restyle() }
             if (changed.contains("tv_audio_only") || changed.contains("display")) {
                 // a stream with or without video is another stream: it is made again now (the switch is the user's own, there is no waiting for a song)
                 post {
@@ -473,6 +497,7 @@ class SyncedController(
         val a = JSONObject()
         a.put("wanted_by_display", (Display.of(v.display) ?: Display.DEFAULT).lights)
         a.put("style", v.ambilightStyle)
+        a.put("config_now", ambilightConfig() ?: JSONObject.NULL)
         a.put("menu", v.ambilightMenu)
         a.put("on_for_lyrics", ambilight.entered)
         val saved = ambilight.remembered
@@ -518,7 +543,8 @@ class SyncedController(
         /** The settings that make the controller look again at once. */
         private val WATCHED = setOf(
             "mode", "display", "tv_format", "tv_latency_ms", "tv_extra_ms", "kitchen_offset_ms", "kitchen_target_ms", "kitchen_floor_ms",
-            "ambilight_style", "ambilight_menu", "tv_reanchor_min", "tv_audio_only", "tv_quiet", "tv_pause_ms",
+            "ambilight_style", "ambilight_menu", "ambilight_dark_style", "ambilight_dark_algorithm", "ambilight_dark_menu",
+            "tv_reanchor_min", "tv_audio_only", "tv_quiet", "tv_pause_ms",
         )
     }
 }

@@ -80,6 +80,10 @@ class SettingsValues(
     val tvMac: String,
     /** Whether the TV's position (GetPositionInfo) is read every 5 to 10 s and logged, to see whether its player pauses. */
     val tvPositionProbe: Boolean,
+    /** The Ambilight while the screen is off (display "ambilight"): the Lumina style is dark then, so this is its own: a style, and an expert algorithm (empty: the plain form with the menu setting, if any). */
+    val ambilightDarkStyle: String,
+    val ambilightDarkAlgorithm: String,
+    val ambilightDarkMenu: String,
 )
 
 class SettingsModel {
@@ -119,6 +123,9 @@ class SettingsModel {
     var tvAudioOnly = false
     var tvMac = DEFAULT_TV_MAC
     var tvPositionProbe = true
+    var ambilightDarkStyle = DEFAULT_AMBILIGHT_DARK_STYLE
+    var ambilightDarkAlgorithm = DEFAULT_AMBILIGHT_DARK_ALGORITHM
+    var ambilightDarkMenu = ""
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
@@ -126,6 +133,7 @@ class SettingsModel {
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
         captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPrerollMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
         backgroundCleanup, ambilightStyle, ambilightMenu, tvPauseMs, tvQuiet, tvAudioOnly, tvMac, tvPositionProbe,
+        ambilightDarkStyle, ambilightDarkAlgorithm, ambilightDarkMenu,
     )
 
     fun toJson(): JSONObject {
@@ -166,6 +174,9 @@ class SettingsModel {
         o.put(TV_AUDIO_ONLY, tvAudioOnly)
         o.put(TV_MAC, tvMac)
         o.put(TV_POSITION_PROBE, tvPositionProbe)
+        o.put(AMBILIGHT_DARK_STYLE, ambilightDarkStyle)
+        o.put(AMBILIGHT_DARK_ALGORITHM, ambilightDarkAlgorithm)
+        o.put(AMBILIGHT_DARK_MENU, ambilightDarkMenu)
         return o
     }
 
@@ -328,6 +339,19 @@ class SettingsModel {
             val v = if (raw.isEmpty()) "" else if (MAC.matches(raw)) raw.uppercase().replace('-', ':') else null
             if (v != null && v != tvMac) { tvMac = v; changed.add(TV_MAC) }
         }
+        if (json.has(AMBILIGHT_DARK_STYLE)) {
+            val v = json.get(AMBILIGHT_DARK_STYLE).toString().trim().uppercase()
+            if (STYLE_NAME.matches(v) && v != ambilightDarkStyle) { ambilightDarkStyle = v; changed.add(AMBILIGHT_DARK_STYLE) }
+        }
+        if (json.has(AMBILIGHT_DARK_ALGORITHM)) {
+            // empty: the plain form; else the name of an expert algorithm (PARTY, MANUAL_HUE, ...)
+            val v = json.get(AMBILIGHT_DARK_ALGORITHM).toString().trim().uppercase()
+            if ((v.isEmpty() || STYLE_NAME.matches(v)) && v != ambilightDarkAlgorithm) { ambilightDarkAlgorithm = v; changed.add(AMBILIGHT_DARK_ALGORITHM) }
+        }
+        if (json.has(AMBILIGHT_DARK_MENU)) {
+            val v = json.get(AMBILIGHT_DARK_MENU).toString().trim().uppercase()
+            if ((v.isEmpty() || STYLE_NAME.matches(v)) && v != ambilightDarkMenu) { ambilightDarkMenu = v; changed.add(AMBILIGHT_DARK_MENU) }
+        }
         if (json.has(TV_POSITION_PROBE)) {
             val v = bool(json.get(TV_POSITION_PROBE))
             if (v != null && v != tvPositionProbe) { tvPositionProbe = v; changed.add(TV_POSITION_PROBE) }
@@ -386,6 +410,13 @@ class SettingsModel {
         const val BACKGROUND_CLEANUP = "background_cleanup"
         const val AMBILIGHT_STYLE = "ambilight_style"
         const val AMBILIGHT_MENU = "ambilight_menu"
+        const val AMBILIGHT_DARK_STYLE = "ambilight_dark_style"
+        const val AMBILIGHT_DARK_ALGORITHM = "ambilight_dark_algorithm"
+        const val AMBILIGHT_DARK_MENU = "ambilight_dark_menu"
+
+        /** With the screen off the Ambilight does not follow a picture: PARTY, in its expert form, lights up (Lumina and FOLLOW_VIDEO give 1 to 6 of 255). */
+        const val DEFAULT_AMBILIGHT_DARK_STYLE = "FOLLOW_AUDIO"
+        const val DEFAULT_AMBILIGHT_DARK_ALGORITHM = "PARTY"
         const val TV_PAUSE_MS = "tv_pause_ms"
         const val TV_QUIET = "tv_quiet"
         const val TV_AUDIO_ONLY = "tv_audio_only"

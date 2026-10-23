@@ -26,6 +26,10 @@ class SettingsModelTest {
         assertEquals(false, o.getBoolean("capture_volume_mirror"))
         assertEquals("auto", o.getString("kitchen_format"))
         assertEquals(4096, o.getInt("kitchen_flac_block"))
+        assertEquals("synced", o.getString("mode"))
+        assertEquals(300, o.getInt("tv_dlna_latency_ms"))
+        assertEquals(0, o.getInt("tv_dlna_leadin_ms"))
+        assertEquals(16, o.getInt("tv_dlna_sndbuf_kb"))
     }
 
     @Test
@@ -37,6 +41,7 @@ class SettingsModelTest {
                 "tv_screen_off", "tv_wake", "tv_ip",
                 "capture_enabled", "capture_living_latency_ms", "capture_lead_ms", "kitchen_target_ms", "kitchen_floor_ms",
                 "kitchen_volume", "capture_volume_mirror", "kitchen_format", "kitchen_flac_block",
+                "mode", "tv_dlna_latency_ms", "tv_dlna_leadin_ms", "tv_dlna_sndbuf_kb",
             ),
             keys,
         )
@@ -95,6 +100,34 @@ class SettingsModelTest {
         m.applyJson(JSONObject("""{"kitchen_target_ms": 300}"""))
         assertTrue(m.applyJson(JSONObject("""{"kitchen_target_ms": "soon"}""")).isEmpty())
         assertEquals(300, m.kitchenTargetMs)
+    }
+
+    @Test
+    fun theModeIsSyncedOrLyricsAndNothingElse() {
+        val m = SettingsModel()
+        assertEquals("synced", m.mode)
+        assertEquals(setOf("mode"), m.applyJson(JSONObject("""{"mode": "lyrics"}""")))
+        assertEquals("lyrics", m.values().mode)
+        assertEquals(setOf("mode"), m.applyJson(JSONObject("""{"mode": " SYNCED "}""")))
+        assertEquals("synced", m.mode)
+        assertTrue(m.applyJson(JSONObject("""{"mode": "both"}""")).isEmpty())
+        assertTrue(m.applyJson(JSONObject("""{"mode": 3}""")).isEmpty())
+        assertTrue(m.applyJson(JSONObject("""{"mode": ""}""")).isEmpty())
+        assertEquals("synced", m.mode)
+    }
+
+    @Test
+    fun theTvTimingModelIsClamped() {
+        val m = SettingsModel()
+        assertEquals(setOf("tv_dlna_latency_ms", "tv_dlna_leadin_ms", "tv_dlna_sndbuf_kb"), m.applyJson(JSONObject("""{"tv_dlna_latency_ms": 280, "tv_dlna_leadin_ms": 150, "tv_dlna_sndbuf_kb": 0}""")))
+        assertEquals(280, m.values().tvDlnaLatencyMs)
+        assertEquals(150, m.values().tvDlnaLeadinMs)
+        assertEquals(0, m.values().tvDlnaSndbufKb)
+        m.applyJson(JSONObject("""{"tv_dlna_latency_ms": -50, "tv_dlna_leadin_ms": 99999, "tv_dlna_sndbuf_kb": 9999}"""))
+        assertEquals(0, m.tvDlnaLatencyMs)
+        assertEquals(SettingsModel.MAX_TV_DLNA_MS, m.tvDlnaLeadinMs)
+        assertEquals(SettingsModel.MAX_TV_DLNA_SNDBUF_KB, m.tvDlnaSndbufKb)
+        assertTrue(m.applyJson(JSONObject("""{"tv_dlna_latency_ms": "slow"}""")).isEmpty())
     }
 
     @Test

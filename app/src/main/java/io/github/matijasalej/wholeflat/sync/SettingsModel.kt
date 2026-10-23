@@ -31,6 +31,14 @@ class SettingsValues(
     val kitchenFormat: String,
     /** The block size of the FLAC stream: 4096, 1152 or 576 frames. */
     val kitchenFlacBlock: Int,
+    /** "synced" (the living room through the TV's DLNA player, both rooms held to one delay) or "lyrics" (HDMI direct, the kitchen at its lowest clean lag). */
+    val mode: String,
+    /** How long the TV needs from our write of a frame to its sound (ms): the timing model of the DLNA stream, calibrated on the device. */
+    val tvDlnaLatencyMs: Int,
+    /** Digital silence sent to the TV at once when its stream begins (ms); it adds to the TV's delay. */
+    val tvDlnaLeadinMs: Int,
+    /** The send buffer of the TV's socket in KB, small so that a TV that reads slower than real time shows (0: the system's). */
+    val tvDlnaSndbufKb: Int,
 )
 
 class SettingsModel {
@@ -50,12 +58,16 @@ class SettingsModel {
     var captureVolumeMirror = false
     var kitchenFormat = StreamFormat.AUTO
     var kitchenFlacBlock = Flac.BLOCK
+    var mode = Mode.SYNCED.key
+    var tvDlnaLatencyMs = DEFAULT_TV_DLNA_LATENCY_MS
+    var tvDlnaLeadinMs = 0
+    var tvDlnaSndbufKb = DEFAULT_TV_DLNA_SNDBUF_KB
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
-        captureVolumeMirror, kitchenFormat, kitchenFlacBlock,
+        captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvDlnaLatencyMs, tvDlnaLeadinMs, tvDlnaSndbufKb,
     )
 
     fun toJson(): JSONObject {
@@ -76,6 +88,10 @@ class SettingsModel {
         o.put(CAPTURE_VOLUME_MIRROR, captureVolumeMirror)
         o.put(KITCHEN_FORMAT, kitchenFormat)
         o.put(KITCHEN_FLAC_BLOCK, kitchenFlacBlock)
+        o.put(MODE, mode)
+        o.put(TV_DLNA_LATENCY_MS, tvDlnaLatencyMs)
+        o.put(TV_DLNA_LEADIN_MS, tvDlnaLeadinMs)
+        o.put(TV_DLNA_SNDBUF_KB, tvDlnaSndbufKb)
         return o
     }
 
@@ -153,6 +169,23 @@ class SettingsModel {
             val v = number(json.get(KITCHEN_FLAC_BLOCK))
             if (v != null && v in StreamFormat.FLAC_BLOCKS && v != kitchenFlacBlock) { kitchenFlacBlock = v; changed.add(KITCHEN_FLAC_BLOCK) }
         }
+        if (json.has(MODE)) {
+            // anything but "synced" or "lyrics" is ignored
+            val v = Mode.of(json.get(MODE).toString())?.key
+            if (v != null && v != mode) { mode = v; changed.add(MODE) }
+        }
+        if (json.has(TV_DLNA_LATENCY_MS)) {
+            val v = number(json.get(TV_DLNA_LATENCY_MS))?.coerceIn(0, MAX_TV_DLNA_MS)
+            if (v != null && v != tvDlnaLatencyMs) { tvDlnaLatencyMs = v; changed.add(TV_DLNA_LATENCY_MS) }
+        }
+        if (json.has(TV_DLNA_LEADIN_MS)) {
+            val v = number(json.get(TV_DLNA_LEADIN_MS))?.coerceIn(0, MAX_TV_DLNA_MS)
+            if (v != null && v != tvDlnaLeadinMs) { tvDlnaLeadinMs = v; changed.add(TV_DLNA_LEADIN_MS) }
+        }
+        if (json.has(TV_DLNA_SNDBUF_KB)) {
+            val v = number(json.get(TV_DLNA_SNDBUF_KB))?.coerceIn(0, MAX_TV_DLNA_SNDBUF_KB)
+            if (v != null && v != tvDlnaSndbufKb) { tvDlnaSndbufKb = v; changed.add(TV_DLNA_SNDBUF_KB) }
+        }
         return changed
     }
 
@@ -192,6 +225,10 @@ class SettingsModel {
         const val CAPTURE_VOLUME_MIRROR = "capture_volume_mirror"
         const val KITCHEN_FORMAT = "kitchen_format"
         const val KITCHEN_FLAC_BLOCK = "kitchen_flac_block"
+        const val MODE = "mode"
+        const val TV_DLNA_LATENCY_MS = "tv_dlna_latency_ms"
+        const val TV_DLNA_LEADIN_MS = "tv_dlna_leadin_ms"
+        const val TV_DLNA_SNDBUF_KB = "tv_dlna_sndbuf_kb"
 
         /** The offset is limited to what a Mac calibration could plausibly ask for. */
         const val MAX_OFFSET_MS = 2_000
@@ -216,6 +253,12 @@ class SettingsModel {
         const val DEFAULT_KITCHEN_TARGET_MS = 322
         const val DEFAULT_KITCHEN_FLOOR_MS = 316
         const val MIN_KITCHEN_FLOOR_MS = 100
+
+        /** The Philips renders what we write about 0.3 s later (the manual test said 0.1 to 0.4 s, rough); calibrated on the device. */
+        const val DEFAULT_TV_DLNA_LATENCY_MS = 300
+        const val MAX_TV_DLNA_MS = 2_000
+        const val DEFAULT_TV_DLNA_SNDBUF_KB = 16
+        const val MAX_TV_DLNA_SNDBUF_KB = 256
 
         /** `kitchen_volume` when the app leaves the volume of the Sonos alone. */
         const val NO_VOLUME = -1

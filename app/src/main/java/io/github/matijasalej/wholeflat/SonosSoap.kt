@@ -10,10 +10,21 @@ class SonosDevice(val ip: String, val udn: String, val room: String, val model: 
 }
 
 /**
- * UPnP actions against one Sonos (AVTransport and RenderingControl on port 1400), as plain blocking
- * SOAP calls with short timeouts. A speaker that has gone away costs one connect timeout, not more.
+ * UPnP AV actions against one renderer (AVTransport, RenderingControl and ConnectionManager), as plain blocking SOAP calls with
+ * short timeouts. A renderer that has gone away costs one connect timeout, not more. The defaults are a Sonos (port 1400, its
+ * control paths); the TV's DLNA renderer is the same client with the port and the control paths of its description
+ * (see [io.github.matijasalej.wholeflat.sync.DmrDescription]).
  */
-class SonosSoap(val ip: String) {
+class SonosSoap(
+    val ip: String,
+    val port: Int = PORT,
+    private val avControl: String = SonosXml.AVTRANSPORT_CONTROL,
+    private val renderingControl: String = SonosXml.RENDERING_CONTROL,
+    private val connectionControl: String = SonosXml.CONNECTIONMANAGER_CONTROL,
+    private val avService: String = SonosXml.AVTRANSPORT,
+    private val renderingService: String = SonosXml.RENDERING,
+    private val connectionService: String = SonosXml.CONNECTIONMANAGER,
+) {
 
     class Result(val status: Int, val body: String, val error: String?) {
         val ok: Boolean get() = error == null && status in 200..299
@@ -28,7 +39,7 @@ class SonosSoap(val ip: String) {
 
     fun call(service: String, control: String, action: String, args: List<Pair<String, String>>, readTimeoutMs: Int = READ_TIMEOUT_MS): Result {
         val envelope = SonosXml.envelope(service, action, args).toByteArray(Charsets.UTF_8)
-        val conn = URL("http://$ip:$PORT$control").openConnection() as HttpURLConnection
+        val conn = URL("http://$ip:$port$control").openConnection() as HttpURLConnection
         return try {
             conn.requestMethod = "POST"
             conn.connectTimeout = CONNECT_TIMEOUT_MS
@@ -50,10 +61,10 @@ class SonosSoap(val ip: String) {
     }
 
     private fun av(action: String, vararg args: Pair<String, String>): Result =
-        call(SonosXml.AVTRANSPORT, SonosXml.AVTRANSPORT_CONTROL, action, listOf("InstanceID" to "0") + args.toList())
+        call(avService, avControl, action, listOf("InstanceID" to "0") + args.toList())
 
     private fun rc(action: String, vararg args: Pair<String, String>): Result =
-        call(SonosXml.RENDERING, SonosXml.RENDERING_CONTROL, action, listOf("InstanceID" to "0", "Channel" to "Master") + args.toList())
+        call(renderingService, renderingControl, action, listOf("InstanceID" to "0", "Channel" to "Master") + args.toList())
 
     fun setUri(uri: String, didl: String): Result =
         av("SetAVTransportURI", "CurrentURI" to uri, "CurrentURIMetaData" to didl)
@@ -63,6 +74,9 @@ class SonosSoap(val ip: String) {
     fun stop(): Result = av("Stop")
 
     fun transportInfo(): Result = av("GetTransportInfo")
+
+    /** What the renderer can play (the sink protocols), for the log of a renderer that is new to us. */
+    fun protocolInfo(): Result = call(connectionService, connectionControl, "GetProtocolInfo", emptyList())
 
     fun positionInfo(): Result = av("GetPositionInfo")
 

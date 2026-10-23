@@ -8,8 +8,10 @@ package io.github.matijasalej.wholeflat.sync
 object SonosXml {
     const val AVTRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1"
     const val RENDERING = "urn:schemas-upnp-org:service:RenderingControl:1"
+    const val CONNECTIONMANAGER = "urn:schemas-upnp-org:service:ConnectionManager:1"
     const val AVTRANSPORT_CONTROL = "/MediaRenderer/AVTransport/Control"
     const val RENDERING_CONTROL = "/MediaRenderer/RenderingControl/Control"
+    const val CONNECTIONMANAGER_CONTROL = "/MediaRenderer/ConnectionManager/Control"
 
     private const val DIDL_NS =
         "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" " +

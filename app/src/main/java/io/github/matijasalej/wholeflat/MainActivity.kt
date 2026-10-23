@@ -33,6 +33,7 @@ class MainActivity : Activity() {
 
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var statusView: TextView
+    private lateinit var bannerView: TextView
     private lateinit var kitchenToggle: Button
     private lateinit var fixedVolumeToggle: Button
     private lateinit var screenOffToggle: Button
@@ -49,6 +50,9 @@ class MainActivity : Activity() {
     private val refresh = object : Runnable {
         override fun run() {
             statusView.text = AppState.toText()
+            val banner = AppState.banner()
+            bannerView.text = banner ?: ""
+            bannerView.visibility = if (banner == null) View.GONE else View.VISIBLE
             syncControls()
             handler.postDelayed(this, 1000)
         }
@@ -161,14 +165,32 @@ class MainActivity : Activity() {
         }
         val scroll = ScrollView(this).apply {
             isFocusable = false
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+            addView(statusView)
+        }
+        // a warning on top of the status: Spotify refusing playback, low storage
+        bannerView = TextView(this).apply {
+            textSize = 17f
+            setTextColor(Color.rgb(0xFF, 0xD1, 0x66))
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = rounded(Color.rgb(0x4A, 0x2B, 0x12))
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(10) }
+        }
+        val right = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply {
                 leftMargin = dp(28)
             }
-            addView(statusView)
+            addView(bannerView)
+            addView(scroll)
         }
 
         root.addView(leftScroll)
-        root.addView(scroll)
+        root.addView(right)
         setContentView(root)
         kitchenToggle.requestFocus()
         syncControls(force = true)

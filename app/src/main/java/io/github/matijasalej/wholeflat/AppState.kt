@@ -147,6 +147,20 @@ object AppState {
     /** The explanation for the screen when Spotify refuses playback, null when all is well. */
     fun keyMessage(): String? = KeyMessage.text(spotifyState, keyPhase, retryInSeconds(), keyCount)
 
+    /** What the screen should say in its warning banner (Spotify refusing playback, low storage), null if nothing. */
+    fun banner(): String? {
+        val lines = ArrayList<String>()
+        keyMessage()?.let { lines.add(it) }
+        val storage = Storage.info()
+        if (storage.low) {
+            lines.add(
+                "Storage is low: ${storage.freeMb} MB free on /data. Clear the cache of other apps " +
+                    "(Spotify's fills this box), or updates of this app will not install",
+            )
+        }
+        return if (lines.isEmpty()) null else lines.joinToString("\n")
+    }
+
     private fun ageSeconds(at: Long): Long =
         if (at == 0L) -1 else (SystemClock.elapsedRealtime() - at) / 1000
 
@@ -193,7 +207,6 @@ object AppState {
 
     fun toText(): String {
         val sb = StringBuilder()
-        keyMessage()?.let { sb.append(">>> ").append(it).append("\n\n") }
         sb.append("Service   : ").append(service).append("  (").append(deviceName).append(")\n")
         sb.append("Spotify   : ").append(session)
         sessionUser?.let { sb.append("  as ").append(it) }

@@ -10,6 +10,7 @@ import io.github.matijasalej.wholeflat.capture.CaptureTracker
 import io.github.matijasalej.wholeflat.capture.SourceArbiter
 import io.github.matijasalej.wholeflat.sync.SonosPolicy
 import io.github.matijasalej.wholeflat.sync.SonosXml
+import io.github.matijasalej.wholeflat.sync.StartBackoff
 import io.github.matijasalej.wholeflat.sync.StartPlanner
 import io.github.matijasalej.wholeflat.sync.StreamBuilder
 import io.github.matijasalej.wholeflat.sync.StreamView
@@ -199,6 +200,21 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     @Volatile
     private var lastTransport = ""
 
+    /** `CurrentTransportStatus` of the last poll ("OK", or an error the speaker names). */
+    @Volatile
+    private var lastTransportStatus = ""
+
+    /** The last `playbackState` and error fields of an answer of the websocket. */
+    @Volatile
+    private var lastWsError = ""
+
+    /** How soon a start may be tried again after failed ones (see [StartBackoff]). */
+    private val backoff = StartBackoff()
+    private var lastBackoffLogNanos = 0L
+
+    @Volatile
+    private var startFailuresTotal = 0
+
     @Volatile
     private var lastReadingNanos = 0L
 
@@ -318,7 +334,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         if (old != null) endSession(old, "new start event", true)
         val dev = device
         val v = Settings.values
-        if (!v.kitchenEnabled || dev == null || !reachable || busyElsewhere) {
+        if (!v.kitchenEnabled || dev == null || !reachable || busyElsewhere || !startAllowed("start $epoch")) {
             advices[epoch] = StartAdvice.Alone
             return
         }
@@ -430,6 +446,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         lastError = "$what: ${r.describe()}"
         lastFailureNanos = System.nanoTime()
         AppLog.error(TAG, "preparing the speaker failed at $what: ${r.describe()}")
+        startFailed(s, "$what: ${r.describe()}")
         endSession(s, "$what failed", false)
     }
 
@@ -471,6 +488,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         lastError = "Play: $why"
         lastFailureNanos = System.nanoTime()
         AppLog.error(TAG, "Play failed: $why")
+        startFailed(s, "Play: $why")
         endSession(s, "Play failed", true)
     }
 
@@ -499,6 +517,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val v = Settings.values
         if (!v.kitchenEnabled || session != null || !reachable || busyElsewhere) return false
         if (!living.dataFlowing) return false
+        if (!startAllowed("joining the kitchen")) return false
         val meta = RingMeta()
         if (NativeBridge.ringState(meta.a) != 0 || !meta.playing || meta.startPending) return false
         val host = Net.localAddressFor(dev.ip) ?: return false
@@ -569,6 +588,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         lastReadingNanos = System.nanoTime()
         lastPositionMs = p.positionMs
         lastWsState = p.state
+        lastWsError = p.error
         if (p.state != "PLAYBACK_STATE_PLAYING" || p.positionMs < 0) {
             notPlayingReadings++
             val sincePlay = System.nanoTime() - s.playSentNanos
@@ -579,7 +599,15 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             return
         }
         notPlayingReadings = 0
-        val stream = s.stream ?: return // the Sonos has not asked for the stream yet
+        val stream = s.stream
+        if (stream == null) {
+            // It plays, but no connection came after Play: it plays from a probe, or from nothing. Give it a moment.
+            if (System.nanoTime() - s.playSentNanos > NO_STREAM_GRACE_NANOS) {
+                AppLog.add(TAG, "the speaker plays but has not asked for the stream after Play (${s.connectionCount} GET so far)")
+                rejoin("the speaker plays but never asked for the stream after Play")
+            }
+            return
+        }
         if (rttNanos > MAX_RTT_NANOS) {
             // the mid-point of a slow round trip is not worth much
             readingsDiscarded++
@@ -590,6 +618,11 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val heard = (p.positionMs - controller.deltaMs) / 1000.0 * s.rate
         clock.refine(tMid, heard)
         s.playingReadings++
+        if (!s.healthy && s.playingReadings >= HEALTHY_READINGS && System.nanoTime() - s.playSentNanos >= HEALTHY_AFTER_NANOS) {
+            // it went on well for a while: the failed starts before it are forgotten
+            s.healthy = true
+            backoff.onHealthy()
+        }
         if (s.isCapture) {
             handleCaptureReading(s, stream, clock.startNanos, tMid, p.positionMs)
             return
@@ -635,8 +668,11 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         AppLog.add(TAG, "Play to sound: ${observed / 1_000_000L} ms (was ${before / 1_000_000L}, now ${lkNanos / 1_000_000L})")
     }
 
-    /** Only the kitchen's own stream is restarted; the living room never notices. */
-    private fun rejoin(reason: String) {
+    /**
+     * Only the kitchen's own stream is restarted; the living room never notices. Unless [manual] (asked for on the
+     * debug page, a changed setting) it counts as a failed start of the session it ends, if that never went well.
+     */
+    private fun rejoin(reason: String, manual: Boolean = false) {
         val now = System.nanoTime()
         if (now - lastRejoinNanos < REJOIN_COOLDOWN_NANOS) {
             rejoinsSuppressed++
@@ -646,6 +682,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         rejoins++
         lastRejoinReason = reason
         AppLog.add(TAG, "re-join #$rejoins: $reason")
+        if (!manual) session?.let { startFailed(it, reason) }
         val wasCapture = session?.isCapture == true
         session?.let { endSession(it, "re-join: $reason", true) }
         controller.allowRejoin = false
@@ -745,6 +782,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val v = Settings.values
         if (!v.kitchenEnabled || !reachable || busyElsewhere) return false
         if (arbiter.source == SourceArbiter.Source.LIBRESPOT) return false
+        if (session == null && !startAllowed("capture start")) return false
         var s = session
         if (s != null) {
             if (!s.isCapture) return false
@@ -859,6 +897,64 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         }
     }
 
+    // ---- failed starts -------------------------------------------------------------------------
+
+    private fun nowMs(): Long = System.nanoTime() / 1_000_000L
+
+    /** Whether a start may begin now; if not (failed starts are being waited out) it says so, but not more than every 5 s. */
+    private fun startAllowed(what: String): Boolean {
+        val now = nowMs()
+        if (backoff.allowed(now)) return true
+        val nanos = System.nanoTime()
+        if (nanos - lastBackoffLogNanos > 5_000_000_000L) {
+            lastBackoffLogNanos = nanos
+            AppLog.add(TAG, "$what held back: ${backoff.failures} starts failed in a row, the next may begin in ${backoff.remainingMs(now) / 1000} s")
+        }
+        return false
+    }
+
+    /**
+     * Why the Sonos did not take the stream, as far as it says: its transport state and status (asked afresh), and what its
+     * websocket last announced (state, `playbackError`, error fields of the last answer).
+     */
+    private fun sonosReason(): String {
+        val sb = StringBuilder("Sonos says: ")
+        val dev = device
+        if (dev != null && reachable) {
+            val t = soapFor(dev).transportInfo()
+            if (t.ok) {
+                sb.append("transport ").append(SonosXml.tag(t.body, "CurrentTransportState") ?: "?")
+                    .append(", status ").append(SonosXml.tag(t.body, "CurrentTransportStatus") ?: "?")
+            } else {
+                sb.append("transport not readable (").append(t.describe()).append("), last ").append(lastTransport).append(" / ").append(lastTransportStatus)
+            }
+        } else {
+            sb.append("transport not asked (last ").append(lastTransport).append(" / ").append(lastTransportStatus).append(")")
+        }
+        sb.append("; ").append(ws.describe())
+        if (lastWsState.isNotEmpty()) sb.append("; last reading ").append(lastWsState)
+        if (lastWsError.isNotEmpty()) sb.append(" ").append(lastWsError)
+        return sb.toString()
+    }
+
+    /**
+     * A start did not work out (once per session, and not for one that went well before): the failures in a row are
+     * counted, the next start waits as long as [StartBackoff] says, and the speaker's own words are logged.
+     */
+    private fun startFailed(s: KitchenSession, why: String) {
+        if (s.healthy || s.failureCounted) return
+        s.failureCounted = true
+        val wait = backoff.onFailure(nowMs())
+        startFailuresTotal++
+        val sonos = sonosReason()
+        s.record?.failed(why, sonos)
+        AppLog.add(
+            TAG,
+            "start failed (${backoff.failures} in a row): $why. $sonos. " +
+                if (wait > 0) "The next start waits ${wait / 1000} s." else "Trying again soon.",
+        )
+    }
+
     // ---- sessions ------------------------------------------------------------------------------
 
     override fun sessionFor(token: String): KitchenSession? = sessions[token]
@@ -953,7 +1049,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         }
     }
 
-    private class PollResult(val ok: Boolean, val transport: String, val uri: String, val error: String?)
+    private class PollResult(val ok: Boolean, val transport: String, val status: String, val uri: String, val error: String?)
 
     private fun triggerPoll(dev: SonosDevice) {
         if (!polling.compareAndSet(false, true)) return
@@ -962,18 +1058,19 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
                 val api = SonosSoap(dev.ip)
                 val t = api.transportInfo()
                 if (!t.ok) {
-                    PollResult(false, "", "", t.describe())
+                    PollResult(false, "", "", "", t.describe())
                 } else {
                     val p = api.positionInfo()
                     PollResult(
                         true,
                         SonosXml.tag(t.body, "CurrentTransportState") ?: "",
+                        SonosXml.tag(t.body, "CurrentTransportStatus") ?: "",
                         if (p.ok) SonosXml.tag(p.body, "TrackURI") ?: "" else "",
                         null,
                     )
                 }
             } catch (t: Throwable) {
-                PollResult(false, "", "", t.toString())
+                PollResult(false, "", "", "", t.toString())
             } finally {
                 polling.set(false)
             }
@@ -1027,6 +1124,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         }
         pollFailures = 0
         lastTransport = r.transport
+        lastTransportStatus = r.status
         if (!reachable) {
             reachable = true
             AppLog.add(TAG, "the speaker answers (${r.transport})")
@@ -1204,7 +1302,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     fun rejoinNow() {
         post("manual re-join") {
             lastRejoinNanos = 0L
-            rejoin("asked for on the debug page")
+            rejoin("asked for on the debug page", manual = true)
         }
     }
 
@@ -1281,6 +1379,12 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         o.put("prepare_failures", prepFailures)
         o.put("play_failures", playFailures)
         o.put("source", arbiter.source.label)
+        o.put("failed_starts", backoff.failures)
+        o.put("start_failures_total", startFailuresTotal)
+        o.put("backoff_s", backoff.remainingMs(nowMs()) / 1000)
+        o.put("transport_status", lastTransportStatus)
+        o.put("ws_error", lastWsError.ifEmpty { JSONObject.NULL })
+        o.put("ws_description", ws.describe())
         val cs = session?.takeIf { it.isCapture }
         val offset = Settings.values.kitchenOffsetMs
         val lag = if (cs != null) lagCapture.recentMs() else Double.NaN
@@ -1364,6 +1468,12 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         private const val JOIN_MARGIN_FRAMES = 2_205L
 
         private const val MAX_RTT_NANOS = 60_000_000L
+        /** A session that plays this long, in this many readings, went well: the failed starts before it are forgotten. */
+        private const val HEALTHY_AFTER_NANOS = 15_000_000_000L
+        private const val HEALTHY_READINGS = 25
+
+        /** The speaker plays but no connection came after Play for this long: it does not play our stream. */
+        private const val NO_STREAM_GRACE_NANOS = 5_000_000_000L
         private const val NOT_PLAYING_LIMIT = 30
         private const val NOT_PLAYING_GRACE_NANOS = 6_000_000_000L
         private const val SESSION_GRACE_NANOS = 6_000_000_000L

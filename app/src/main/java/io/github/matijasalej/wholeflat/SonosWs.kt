@@ -1,5 +1,6 @@
 package io.github.matijasalej.wholeflat
 
+import io.github.matijasalej.wholeflat.sync.SonosWsEvents
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -29,7 +30,7 @@ import kotlin.concurrent.thread
  */
 class SonosWs {
 
-    class Position(val sentNanos: Long, val receivedNanos: Long, val positionMs: Long, val state: String)
+    class Position(val sentNanos: Long, val receivedNanos: Long, val positionMs: Long, val state: String, val error: String = "")
 
     private class Pending(
         val sentNanos: Long,
@@ -52,6 +53,24 @@ class SonosWs {
 
     @Volatile
     var groupId = ""
+        private set
+
+    /** The last `playbackStatus` state the speaker announced, and when (the events come once we have subscribed). */
+    @Volatile
+    var lastEventState = ""
+        private set
+
+    @Volatile
+    var lastEventNanos = 0L
+        private set
+
+    /** The last `playbackError` the speaker announced, and when. */
+    @Volatile
+    var lastPlaybackError = ""
+        private set
+
+    @Volatile
+    var lastPlaybackErrorNanos = 0L
         private set
 
     @Volatile
@@ -135,6 +154,7 @@ class SonosWs {
                         received,
                         body.optLong("positionMillis", -1L),
                         body.optString("playbackState", ""),
+                        SonosWsEvents.errorText(body),
                     ),
                 )
             },
@@ -168,6 +188,7 @@ class SonosWs {
                 if (id.isNotEmpty() && id != groupId) {
                     AppLog.add(TAG, "group id is now $id")
                     groupId = id
+                    subscribe()
                 }
                 return
             }
@@ -224,7 +245,10 @@ class SonosWs {
             val header = array.getJSONObject(0)
             val body = if (array.length() > 1) array.optJSONObject(1) ?: JSONObject() else JSONObject()
             val id = header.optString("cmdId", "")
-            if (id.isEmpty()) return // an event, not an answer
+            if (id.isEmpty()) {
+                onEvent(header, body) // an event, not an answer
+                return
+            }
             val p = pending.remove(id) ?: return
             if (!header.optBoolean("success", true) || body.has("errorCode")) {
                 p.onFail(body.optString("errorCode", "error") + " " + body.optString("reason", ""))
@@ -234,6 +258,54 @@ class SonosWs {
         } catch (e: Exception) {
             // not a message we understand
         }
+    }
+
+    /** Asks the speaker for the playback events of the group (best effort: the answers are what the kitchen relies on). */
+    private fun subscribe() {
+        if (groupId.isEmpty()) return
+        val ok = send(
+            "playback",
+            "subscribe",
+            JSONObject(),
+            mapOf("groupId" to groupId),
+            { _, _, _, _ -> AppLog.add(TAG, "subscribed to the playback events of group $groupId") },
+            { reason -> AppLog.add(TAG, "no playback events ($reason), only the answers are used") },
+        )
+        if (!ok) AppLog.add(TAG, "cannot subscribe to the playback events: the socket is not open")
+    }
+
+    private fun onEvent(header: JSONObject, body: JSONObject) {
+        val event = SonosWsEvents.parse(header, body) ?: return
+        val now = System.nanoTime()
+        when (event.type) {
+            "playbackError" -> {
+                lastPlaybackError = event.error
+                lastPlaybackErrorNanos = now
+                AppLog.add(TAG, "the speaker reports a playback error: ${event.error}")
+            }
+            "playbackStatus" -> {
+                if (event.state != lastEventState) AppLog.add(TAG, "playback state ${event.state}" + if (event.error.isNotEmpty()) " (${event.error})" else "")
+                lastEventState = event.state
+                lastEventNanos = now
+                if (event.error.isNotEmpty()) {
+                    lastPlaybackError = event.error
+                    lastPlaybackErrorNanos = now
+                }
+            }
+        }
+    }
+
+    /** One line for the log when a start failed: the socket's state and what the speaker last announced. */
+    fun describe(): String {
+        val now = System.nanoTime()
+        val sb = StringBuilder("websocket ").append(status)
+        if (lastEventState.isNotEmpty()) {
+            sb.append(", last state ").append(lastEventState).append(" (").append((now - lastEventNanos) / 1_000_000_000L).append(" s ago)")
+        }
+        if (lastPlaybackError.isNotEmpty()) {
+            sb.append(", error ").append(lastPlaybackError).append(" (").append((now - lastPlaybackErrorNanos) / 1_000_000_000L).append(" s ago)")
+        }
+        return sb.toString()
     }
 
     private inner class Listener(private val gen: Int) : WebSocketListener() {
@@ -262,6 +334,7 @@ class SonosWs {
             isOpen = true
             status = "open"
             AppLog.add(TAG, "websocket open, group $groupId")
+            subscribe()
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {

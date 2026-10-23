@@ -158,6 +158,8 @@ class MainActivity : Activity() {
 
         testButton = button("Test: clicks in both rooms (20 s)") { toggleTest() }
         left.addView(testButton)
+        // for a box without the adb grants: the permission dialog of the screen capture then shows on the TV
+        left.addView(button("Capture: ask for permission now") { AppState.capture?.startNow() })
         left.addView(button("Stop service") { stopService(Intent(this, PlaybackService::class.java)) })
 
         val leftScroll = ScrollView(this).apply {
@@ -206,12 +208,24 @@ class MainActivity : Activity() {
         syncControls(force = true)
         startReceiver()
 
+        // The notifications, and the recording permission that the capture of the Cast receiver's audio
+        // needs (the same can be granted over adb, see the README).
+        val missing = ArrayList<String>()
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+            missing.add(Manifest.permission.POST_NOTIFICATIONS)
         }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            missing.add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), 1)
         DebugServer.ensureStarted(this)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        AppState.capture?.wake() // the capture looks at its grants again
     }
 
     override fun onResume() {

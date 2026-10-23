@@ -235,8 +235,8 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
                     waitFor(2_000)
                     continue
                 }
-                val blocked = blocker()
-                if (blocked != null && !forceAttempt) {
+                val blocked = blocker(forceAttempt)
+                if (blocked != null) {
                     setState("needs_grants", blocked)
                     // adb grants take effect without a restart: look again now and then
                     waitFor(GRANT_RECHECK_MS)
@@ -261,8 +261,11 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
         AppLog.add(TAG, "capture supervisor ended")
     }
 
-    /** What stops the capture from starting by itself; null if nothing does. */
-    private fun blocker(): String? {
+    /**
+     * What stops the capture from starting by itself; null if nothing does. With [forced] (the button on the
+     * screen, /capture/start) the consent dialog on the TV is accepted, so the app op is not asked for.
+     */
+    private fun blocker(forced: Boolean): String? {
         if (Build.VERSION.SDK_INT < 29) return "the capture needs Android 10 or newer"
         if (app.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             return "RECORD_AUDIO is not granted. Run: adb shell pm grant ${app.packageName} android.permission.RECORD_AUDIO"
@@ -270,7 +273,7 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
         uids = resolveUids()
         if (uids.isEmpty()) return "neither the Cast receiver nor the Spotify TV app is installed on this box"
         val projectMedia = appOp("android:project_media")
-        if (projectMedia != "allow" && projectMedia != "unknown") {
+        if (!forced && projectMedia != "allow" && projectMedia != "unknown") {
             return "the screen capture would ask on the TV. Run: adb shell appops set ${app.packageName} PROJECT_MEDIA allow"
         }
         return null

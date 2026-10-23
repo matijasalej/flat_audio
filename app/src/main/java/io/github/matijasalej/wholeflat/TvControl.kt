@@ -361,6 +361,14 @@ class TvControl(private val context: Context) {
     var lastContext: String = ""
         private set
 
+    /** Presses a key on the TV through JointSpace (`input/key`, "Back" and the like); false if the TV refused or did not answer. */
+    fun key(name: String): Boolean {
+        val ip = currentIp() ?: return false
+        val ok = postJson(ip, "input/key", "{\"key\":\"$name\"}")
+        note("key $name: ${if (ok) "accepted" else "refused"}")
+        return ok
+    }
+
     /** The package that is in front on this box now (from the usage events), null if unknown or the usage access is not granted. */
     fun foregroundPackage(): String? {
         if (!hasUsageAccess()) return null

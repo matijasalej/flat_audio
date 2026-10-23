@@ -17,9 +17,20 @@ class SyncedTimingTest {
     @Test
     fun theUsualLatencyDependsOnTheStreamFormatAndTheSettingWinsWhenGiven() {
         assertEquals(300, SyncedTiming.tvLatencyMs(-1, "l16"))
-        assertEquals(1_200, SyncedTiming.tvLatencyMs(-1, "ts"))
+        assertEquals(950, SyncedTiming.tvLatencyMs(-1, "ts"))
         assertEquals(1_450, SyncedTiming.tvLatencyMs(1_450, "ts"))
         assertEquals(0, SyncedTiming.tvLatencyMs(0, "l16"))
+    }
+
+    @Test
+    fun theVideoStreamMakesRoomForItsEncodersAndTheAudioOnlyStreamDoesNot() {
+        assertEquals(100.0, SyncedTiming.encodeMs("ts"), 0.0)
+        assertEquals(0.0, SyncedTiming.encodeMs("l16"), 0.0)
+        // with the defaults of the video stream: X 950 ms, pipeline 80 ms and encoders 100 ms, margin 30 ms, Sonos target 322 ms
+        val d = SyncedTiming.delayMs(950.0, 80.0 + SyncedTiming.encodeMs("ts"), 322.0)
+        assertEquals(1_160.0, d, 0.0)
+        // the stream is held 210 ms: the 80 of the pipeline, the 100 of the encoders and the 30 of the margin
+        assertEquals(210.0, SyncedTiming.tvHoldMs(d, 950.0), 0.0)
     }
 
     @Test

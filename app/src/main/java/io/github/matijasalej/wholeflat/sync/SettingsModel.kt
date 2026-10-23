@@ -40,6 +40,17 @@ class SettingsValues(
     val tvLatencyMs: Int,
     /** The stream the TV is given in Synced mode: "ts" (a live lyrics video with the audio) or "l16" (audio only, the last resort). */
     val tvFormat: String,
+    /**
+     * How old the key picture is at least that a connection of the TV starts at (ms): the stream was started so in the device test that the
+     * TV took well (a second behind live, paced to live); 0: at the next key picture made after the connection.
+     */
+    val tvBurstMs: Int,
+    /** How far the PCR of the video stream runs behind the timestamps of what it carries (ms): the lead a player wants; ffmpeg writes 700. */
+    val tvPcrLeadMs: Int,
+    /** A re-anchor of the TV's stream (a restart with a warm-up) is asked for when the stream is this old (minutes) and a song ends; 0: never. */
+    val tvReanchorMin: Int,
+    /** How the lyrics picture is put on the video encoder: "auto" (hardware canvas, else software canvas, else OpenGL), "hw", "sw" or "gl". */
+    val tvRender: String,
     /** Lyrics on the TV in Synced mode (the screen on, the Ambilight on); off, the TV's screen is off and only the sound plays. */
     val karaoke: Boolean,
     /** The Ambilight of the TV follows the audio in Synced mode and is put back afterwards. */
@@ -69,6 +80,10 @@ class SettingsModel {
     var mode = DEFAULT_MODE
     var tvLatencyMs = AUTO_TV_LATENCY
     var tvFormat = TV_FORMAT_TS
+    var tvBurstMs = DEFAULT_TV_BURST_MS
+    var tvPcrLeadMs = DEFAULT_TV_PCR_LEAD_MS
+    var tvReanchorMin = 0
+    var tvRender = TV_RENDER_AUTO
     var karaoke = false
     var ambilightSynced = true
     var ambilightStyle = DEFAULT_AMBILIGHT_STYLE
@@ -78,7 +93,7 @@ class SettingsModel {
     fun values(): SettingsValues = SettingsValues(
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
-        captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, karaoke,
+        captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvPcrLeadMs, tvReanchorMin, tvRender, karaoke,
         ambilightSynced, ambilightStyle, ambilightMenu,
     )
 
@@ -103,6 +118,10 @@ class SettingsModel {
         o.put(MODE, mode)
         o.put(TV_LATENCY_MS, tvLatencyMs)
         o.put(TV_FORMAT, tvFormat)
+        o.put(TV_BURST_MS, tvBurstMs)
+        o.put(TV_PCR_LEAD_MS, tvPcrLeadMs)
+        o.put(TV_REANCHOR_MIN, tvReanchorMin)
+        o.put(TV_RENDER, tvRender)
         o.put(KARAOKE, karaoke)
         o.put(AMBILIGHT_SYNCED, ambilightSynced)
         o.put(AMBILIGHT_STYLE, ambilightStyle)
@@ -199,6 +218,23 @@ class SettingsModel {
             val t = json.get(TV_FORMAT).toString().trim().lowercase()
             if ((t == TV_FORMAT_TS || t == TV_FORMAT_L16) && t != tvFormat) { tvFormat = t; changed.add(TV_FORMAT) }
         }
+        if (json.has(TV_BURST_MS)) {
+            val v = number(json.get(TV_BURST_MS))?.coerceIn(0, MAX_TV_BURST_MS)
+            if (v != null && v != tvBurstMs) { tvBurstMs = v; changed.add(TV_BURST_MS) }
+        }
+        if (json.has(TV_PCR_LEAD_MS)) {
+            val v = number(json.get(TV_PCR_LEAD_MS))?.coerceIn(MIN_TV_PCR_LEAD_MS, MAX_TV_PCR_LEAD_MS)
+            if (v != null && v != tvPcrLeadMs) { tvPcrLeadMs = v; changed.add(TV_PCR_LEAD_MS) }
+        }
+        if (json.has(TV_REANCHOR_MIN)) {
+            val raw = json.get(TV_REANCHOR_MIN)
+            val v = if (raw == JSONObject.NULL || off(raw)) 0 else number(raw)?.coerceIn(0, MAX_TV_REANCHOR_MIN)
+            if (v != null && v != tvReanchorMin) { tvReanchorMin = v; changed.add(TV_REANCHOR_MIN) }
+        }
+        if (json.has(TV_RENDER)) {
+            val t = json.get(TV_RENDER).toString().trim().lowercase()
+            if (t in TV_RENDERS && t != tvRender) { tvRender = t; changed.add(TV_RENDER) }
+        }
         if (json.has(KARAOKE)) {
             val v = bool(json.get(KARAOKE))
             if (v != null && v != karaoke) { karaoke = v; changed.add(KARAOKE) }
@@ -258,6 +294,10 @@ class SettingsModel {
         const val MODE = "mode"
         const val TV_LATENCY_MS = "tv_latency_ms"
         const val TV_FORMAT = "tv_format"
+        const val TV_BURST_MS = "tv_burst_ms"
+        const val TV_PCR_LEAD_MS = "tv_pcr_lead_ms"
+        const val TV_REANCHOR_MIN = "tv_reanchor_min"
+        const val TV_RENDER = "tv_render"
         const val KARAOKE = "karaoke"
         const val AMBILIGHT_SYNCED = "ambilight_synced"
         const val AMBILIGHT_STYLE = "ambilight_style"
@@ -300,6 +340,20 @@ class SettingsModel {
         /** The streams the TV can be given. */
         const val TV_FORMAT_TS = "ts"
         const val TV_FORMAT_L16 = "l16"
+
+        /** A connection of the TV starts at a key picture at least this old (ms); the device test that the TV took well used a second. */
+        const val DEFAULT_TV_BURST_MS = 1_000
+        const val MAX_TV_BURST_MS = 5_000
+
+        /** ffmpeg's mux delay, which the TV played. */
+        const val DEFAULT_TV_PCR_LEAD_MS = 700
+        const val MIN_TV_PCR_LEAD_MS = 100
+        const val MAX_TV_PCR_LEAD_MS = 3_000
+        const val MAX_TV_REANCHOR_MIN = 24 * 60
+
+        /** The ways the lyrics picture can be put on the encoder (see `LyricsRenderer`). */
+        const val TV_RENDER_AUTO = "auto"
+        val TV_RENDERS = setOf(TV_RENDER_AUTO, "hw", "sw", "gl")
 
         /** The Ambilight in Synced mode follows the audio (verified on the TV: the style "Lumina" in its menu). */
         const val DEFAULT_AMBILIGHT_STYLE = "FOLLOW_AUDIO"

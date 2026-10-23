@@ -1,16 +1,21 @@
 package io.github.matijasalej.wholeflat
 
 import android.content.Context
+import android.content.Intent
 import android.os.SystemClock
 import io.github.matijasalej.wholeflat.capture.CaptureFeed
+import io.github.matijasalej.wholeflat.sync.ClickTrack
+import io.github.matijasalej.wholeflat.sync.CoverColor
 import io.github.matijasalej.wholeflat.sync.DmrDescription
 import io.github.matijasalej.wholeflat.sync.SessionHistory
+import io.github.matijasalej.wholeflat.sync.SettingsModel
 import io.github.matijasalej.wholeflat.sync.SonosXml
 import io.github.matijasalej.wholeflat.sync.StartBackoff
 import io.github.matijasalej.wholeflat.sync.StreamBuilder
 import io.github.matijasalej.wholeflat.sync.StreamFormat
 import io.github.matijasalej.wholeflat.sync.SyncedTiming
 import io.github.matijasalej.wholeflat.sync.TvDidl
+import io.github.matijasalej.wholeflat.sync.Warmup
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -35,7 +40,13 @@ import java.util.concurrent.TimeUnit
  *  - **keep**: every 2 s it asks the TV's transport how it is. The TV leaving its player (the transport STOPPED, the stream closed
  *    by the TV, the TV not answering) is reported as [onLeft] with what happened; who is in front on this box and what the user
  *    meant is for the mode manager to say.
- *  - **release**: Stop, and the TV returns to its HDMI input by itself; the box then checks that it did.
+ *  - **release**: Stop, and the TV returns to its HDMI input by itself; the box then checks that it did, and if the TV is still in its
+ *    media player it is helped back (its Back key, then a moment of our own activity).
+ *  - **warm-up** (the video stream only): the TV opens several connections in its first seconds and what it plays hitches meanwhile, so
+ *    until it has settled (one connection, no new GET for 2.5 s) the stream carries a splash and silence; then the music goes live at an
+ *    IDR picture and [onLive] says when, so that the other room can start at the same moment. Only a grab does this, never a change of song.
+ *  - **re-anchor**: a deliberate restart of the stream (with its warm-up) at a song boundary, for the case that the TV's timing turns
+ *    out to wander: the TV gives no position, so a new start is the only way to put it back.
  *
  * All the work is on one thread of its own; the status is read from any thread.
  */
@@ -85,6 +96,17 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     @Volatile
     var track: () -> Track = { Track(TITLE, null, null, null) }
 
+    /** Makes the scene for the lyrics picture (the track, the cover, the lyrics, the position at a capture time); a plain one with the title and artist until the lyrics are wired in. */
+    @Volatile
+    var scenes: SceneSource = SceneSource { _ ->
+        val t = track()
+        TvScene(t.title, t.artist ?: "", null, CoverColor.DEFAULT, null, LyricsStatus.NONE, -1L, -1L)
+    }
+
+    /** The music went live on the TV's stream (the warm-up is over): where it begins and when it is written. */
+    @Volatile
+    var onLive: ((TvTsPipeline.LiveInfo) -> Unit)? = null
+
     /** The lag the Sonos is kept to in Lyrics mode (ms after the capture): the other half of the common delay. */
     @Volatile
     var sonosTargetMs: () -> Double = { 322.0 }
@@ -129,6 +151,22 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     var activeFormat = "l16"
         private set
 
+    /** The stream is carrying the music (the warm-up of the video stream is over; the audio-only stream has none). False while it warms up or when there is no stream. */
+    @Volatile
+    var live = false
+        private set
+
+    /** How long the last warm-up lasted (ms), -1 if none ended yet; and why it ended. */
+    @Volatile
+    var warmupMs = -1L
+        private set
+
+    @Volatile
+    private var warmupWhy = ""
+
+    /** The stream is being made or is warming up (the other room waits for the music to go live). */
+    val warming: Boolean get() = (state == State.STARTING || state == State.PLAYING) && !live
+
     /** The common delay D of the rooms (ms after the capture) of the stream in force; NaN when there is none. */
     @Volatile
     var delayMs = Double.NaN
@@ -144,12 +182,34 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         private set
 
     private val backoff = StartBackoff()
+    private val warmup = Warmup()
     private val history = SessionHistory(10)
     private val sessions = ConcurrentHashMap<String, KitchenSession>()
     private val exec = ScheduledThreadPoolExecutor(1, ThreadFactory { r -> Thread(r, "wf-tvdlna").also { it.isDaemon = true } })
 
     @Volatile
     private var session: KitchenSession? = null
+
+    @Volatile
+    private var pipeline: TvTsPipeline? = null
+
+    /** The hold of the video stream, fixed when the stream began (ms after the capture); NaN when there is no video stream. */
+    @Volatile
+    private var frozenHoldMs = Double.NaN
+
+    /** When the stream in force began (System.nanoTime), 0 if none; and how it was last re-anchored. */
+    @Volatile
+    private var streamStartedNanos = 0L
+
+    @Volatile
+    private var reanchors = 0
+
+    @Volatile
+    private var lastReanchor = ""
+
+    /** How the last release got the TV back to its HDMI input. */
+    @Volatile
+    private var hdmiReturn = ""
 
     @Volatile
     private var soap: SonosSoap? = null
@@ -197,6 +257,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     fun start() {
         StreamRouter.add(this)
         exec.scheduleWithFixedDelay({ post("poll") { poll() } }, POLL_PERIOD_MS, POLL_PERIOD_MS, TimeUnit.MILLISECONDS)
+        exec.scheduleWithFixedDelay({ post("warm-up") { warmupTick() } }, WARMUP_TICK_MS, WARMUP_TICK_MS, TimeUnit.MILLISECONDS)
         AppLog.add(TAG, "the TV renderer started")
     }
 
@@ -305,36 +366,73 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         }
         if (cancelRequested) return cancelled()
         val api = connect(ip)
+        // the stream: the lyrics video unless the setting says audio only; its timing is that of its format
+        val wantTs = Settings.values.tvFormat == SettingsModel.TV_FORMAT_TS
+        activeFormat = if (wantTs) "ts" else "l16"
+        frozenHoldMs = Double.NaN
+        live = false
+        warmupMs = -1L
         refreshTiming(force = true)
-        val d = delayMs
-        val hold = holdMs
+        var d = delayMs
+        var hold = holdMs
         val host = Net.localAddressFor(ip)
         if (host == null) {
             fail("this box has no address that reaches the TV")
             return
         }
+        var pipe: TvTsPipeline? = null
+        if (wantTs) {
+            val p = TvTsPipeline(
+                context, feed, (hold * 1_000_000.0).toLong(), scenes, { Settings.values.karaoke },
+                { Settings.values.let { v -> TvTsPipeline.Params(v.tvBurstMs, v.tvPcrLeadMs, v.tvRender) } },
+            )
+            val err = p.start()
+            if (err == null) {
+                pipe = p
+                frozenHoldMs = hold
+            } else {
+                // the encoders do not run: this time the TV gets the sound alone, which is better than no sound
+                AppLog.error(TAG, "the lyrics video cannot be made ($err); the TV is given the audio-only stream this time")
+                lastError = "the lyrics video: $err"
+                activeFormat = "l16"
+                refreshTiming(force = true)
+                d = delayMs
+                hold = holdMs
+            }
+        }
+        pipeline = pipe
+        val format = if (pipe != null) StreamFormat.TS else StreamFormat.L16
 
         val s = KitchenSession(
             UUID.randomUUID().toString().replace("-", "").substring(0, 12), TV_EPOCH, KIND_TV, -1L, StreamBuilder.ChannelMode.STEREO,
-            feed, feed.generation, format = StreamFormat.L16,
+            feed, feed.generation, format = format,
         )
         s.realTime = true
-        s.startAtConnect = { began -> startFrameAt(feed, began) }
-        s.holdTargetNanos = { (holdMs * 1_000_000.0).toLong() }
-        s.sendBufferBytes = SEND_BUFFER_BYTES
         s.statsEveryMs = STATS_EVERY_MS
+        if (pipe != null) {
+            s.ts = pipe
+            s.onGet = { t -> warmup.onGet(t) }
+            s.sendBufferBytes = TS_SEND_BUFFER_BYTES
+        } else {
+            s.startAtConnect = { began -> startFrameAt(feed, began) }
+            s.holdTargetNanos = { (holdMs * 1_000_000.0).toLong() }
+            s.sendBufferBytes = SEND_BUFFER_BYTES
+            s.clickHz = ClickTrack.TV_HZ
+        }
         s.uri = "http://$host:${DebugServer.PORT}/k/${s.token}.${s.format.ext}"
         s.record = history.begin(s.token, "tv", System.nanoTime(), System.currentTimeMillis())
         s.arm(System.nanoTime() + 2_000_000_000L)
         sessions[s.token] = s
         session = s
         startedAtWallMs = System.currentTimeMillis()
+        streamStartedNanos = System.nanoTime()
         val t = track()
-        val didl = TvDidl.track(t.title, t.artist, t.album, t.artUri, s.uri)
+        val didl = if (pipe != null) TvDidl.video(t.title, s.uri) else TvDidl.track(t.title, t.artist, t.album, t.artUri, s.uri)
         AppLog.add(
             TAG,
-            "TV stream ${s.token}: ${s.uri}; common delay ${fmt(d)} ms, the TV's frames are written ${fmt(hold)} ms after their capture " +
-                "(TV latency ${tvLatencyMs()} ms, pipeline ${fmt(feed.pipelineMs())} ms)",
+            "TV stream ${s.token} (${format.key}): ${s.uri}; common delay ${fmt(d)} ms, the TV's frames are written ${fmt(hold)} ms after their capture " +
+                "(TV latency ${tvLatencyMs()} ms, pipeline ${fmt(feed.pipelineMs())} ms" +
+                (if (pipe != null) ", encoders ${SyncedTiming.encodeMs("ts").toInt()} ms, the hold stays as it is for the life of the stream" else "") + ")",
         )
 
         // the TV's player: Stop (it may hold an old stream of ours), the item, Play
@@ -351,6 +449,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             return
         }
         s.record?.playSent(System.nanoTime())
+        if (pipe != null) warmup.start(System.nanoTime())
         var play = api.play()
         tries = 1
         while (!play.ok && play.upnpError == 701 && tries < 3) {
@@ -369,7 +468,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             return
         }
         val getAfter = nowMs() - playSent
-        if (!waitFor(PLAYING_WAIT_MS) { transportNow(api) == "PLAYING" }) {
+        if (!waitFor(PLAYING_WAIT_MS, stepMs = 300) { transportNow(api) == "PLAYING" }) {
             if (cancelRequested) return cancelled()
             fail("the TV asked for the stream ${getAfter} ms after Play but did not play (transport $lastTransport)")
             return
@@ -379,7 +478,38 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         stoppedPolls = 0
         closedPolls = 0
         AppLog.add(TAG, "the TV plays: its first GET came ${getAfter} ms after Play, PLAYING ${nowMs() - playSent} ms after Play (context ${tv.context() ?: "?"})")
+        // the audio-only stream has no warm-up; the video stream is warming up until the TV has settled
+        live = pipe == null
         setState(State.PLAYING)
+        if (pipe == null) {
+            try {
+                onLive?.invoke(TvTsPipeline.LiveInfo(-1L, System.nanoTime()))
+            } catch (t: Throwable) {
+                AppLog.error(TAG, "the live hook failed", t)
+            }
+        }
+    }
+
+    /** Every 250 ms: has the TV settled? Then the music goes live. */
+    private fun warmupTick() {
+        val s = session ?: return
+        val p = pipeline ?: return
+        if (live || state != State.PLAYING) return
+        if (!warmup.poll(System.nanoTime(), s.streamCount, true)) return
+        val info = p.goLive()
+        live = true
+        warmupMs = warmup.durationMs(System.nanoTime())
+        warmupWhy = warmup.reason
+        AppLog.add(
+            TAG,
+            "warm-up over after $warmupMs ms (${warmup.reason}); the stream carries the music from capture frame ${info.firstFrame}, " +
+                "written in ${fmt((info.dueNanos - System.nanoTime()) / 1e6)} ms, to sound ${tvLatencyMs()} ms after that",
+        )
+        try {
+            onLive?.invoke(info)
+        } catch (t: Throwable) {
+            AppLog.error(TAG, "the live hook failed", t)
+        }
     }
 
     private fun cancelled() {
@@ -405,12 +535,12 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         }
     }
 
-    private fun waitFor(timeoutMs: Long, condition: () -> Boolean): Boolean {
+    private fun waitFor(timeoutMs: Long, stepMs: Long = 100, condition: () -> Boolean): Boolean {
         val end = nowMs() + timeoutMs
         while (nowMs() < end) {
             if (cancelRequested || exec.isShutdown) return false
             if (condition()) return true
-            sleepQuietly(100)
+            sleepQuietly(stepMs)
         }
         return condition()
     }
@@ -477,20 +607,34 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     // ---- the timing ------------------------------------------------------------------------------
 
     /** X, the TV's own delay from our write to its sound (ms), for the format in use. */
-    private fun tvLatencyMs(): Int = SyncedTiming.tvLatencyMs(Settings.values.tvLatencyMs, activeFormat)
+    fun tvLatencyMs(): Int = SyncedTiming.tvLatencyMs(Settings.values.tvLatencyMs, activeFormat)
 
     /**
      * The common delay D of the rooms and the hold of the TV's stream from the settings and the pipeline of the capture. Only a change
      * of 15 ms or more (or [force]: a new stream, a changed setting) moves it, so that the pipeline's small variations do not make
      * the Sonos chase them.
+     *
+     * The video stream is different in one respect: its hold is fixed when the stream begins and stays for its life, because the TV's
+     * player follows the PTS and the PCR of what it is given, so a hold that moved would move the TV against the Sonos. What the user
+     * sets (`tv_latency_ms`, the calibration) then moves only D, and with it the Sonos.
      */
     private fun refreshTiming(force: Boolean) {
         val feed = captureFeed ?: return
         val x = tvLatencyMs().toDouble()
-        val d = SyncedTiming.delayMs(x, feed.pipelineMs(), sonosTargetMs())
+        val frozen = frozenHoldMs
+        val d: Double
+        val hold: Double
+        if (activeFormat == "ts" && !frozen.isNaN()) {
+            hold = frozen
+            d = x + frozen
+        } else {
+            val pipelineMs = feed.pipelineMs().takeUnless { it.isNaN() } ?: SyncedTiming.DEFAULT_PIPELINE_MS
+            d = SyncedTiming.delayMs(x, pipelineMs + SyncedTiming.encodeMs(activeFormat), sonosTargetMs())
+            hold = SyncedTiming.tvHoldMs(d, x)
+        }
         if (!force && !delayMs.isNaN() && Math.abs(d - delayMs) < DELAY_HYSTERESIS_MS) return
         delayMs = d
-        holdMs = SyncedTiming.tvHoldMs(d, x)
+        holdMs = hold
         try {
             onDelay?.invoke(d)
         } catch (t: Throwable) {
@@ -522,6 +666,11 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             return
         }
         refreshTiming(force = false)
+        val trouble = pipeline?.trouble()
+        if (trouble != null) {
+            restart("the lyrics video has a problem: $trouble")
+            return
+        }
         val t = api.transportInfo()
         if (!t.ok) {
             unreachablePolls++
@@ -574,12 +723,34 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
 
     private fun restart(why: String) {
         AppLog.add(TAG, "the TV stream is made again: $why")
-        doRelease(why)
+        doRelease(why, waitHdmi = false)
         cancelRequested = false
         doGrab(why)
     }
 
-    private fun doRelease(reason: String) {
+    /**
+     * A deliberate restart of the stream, with a warm-up, so that the TV's timing is set afresh. The TV gives no position, so this is the
+     * only way to put it back if it wanders; it is meant for a song boundary or a pause, where nobody hears the gap. Does nothing unless
+     * the TV plays our stream.
+     */
+    fun reanchor(reason: String) {
+        post("re-anchor") {
+            if (state != State.PLAYING) return@post
+            reanchors++
+            lastReanchor = "$reason (${(System.nanoTime() - streamStartedNanos) / 1_000_000_000L} s after the stream began)"
+            note("re-anchor: $lastReanchor")
+            cancelRequested = false
+            restart("re-anchor: $reason")
+        }
+    }
+
+    /** A small JPEG of what the picture of the lyrics video shows now; null if there is no lyrics video. */
+    fun previewJpeg(): ByteArray? = pipeline?.previewJpeg()
+
+    /** How long the stream in force has run (s), -1 if there is none. */
+    fun streamAgeSeconds(): Long = if (streamStartedNanos == 0L || session == null) -1L else (System.nanoTime() - streamStartedNanos) / 1_000_000_000L
+
+    private fun doRelease(reason: String, waitHdmi: Boolean = true) {
         val s = session
         val api = soap
         if (s != null) endSession(s, reason)
@@ -588,19 +759,49 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         if (api != null && wasOn) {
             val r = api.stop()
             note("release: $reason; Stop ${r.describe()}")
-            // the TV returns to its HDMI input by itself after Stop; if it does not, the box asks for it
-            val end = nowMs() + RETURN_WAIT_MS
-            var back = false
+            if (waitHdmi) returnToHdmi()
+        }
+        live = false
+        streamStartedNanos = 0L
+        setState(State.IDLE)
+    }
+
+    /**
+     * After Stop the TV is to be on its HDMI input again. It usually is, by itself. If it is not (it stays in its media player), it is
+     * helped: the Back key of the TV (only while the TV says it is in its media player), then a moment of this app's own activity (which
+     * makes the box claim the screen again where the TV follows that); each step is checked by what the TV says it is showing.
+     */
+    private fun returnToHdmi() {
+        val t0 = nowMs()
+        fun onHdmi(): Boolean = tv.context() == HDMI_CONTEXT
+        fun waitHdmi(ms: Long): Boolean {
+            val end = nowMs() + ms
             while (nowMs() < end) {
-                if (tv.context() == "WatchExtension") {
-                    back = true
-                    break
-                }
+                if (exec.isShutdown) return false
+                if (onHdmi()) return true
                 sleepQuietly(300)
             }
-            AppLog.add(TAG, "the TV is ${if (back) "back on HDMI" else "still showing ${tv.lastContext.ifEmpty { "?" }} ${RETURN_WAIT_MS / 1000} s after Stop"}")
+            return onHdmi()
         }
-        setState(State.IDLE)
+        if (waitHdmi(HDMI_WAIT_MS)) {
+            hdmiReturn = "back on HDMI ${nowMs() - t0} ms after Stop"
+        } else if (tv.lastContext == MEDIA_PLAYER_CONTEXT && tv.key("Back") && waitHdmi(HDMI_WAIT_MS)) {
+            hdmiReturn = "back on HDMI ${nowMs() - t0} ms after Stop, with the Back key of the TV"
+        } else if (startNudge() && waitHdmi(HDMI_WAIT_MS)) {
+            hdmiReturn = "back on HDMI ${nowMs() - t0} ms after Stop, after this app's own activity was shown for a moment"
+        } else {
+            hdmiReturn = "NOT back on HDMI ${nowMs() - t0} ms after Stop (the TV shows ${tv.lastContext.ifEmpty { "?" }}); on this box 'cmd hdmi_control onetouchplay' over adb does it"
+        }
+        AppLog.add(TAG, "the TV is $hdmiReturn")
+    }
+
+    /** Shows an activity of this app for an instant (it ends itself at once): where the TV follows the box's claim of the screen, it comes back to HDMI. */
+    private fun startNudge(): Boolean = try {
+        context.startActivity(Intent(context, HdmiNudgeActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        true
+    } catch (t: Throwable) {
+        AppLog.add(TAG, "the nudge activity could not be started: $t")
+        false
     }
 
     private fun endSession(s: KitchenSession, why: String) {
@@ -612,6 +813,11 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             AppLog.add(TAG, "TV stream ${s.token} ended: $why")
         }
         s.closeSockets()
+        if (session === s) {
+            // the lyrics video lives as long as the stream
+            pipeline?.stop()
+            pipeline = null
+        }
     }
 
     private fun note(text: String) {
@@ -659,7 +865,17 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         o.put("tv_latency_ms", tvLatencyMs())
         o.put("tv_latency_setting", v.tvLatencyMs)
         o.put("format", activeFormat)
-        o.put("sndbuf_kb", SEND_BUFFER_BYTES / 1024)
+        o.put("live", live)
+        o.put("warming_up", warming)
+        o.put("warmup_ms", if (warmupMs < 0) JSONObject.NULL else warmupMs)
+        o.put("warmup_why", warmupWhy.ifEmpty { JSONObject.NULL })
+        o.put("warmup_gets", warmup.gets)
+        o.put("stream_age_s", streamAgeSeconds())
+        o.put("reanchors", reanchors)
+        o.put("last_reanchor", lastReanchor.ifEmpty { JSONObject.NULL })
+        o.put("hdmi_return", hdmiReturn.ifEmpty { JSONObject.NULL })
+        o.put("hold_frozen_ms", if (frozenHoldMs.isNaN()) JSONObject.NULL else jsonNumber(frozenHoldMs))
+        o.put("sndbuf_kb", (if (activeFormat == "ts") TS_SEND_BUFFER_BYTES else SEND_BUFFER_BYTES) / 1024)
         o.put("pipeline_ms", jsonNumber(captureFeed?.pipelineMs() ?: Double.NaN))
         o.put("transport", lastTransport.ifEmpty { JSONObject.NULL })
         o.put("transport_status", lastTransportStatus.ifEmpty { JSONObject.NULL })
@@ -692,6 +908,8 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         } else {
             o.put("session", JSONObject.NULL)
         }
+        val p = pipeline
+        o.put("video", p?.statusJson() ?: JSONObject.NULL)
         o.put("last_action", lastAction.ifEmpty { JSONObject.NULL })
         o.put("last_error", lastError ?: JSONObject.NULL)
         return o
@@ -705,6 +923,19 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
 
         /** The send buffer asked of the TV's socket (bytes): small, so that a TV that reads slower than real time makes writes block early. */
         private const val SEND_BUFFER_BYTES = 16 * 1024
+
+        /** The video stream's connections: a little more room, it is about 600 KB/s. */
+        private const val TS_SEND_BUFFER_BYTES = 64 * 1024
+
+        /** The warm-up is looked at this often (ms). */
+        private const val WARMUP_TICK_MS = 250L
+
+        /** JointSpace's `/6/context` level1 on an HDMI input, and in the TV's DLNA player. */
+        private const val HDMI_CONTEXT = "WatchExtension"
+        private const val MEDIA_PLAYER_CONTEXT = "BrowseDlna"
+
+        /** After Stop the TV is given this long (ms) to be back on HDMI by itself, and after each help. */
+        private const val HDMI_WAIT_MS = 3_000L
         private const val DMR_PORT = 2870
         const val KIND_TV = 101
         private const val TV_EPOCH = -2L

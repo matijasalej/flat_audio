@@ -10,6 +10,7 @@ import io.github.matijasalej.wholeflat.capture.CaptureTarget
 import io.github.matijasalej.wholeflat.capture.CaptureTracker
 import io.github.matijasalej.wholeflat.capture.LagSteer
 import io.github.matijasalej.wholeflat.capture.SourceArbiter
+import io.github.matijasalej.wholeflat.sync.ClickTrack
 import io.github.matijasalej.wholeflat.sync.DayFloor
 import io.github.matijasalej.wholeflat.sync.KitchenVolume
 import io.github.matijasalej.wholeflat.sync.PlayDelays
@@ -192,6 +193,18 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
      */
     @Volatile
     var syncedLeadMs = Double.NaN
+
+    /**
+     * While not null the kitchen does not start a captured stream: Synced mode waits for the TV to be through its warm-up (silence and a
+     * splash) so that the two rooms begin together. The text says why, for the log. A stream that is playing is not touched by it.
+     */
+    @Volatile
+    var holdStart: String? = null
+
+    /** A start that Synced mode scheduled for the moment the TV's music begins is still to come (the kitchen waits for it). */
+    @Volatile
+    private var syncedStartPending = false
+    private var lastHoldLogNanos = 0L
 
     /** The state of the lag steering that was last put in the log, to note only its changes. */
     private var lastSteerState = LagSteer.State.OFF
@@ -852,6 +865,15 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
      */
     private fun startCaptureSession(why: String, play: Boolean): Boolean {
         val feed = captureFeed ?: return false
+        val waiting = holdStart ?: if (syncedStartPending) "the start that is timed for the TV's music is to come" else null
+        if (waiting != null && session == null) {
+            val nanos = System.nanoTime()
+            if (nanos - lastHoldLogNanos > 5_000_000_000L) {
+                lastHoldLogNanos = nanos
+                AppLog.add(TAG, "capture: the start is held back ($why): $waiting")
+            }
+            return false
+        }
         val dev = device ?: return false
         val v = Settings.values
         if (!v.kitchenEnabled || !reachable || busyElsewhere) return false
@@ -867,6 +889,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
                 format = streamFormat(capture = true), flacBlock = v.kitchenFlacBlock,
             )
             s.uri = streamUri(host, s)
+            s.clickHz = ClickTrack.KITCHEN_HZ
             registerSession(s)
             state = State.STARTING
             AppLog.add(TAG, "capture: getting the kitchen ready ($why), session ${s.token}")
@@ -901,6 +924,28 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
 
     /** The lag the kitchen is to have now (ms after the capture): the common delay of Synced mode, else the target of the settings; NaN if none. */
     fun currentTargetMs(): Double = currentTarget()?.ms ?: Double.NaN
+
+    /** The delay of the speaker from Play to its sound for a WAV stream (ms): what Synced mode counts with when it times a start. */
+    fun playToSoundMs(): Double = delays.ms(StreamFormat.WAV)
+
+    /**
+     * Synced mode: the TV's music begins in [delayMs] (the TV is through its warm-up); the kitchen's stream is started, or started again
+     * if it is playing, then, with the lead that puts it at the common delay (set in [syncedLeadMs]), so that the two rooms begin together.
+     */
+    fun syncedStartAfter(delayMs: Long, why: String) {
+        syncedStartPending = true
+        later(maxOf(0L, delayMs)) {
+            syncedStartPending = false
+            holdStart = null
+            lastRejoinNanos = 0L
+            val s = session
+            if (s?.isCapture == true) {
+                rejoin(why, manual = true)
+            } else if (s == null && arbiter.source == SourceArbiter.Source.CAPTURE) {
+                startCaptureSession(why, true)
+            }
+        }
+    }
 
     /** The lag of the kitchen now (ms after the capture), NaN if no captured stream is locked. */
     fun lagNowMs(): Double = if (session?.isCapture == true && lagCapture.isLocked) lagCapture.recentMs() else Double.NaN

@@ -29,6 +29,10 @@ class SettingsModelTest {
         assertEquals(SettingsModel.DEFAULT_MODE, o.getString("mode"))
         assertEquals(-1, o.getInt("tv_latency_ms"))
         assertEquals("ts", o.getString("tv_format"))
+        assertEquals(1000, o.getInt("tv_burst_ms"))
+        assertEquals(700, o.getInt("tv_pcr_lead_ms"))
+        assertEquals(0, o.getInt("tv_reanchor_min"))
+        assertEquals("auto", o.getString("tv_render"))
         assertEquals(false, o.getBoolean("karaoke"))
         assertEquals(true, o.getBoolean("ambilight_synced"))
         assertEquals("FOLLOW_AUDIO", o.getString("ambilight_style"))
@@ -44,7 +48,7 @@ class SettingsModelTest {
                 "tv_screen_off", "tv_wake", "tv_ip",
                 "capture_enabled", "capture_living_latency_ms", "capture_lead_ms", "kitchen_target_ms", "kitchen_floor_ms",
                 "kitchen_volume", "capture_volume_mirror", "kitchen_format", "kitchen_flac_block",
-                "mode", "tv_latency_ms", "tv_format", "karaoke",
+                "mode", "tv_latency_ms", "tv_format", "tv_burst_ms", "tv_pcr_lead_ms", "tv_reanchor_min", "tv_render", "karaoke",
                 "ambilight_synced", "ambilight_style", "ambilight_menu",
             ),
             keys,
@@ -162,6 +166,33 @@ class SettingsModelTest {
         assertEquals(setOf("karaoke"), m.applyJson(JSONObject("""{"karaoke": "on"}""")))
         assertTrue(m.values().karaoke)
         assertTrue(m.applyJson(JSONObject("""{"karaoke": "maybe"}""")).isEmpty())
+    }
+
+    @Test
+    fun theTimingOfTheVideoStreamHasLimitsAndTheRenderWayIsOneOfFour() {
+        val m = SettingsModel()
+        assertEquals(setOf("tv_burst_ms"), m.applyJson(JSONObject("""{"tv_burst_ms": 0}""")))
+        assertEquals(0, m.values().tvBurstMs)
+        m.applyJson(JSONObject("""{"tv_burst_ms": 99999}"""))
+        assertEquals(SettingsModel.MAX_TV_BURST_MS, m.tvBurstMs)
+        m.applyJson(JSONObject("""{"tv_burst_ms": -5}"""))
+        assertEquals(0, m.tvBurstMs)
+        assertEquals(setOf("tv_pcr_lead_ms"), m.applyJson(JSONObject("""{"tv_pcr_lead_ms": 400}""")))
+        assertEquals(400, m.values().tvPcrLeadMs)
+        m.applyJson(JSONObject("""{"tv_pcr_lead_ms": 5}"""))
+        assertEquals(SettingsModel.MIN_TV_PCR_LEAD_MS, m.tvPcrLeadMs)
+        m.applyJson(JSONObject("""{"tv_pcr_lead_ms": 99999}"""))
+        assertEquals(SettingsModel.MAX_TV_PCR_LEAD_MS, m.tvPcrLeadMs)
+        assertEquals(setOf("tv_reanchor_min"), m.applyJson(JSONObject("""{"tv_reanchor_min": 30}""")))
+        assertEquals(30, m.values().tvReanchorMin)
+        assertEquals(setOf("tv_reanchor_min"), m.applyJson(JSONObject("""{"tv_reanchor_min": "off"}""")))
+        assertEquals(0, m.tvReanchorMin)
+        m.applyJson(JSONObject("""{"tv_reanchor_min": 999999}"""))
+        assertEquals(SettingsModel.MAX_TV_REANCHOR_MIN, m.tvReanchorMin)
+        assertEquals(setOf("tv_render"), m.applyJson(JSONObject("""{"tv_render": " GL "}""")))
+        assertEquals("gl", m.values().tvRender)
+        assertTrue(m.applyJson(JSONObject("""{"tv_render": "vulkan"}""")).isEmpty())
+        assertEquals("gl", m.tvRender)
     }
 
     @Test

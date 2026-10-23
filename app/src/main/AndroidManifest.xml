@@ -82,6 +82,15 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection|mediaPlayback" />
 
+        <!-- A moment on the screen and gone: where the TV does not come back to HDMI after Synced mode, the box claims the screen. -->
+        <activity
+            android:name=".HdmiNudgeActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <activity
             android:name=".capture.CaptureConsentActivity"
             android:excludeFromRecents="true"

@@ -23,12 +23,23 @@ object SyncedTiming {
     const val DEFAULT_PIPELINE_MS = 80.0
 
     /**
-     * The usual delay from our write to the sound of the TV (ms) for the stream format, when `tv_latency_ms` says "auto". Only the
-     * audio-only L16 stream was measured (the sound followed the data by 0.1 to 0.4 s); the video stream is a first guess (the TV's
-     * demuxer buffers a little, the picture needs the keyframe) which is to be calibrated on the device.
+     * The usual delay from our write to the sound of the TV (ms) for the stream format, when `tv_latency_ms` says "auto". The audio-only
+     * L16 stream: the sound followed the data by 0.1 to 0.4 s. The video stream (MPEG-TS): in the device test with a stream that was
+     * started a second behind live and paced to live, the Sonos had to be held 0.6 to 0.7 s behind to match the TV, which puts the TV about
+     * 0.95 s behind the writes. To be calibrated with the click track (`/tv/clicks`).
      */
     const val AUTO_L16_LATENCY_MS = 300
-    const val AUTO_TS_LATENCY_MS = 1_200
+    const val AUTO_TS_LATENCY_MS = 950
+
+    /**
+     * What the stream itself needs between the capture of a frame and its write (ms), on top of the pipeline: the audio is taken a block of
+     * 23 ms at a time and has to go through the AAC encoder, the picture through the H.264 encoder. The TS stream counts it into the
+     * common delay so that its frames are never due before they exist.
+     */
+    const val ENCODE_TS_MS = 100.0
+
+    /** The part of the stream's own delay that the common delay has to make room for (ms), by format ("ts" or "l16"). */
+    fun encodeMs(format: String): Double = if (format == "ts") ENCODE_TS_MS else 0.0
 
     /** X for [format] ("ts" or "l16") from the setting [settingMs] (-1: auto). */
     fun tvLatencyMs(settingMs: Int, format: String): Int =

@@ -25,6 +25,10 @@ import java.util.concurrent.TimeUnit
  * starts or is given back) and the kitchen is far from the new lag, its stream is started again, because climbing 1 s at 3 ms per second
  * takes minutes.
  *
+ * **The warm-up.** The TV's video stream starts with a splash and silence until the TV has settled ([TvRenderer]); the kitchen does not
+ * start meanwhile (a stream that plays goes on), and when the music goes live on the TV the kitchen is started, or started again, timed
+ * so that its first sound is the TV's first sound: the two rooms begin together.
+ *
  * **The TV.** In Synced mode the screen is off (the stream goes on, only the sound matters) unless karaoke is on; the Ambilight
  * follows the audio whenever lyrics are visible on the TV (karaoke, or Lyrics mode with the Spotify app on the screen), and what it was
  * before is put back afterwards. A screen that this app switched off is switched on again when the TV stops playing our stream. Both
@@ -86,6 +90,14 @@ class SyncedController(
     @Volatile
     private var lastDecision = ""
 
+    /** A re-anchor of the TV's stream is wanted at the next song boundary; and the track that was playing when it became due. */
+    @Volatile
+    private var reanchorWanted = false
+    private var trackWhenWanted = ""
+
+    @Volatile
+    private var kitchenAlign = ""
+
     @Volatile
     private var lastInputs = ""
 
@@ -103,6 +115,7 @@ class SyncedController(
         renderer.onLeft = { _, _ -> tickSoon() }
         renderer.onState = { tickSoon() }
         renderer.onDelay = { tickSoon() }
+        renderer.onLive = { info -> post { onLive(info) } }
         renderer.onGaveUp = { why ->
             AppLog.add(TAG, "the TV could not be taken three times in a row: $why")
             tickSoon()
@@ -195,11 +208,72 @@ class SyncedController(
             }
         }
         val effectiveMode = Mode.of(Settings.values.mode) ?: mode
-        val playing = renderer.state == TvRenderer.State.PLAYING && effectiveMode == Mode.SYNCED
+        // the TV plays our music (not just the splash of the warm-up)
+        val playing = renderer.state == TvRenderer.State.PLAYING && renderer.live && effectiveMode == Mode.SYNCED
+        kitchen.holdStart = if (effectiveMode == Mode.SYNCED && renderer.warming) "the TV is warming up (a splash and silence), its music is not live yet" else null
         holdTheKitchen(playing, now)
         present(effectiveMode, playing, source, now)
+        reanchorCheck(playing, silent)
         recoverAfterCrash(now)
         refreshCurrent(now)
+    }
+
+    /**
+     * The music went live on the TV: the Sonos is held at the common delay from now, and its stream is started (or started again) so that its
+     * first sound is the TV's first sound. The TV sounds the first frame [TvTsPipeline.LiveInfo.dueNanos] + its own delay from now; the
+     * kitchen needs its preparation (mute, stop, volume, address) and then the Play-to-sound delay.
+     */
+    private fun onLive(info: TvTsPipeline.LiveInfo) {
+        val v = Settings.values
+        val now = nowMs()
+        val d = renderer.delayMs
+        if (!d.isNaN()) {
+            val target = d + v.kitchenOffsetMs
+            kitchen.syncedTargetMs = target
+            kitchen.syncedLeadMs = maxOf(0.0, target - kitchen.fixedLagMs())
+        }
+        if (info.firstFrame < 0) return // the audio-only stream has no warm-up: the kitchen is started again when it is far from its lag
+        val untilDueMs = maxOf(0.0, (info.dueNanos - System.nanoTime()) / 1e6)
+        val delay = maxOf(0.0, untilDueMs + renderer.tvLatencyMs() - kitchen.playToSoundMs() - KITCHEN_PREPARE_MS).toLong()
+        lastRestartMs = now + delay + 3_000
+        kitchenAlign = "the kitchen starts in $delay ms (the TV's first music is written in ${Math.round(untilDueMs)} ms and sounds ${renderer.tvLatencyMs()} ms later; " +
+            "Play to sound ${Math.round(kitchen.playToSoundMs())} ms, preparation ${KITCHEN_PREPARE_MS.toInt()} ms)"
+        AppLog.add(TAG, kitchenAlign)
+        kitchen.syncedStartAfter(delay, "the TV's music goes live")
+    }
+
+    /** Asks for a re-anchor of the TV's stream at the next song boundary (see [reanchorCheck]); the debug page and the settings use it. */
+    fun requestReanchor() {
+        reanchorWanted = true
+        trackWhenWanted = trackKey()
+        AppLog.add(TAG, "a re-anchor of the TV's stream is wanted at the next song boundary")
+    }
+
+    private fun trackKey(): String = renderer.track().let { "${it.title}|${it.artist}" }
+
+    /**
+     * The TV gives no position, so if its timing turns out to wander the only remedy is a new start of its stream (with a warm-up). It is
+     * done where nobody hears the gap: when a song ends (the track changes) or the music has been silent for a moment. With
+     * `tv_reanchor_min` set, a stream that has run that long is due one; [requestReanchor] asks for one at once.
+     */
+    private fun reanchorCheck(playing: Boolean, silentMs: Long) {
+        val minutes = Settings.values.tvReanchorMin
+        if (!playing) {
+            reanchorWanted = false
+            return
+        }
+        val age = renderer.streamAgeSeconds()
+        if (!reanchorWanted && minutes > 0 && age >= minutes * 60L) {
+            reanchorWanted = true
+            trackWhenWanted = trackKey()
+            AppLog.add(TAG, "the TV's stream is $age s old: a re-anchor is due and waits for a song boundary")
+        }
+        if (!reanchorWanted) return
+        val boundary = trackKey() != trackWhenWanted || silentMs in REANCHOR_SILENCE_MS..SILENT_NOT_PLAYING_MS
+        if (boundary) {
+            reanchorWanted = false
+            renderer.reanchor("a song boundary, the stream was $age s old")
+        }
     }
 
     /** What is in front, looked up at most every 3 s (the usage events of half a day are not cheap). */
@@ -328,6 +402,10 @@ class SyncedController(
         o.put("state", renderer.state.label)
         o.put("delay_ms", if (renderer.delayMs.isNaN()) JSONObject.NULL else Math.round(renderer.delayMs * 10.0) / 10.0)
         o.put("kitchen_synced_target_ms", if (kitchen.syncedTargetMs.isNaN()) JSONObject.NULL else Math.round(kitchen.syncedTargetMs * 10.0) / 10.0)
+        o.put("kitchen_hold", kitchen.holdStart ?: JSONObject.NULL)
+        o.put("kitchen_align", kitchenAlign.ifEmpty { JSONObject.NULL })
+        o.put("reanchor_wanted", reanchorWanted)
+        o.put("reanchor_after_min", v.tvReanchorMin)
         o.put("last_decision", lastDecision.ifEmpty { JSONObject.NULL })
         o.put("why", manager.lastWhy.ifEmpty { JSONObject.NULL })
         o.put("inputs", lastInputs)
@@ -363,6 +441,13 @@ class SyncedController(
         private const val RESTART_FAR_MS = 150.0
         private const val RESTART_EVERY_MS = 20_000L
 
+        /** What the kitchen's own start takes before its Play (the speaker is muted and stopped, its volume and the address are set), a guess to be read from the log (ms). */
+        private const val KITCHEN_PREPARE_MS = 300.0
+
+        /** A song boundary for a re-anchor: the music has been silent this long (ms), but not so long that nothing is playing at all. */
+        private const val REANCHOR_SILENCE_MS = 2_000L
+        private const val SILENT_NOT_PLAYING_MS = 600_000L
+
         private const val AMBI_POWER = "ambi_power"
         private const val AMBI_CONFIG = "ambi_config"
         private const val SCREEN_OFF_KEY = "screen_off_by_us"
@@ -370,7 +455,7 @@ class SyncedController(
         /** The settings that make the controller look again at once. */
         private val WATCHED = setOf(
             "mode", "karaoke", "tv_format", "tv_latency_ms", "kitchen_offset_ms", "kitchen_target_ms", "kitchen_floor_ms",
-            "ambilight_synced", "ambilight_style", "ambilight_menu",
+            "ambilight_synced", "ambilight_style", "ambilight_menu", "tv_reanchor_min",
         )
     }
 }

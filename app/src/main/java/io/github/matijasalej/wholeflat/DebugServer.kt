@@ -4,6 +4,8 @@ import android.content.Context
 import android.os.Build
 import android.os.Process
 import android.os.SystemClock
+import io.github.matijasalej.wholeflat.sync.CalibrationClicks
+import io.github.matijasalej.wholeflat.sync.ClickTrack
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
@@ -50,6 +52,10 @@ import kotlin.concurrent.thread
  *   GET  /tv/last-sessions      the last 10 streams to the TV: every connection with its statistics
  *   GET  /tv/grab               has the TV play the capture now (the mode manager may give it back; set mode=lyrics to test alone)
  *   GET  /tv/release            gives the TV back (it returns to HDMI)
+ *   GET  /tv/reanchor           restarts the TV's stream now (with its warm-up); `?at=boundary` waits for the next song boundary
+ *   GET  /tv/preview.jpg        what the picture of the TV's stream shows now (a small JPEG)
+ *   GET  /tv/clicks             ?seconds=N (default 30): the click track in both streams instead of the music, for calibrating the rooms:
+ *                               the TV's stream 2 kHz (4 kHz every 10th click), the kitchen's 3 kHz (6 kHz); `/tv/clicks/stop` ends it
  *   GET  /k/<token>.flac        the kitchen stream (GET and HEAD), pulled by the Sonos
  */
 object DebugServer {
@@ -265,6 +271,30 @@ object DebugServer {
                 AppState.tvRenderer?.release("asked for on the debug page")
                 sendJson(out, 200, JSONObject().put("ok", AppState.tvRenderer != null), head)
             }
+            "/tv/reanchor" -> {
+                AppLog.add(TAG, "${req.remote} tv/reanchor ${req.query}")
+                if (req.query["at"] == "boundary") {
+                    AppState.synced?.requestReanchor()
+                } else {
+                    AppState.tvRenderer?.reanchor("asked for on the debug page")
+                }
+                sendJson(out, 200, JSONObject().put("ok", AppState.tvRenderer != null).put("at", req.query["at"] ?: "now"), head)
+            }
+            "/tv/preview.jpg" -> {
+                val jpeg = AppState.tvRenderer?.previewJpeg()
+                if (jpeg == null) sendText(out, 404, "no lyrics video is running\n", head) else sendBytes(out, 200, "image/jpeg", jpeg, head)
+            }
+            "/tv/clicks" -> {
+                val seconds = (req.query["seconds"]?.toIntOrNull() ?: 30).coerceIn(1, 600)
+                AppLog.add(TAG, "${req.remote} tv/clicks seconds=$seconds")
+                CalibrationClicks.start(seconds)
+                sendJson(out, 200, clicksJson(seconds), head)
+            }
+            "/tv/clicks/stop" -> {
+                AppLog.add(TAG, "${req.remote} tv/clicks/stop")
+                CalibrationClicks.stop()
+                sendJson(out, 200, JSONObject().put("ok", true), head)
+            }
             "/tv/detect" -> {
                 AppState.tv?.detectNow()
                 sendJson(out, 200, JSONObject().put("ok", AppState.tv != null), head)
@@ -296,6 +326,26 @@ object DebugServer {
             Settings.applyJson(update)
         }
         sendJson(out, 200, Settings.toJson(), head)
+    }
+
+    private fun clicksJson(seconds: Int): JSONObject {
+        val o = JSONObject()
+        val renderer = AppState.tvRenderer
+        o.put("ok", true)
+        o.put("seconds", seconds)
+        o.put("clicks", "one per second at capture frame k*44100, 5 ms Hann-windowed, 0.5 full scale, in place of the music")
+        o.put("tv", "${ClickTrack.TV_HZ} Hz, ${ClickTrack.TV_HZ * 2} Hz at k%10==0")
+        o.put("kitchen", "${ClickTrack.KITCHEN_HZ} Hz, ${ClickTrack.KITCHEN_HZ * 2} Hz at k%10==0")
+        o.put("tv_state", renderer?.state?.label ?: "none")
+        o.put("tv_live", renderer?.live ?: false)
+        o.put("kitchen_state", AppState.kitchen?.state?.label ?: "none")
+        o.put("kitchen_offset_ms", Settings.values.kitchenOffsetMs)
+        o.put("tv_latency_ms", renderer?.tvLatencyMs() ?: JSONObject.NULL)
+        val notes = JSONArray()
+        if (renderer == null || !renderer.live) notes.put("the TV does not play the music yet (Synced mode, /tv/grab, and the warm-up must be over): its clicks start with the music")
+        if (AppState.kitchen?.state?.label != "playing") notes.put("the kitchen streams only while something plays in the captured player: start a track on the phone (its sound is replaced by the clicks)")
+        o.put("notes", notes)
+        return o
     }
 
     private fun calibrateStart(seconds: Int): JSONObject {
@@ -395,7 +445,7 @@ object DebugServer {
         sb.append("<h1>Whole Flat Audio ").append(escapeHtml(BuildInfo.versionName)).append("</h1><table>")
         renderRows(sb, status, 0)
         sb.append("</table><p>")
-        for (link in listOf("/status.json", "/settings", "/kitchen", "/kitchen/last-sessions", "/capture", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/capture/restart", "/tv/run", "/synced", "/tv/dlna", "/tv/last-sessions")) {
+        for (link in listOf("/status.json", "/settings", "/kitchen", "/kitchen/last-sessions", "/capture", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/capture/restart", "/tv/run", "/synced", "/tv/dlna", "/tv/last-sessions", "/tv/preview.jpg")) {
             sb.append("<a href=\"").append(link).append("\">").append(link).append("</a>")
         }
         sb.append("</p><h2 style=\"font-size:15px\">Log (last 120 lines)</h2><pre>")

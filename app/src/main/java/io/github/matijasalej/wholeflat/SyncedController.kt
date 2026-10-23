@@ -266,8 +266,9 @@ class SyncedController(
         // the TV plays our music (not just the splash of the warm-up)
         val playing = renderer.state == TvRenderer.State.PLAYING && renderer.live && effectiveMode == Mode.SYNCED
         // while the music plays the box is freed of what it does not need, now and then
-        if ((playing || source == "capture") && silent < CLEANUP_WHILE_SOUND_MS && now - cleaner.lastRunMs >= CLEANUP_EVERY_MS) cleaner.run("every 10 minutes while the music plays")
+        if ((playing || source == "capture") && silent < CLEANUP_WHILE_SOUND_MS && now - cleaner.lastRunMs >= CLEANUP_EVERY_MS) cleaner.run("every 2 minutes while the music plays")
         if (playing || source == "capture") cleaner.watch()
+        swap.tick(now)
         kitchen.holdStart = if (effectiveMode == Mode.SYNCED && renderer.warming) "the TV is warming up (a splash and silence), its music is not live yet" else null
         // while the TV warms up again (a re-anchor) the kitchen is not sent back to the lag of Lyrics mode: it would be started twice
         holdTheKitchen(playing, now, keepTarget = effectiveMode == Mode.SYNCED && (renderer.warming || renderer.restarting))
@@ -311,6 +312,14 @@ class SyncedController(
     }
 
     private var suspectNoted = false
+
+    private val swap = SwapMonitor()
+
+    /** The swap bursts seen (see [SwapMonitor]), for `/sys`. */
+    fun swapJson(): JSONObject = swap.statusJson()
+
+    /** The third-party apps with their background modes (see [BackgroundCleaner.appsJson]), for `/sys`. */
+    fun appsJson() = cleaner.appsJson()
 
     private fun trackKey(): String = renderer.track().let { "${it.title}|${it.artist}" }
 
@@ -530,7 +539,7 @@ class SyncedController(
 
         /** The kitchen is started again when it is this far from the lag it is to have (ms), and not more often than this (ms). */
         /** The apps in the background are asked to give up their processes this often while the music plays, and only if there was sound lately. */
-        private const val CLEANUP_EVERY_MS = 600_000L
+        private const val CLEANUP_EVERY_MS = 120_000L
         private const val CLEANUP_WHILE_SOUND_MS = 120_000L
         private const val RESTART_FAR_MS = 150.0
         private const val RESTART_EVERY_MS = 20_000L

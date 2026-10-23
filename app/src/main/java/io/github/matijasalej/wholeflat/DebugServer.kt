@@ -558,6 +558,8 @@ object DebugServer {
         o.put("our_cpu_percent_of_one_core", Math.round(cpu * 10.0) / 10.0)
         o.put("our_cpu_percent_of_the_box", Math.round(cpu / cores * 10.0) / 10.0)
         o.put("cleanup", AppState.synced?.cleanupJson() ?: JSONObject.NULL)
+        o.put("swap", AppState.synced?.swapJson() ?: JSONObject.NULL)
+        o.put("third_party_apps", AppState.synced?.appsJson() ?: JSONObject.NULL)
         return o
     }
 

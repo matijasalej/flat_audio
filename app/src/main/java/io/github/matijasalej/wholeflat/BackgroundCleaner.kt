@@ -1,15 +1,19 @@
 package io.github.matijasalej.wholeflat
 
 import android.app.ActivityManager
+import android.app.AppOpsManager
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings as AndroidSettings
 import io.github.matijasalej.wholeflat.sync.BackgroundPolicy
 import io.github.matijasalej.wholeflat.sync.BoxLoad
+import io.github.matijasalej.wholeflat.sync.MeminfoDump
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
@@ -76,6 +80,7 @@ class BackgroundCleaner(private val context: Context, private val tv: TvControl)
             val after = memory()
             lastSummary = "asked ${victims.size} of ${installed.size} apps${if (failed > 0) " ($failed refused)" else ""}; available memory ${before.first} -> ${after.first} MB, swap free ${before.second} -> ${after.second} MB"
             AppLog.add(TAG, "cleanup ($why): $lastSummary")
+            listStillRunning(why)
         }, 2_000L)
     }
 
@@ -131,6 +136,84 @@ class BackgroundCleaner(private val context: Context, private val tv: TvControl)
         askedAtWallMs = wall
     }
 
+    private val worker = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "wf-cleanup").also { it.isDaemon = true } }
+
+    @Volatile
+    private var stillRunning = ""
+    private var dumpNoted = false
+
+    /**
+     * Names the apps that were asked to stop and still run, with what they hold (RSS), from `dumpsys meminfo`: an app cannot see the processes
+     * of others any other way. Needs `android.permission.DUMP`, granted once by adb; without it the log says so once.
+     */
+    private fun listStillRunning(why: String) {
+        if (context.checkSelfPermission(DUMP) != PackageManager.PERMISSION_GRANTED) {
+            if (!dumpNoted) {
+                dumpNoted = true
+                AppLog.add(TAG, "the apps that still run cannot be named: adb shell pm grant ${context.packageName} $DUMP")
+            }
+            return
+        }
+        val askedNow = asked
+        worker.execute {
+            var proc: Process? = null
+            try {
+                proc = Runtime.getRuntime().exec(arrayOf("dumpsys", "meminfo"))
+                val text = proc.inputStream.bufferedReader().use { it.readText() }
+                val still = MeminfoDump.parse(text).filter { it.packageName in askedNow }
+                stillRunning = if (still.isEmpty()) "none of the ${askedNow.size} apps asked" else still.joinToString(", ") { "${it.name} ${it.kb / 1024} MB" }
+                AppLog.add(TAG, "cleanup ($why): still running after the request: $stillRunning")
+            } catch (t: Throwable) {
+                AppLog.add(TAG, "cleanup: the processes cannot be listed ($t)")
+            } finally {
+                try {
+                    proc?.destroy()
+                } catch (t: Throwable) {
+                    // gone
+                }
+            }
+        }
+    }
+
+    /** The third-party apps (not part of the system image) with the modes of RUN_ANY_IN_BACKGROUND and RUN_IN_BACKGROUND that the box holds for them. */
+    fun appsJson(): JSONArray {
+        val a = JSONArray()
+        try {
+            val installed = context.packageManager.getInstalledApplications(0)
+            val ops = context.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager
+            for (info in installed.sortedBy { it.packageName }) {
+                if (info.flags and ApplicationInfo.FLAG_SYSTEM != 0 || info.packageName == context.packageName) continue
+                val o = JSONObject()
+                o.put("package", info.packageName)
+                o.put("run_any_in_background", opMode(ops, "android:run_any_in_background", info.uid, info.packageName))
+                o.put("run_in_background", opMode(ops, "android:run_in_background", info.uid, info.packageName))
+                o.put("asked_at_the_last_run", info.packageName in asked)
+                a.put(o)
+            }
+        } catch (t: Throwable) {
+            // the list is a nicety
+        }
+        return a
+    }
+
+    @Suppress("DEPRECATION")
+    private fun opMode(ops: AppOpsManager?, op: String, uid: Int, pkg: String): String {
+        if (ops == null) return "unknown"
+        return try {
+            val m = if (android.os.Build.VERSION.SDK_INT >= 29) ops.unsafeCheckOpNoThrow(op, uid, pkg) else ops.checkOpNoThrow(op, uid, pkg)
+            when (m) {
+                AppOpsManager.MODE_ALLOWED -> "allow"
+                AppOpsManager.MODE_IGNORED -> "ignore"
+                AppOpsManager.MODE_ERRORED -> "deny"
+                AppOpsManager.MODE_DEFAULT -> "default"
+                4 -> "foreground"
+                else -> "mode $m"
+            }
+        } catch (t: Throwable) {
+            "unknown"
+        }
+    }
+
     /** Switches the screensaver off if it is on and the grant is there; returns what happened. */
     fun ensureScreensaverOff(): String {
         val resolver = context.contentResolver
@@ -175,6 +258,8 @@ class BackgroundCleaner(private val context: Context, private val tv: TvControl)
         o.put("last_run_s_ago", if (lastRunMs == 0L) JSONObject.NULL else (android.os.SystemClock.elapsedRealtime() - lastRunMs) / 1000)
         o.put("last_asked", lastAsked)
         o.put("last_summary", lastSummary.ifEmpty { JSONObject.NULL })
+        o.put("still_running", stillRunning.ifEmpty { JSONObject.NULL })
+        o.put("dump_granted", context.checkSelfPermission(DUMP) == PackageManager.PERMISSION_GRANTED)
         o.put("comebacks", JSONObject(comebacks as Map<*, *>))
         o.put("last_comeback", lastComeback.ifEmpty { JSONObject.NULL })
         o.put("write_secure_settings", context.checkSelfPermission(WRITE_SECURE) == PackageManager.PERMISSION_GRANTED)
@@ -192,6 +277,7 @@ class BackgroundCleaner(private val context: Context, private val tv: TvControl)
     private companion object {
         const val TAG = "cleanup"
         const val WATCH_EVERY_MS = 30_000L
+        const val DUMP = "android.permission.DUMP"
 
         /** UsageEvents.Event types: ACTIVITY_RESUMED (1) and FOREGROUND_SERVICE_START (19, Android 10). */
         const val EVENT_ACTIVITY_RESUMED = 1

@@ -194,7 +194,7 @@ The lights listen to the captured music on a thread of their own, about 5 to 10 
 
 **How it reaches the TV.** In Synced mode the lights are painted into the picture the TV already gets: the whole picture in the `ambilight` display (the screen is off, so only the Ambilight sees it), and a glow band at the edges of the lyrics in `screen`. The Ambilight reads the edges of that picture, and the picture carries the time stamp of its sound, so the lights come with the music; they are drawn `lights_offset_ms` ahead (default 20 ms), because a light up to 125 ms early goes unnoticed and one more than 45 ms late does not (ITU-R BT.1359). In Lyrics mode (the Spotify app over HDMI) the TV's own styles are used, one JointSpace call per song or section. JointSpace is never asked more than about once a second: the TV's server stalls at 10 calls a second.
 
-**His choice.** The phone page shows the class and the tempo under **Lights**, with **Less colour** and **More colour**: the song keeps that class from then on (`/lights/colour?step=auto` gives it back to the app). Every song is remembered (its tempo, energy, mood, class and his choice) at `/lights/history`.
+**His choice.** The phone page shows the class and the tempo under **Lights**, with **Less colour**, **Just right** and **More colour**: the song keeps that class from then on (`/lights/colour?step=auto` gives it back to the app), and "just right" tells the review that the app chose well. Every song is remembered (its tempo, energy, mood, class and his choice) at `/lights/history`.
 
 | Setting (at `/lights/set?...`) | Meaning |
 | --- | --- |

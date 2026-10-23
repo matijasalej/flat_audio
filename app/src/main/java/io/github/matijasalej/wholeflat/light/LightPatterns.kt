@@ -7,7 +7,9 @@ package io.github.matijasalej.wholeflat.light
  * - `zones`: every zone its own hue, round the colour circle in the TV's zone order (shows how the TV numbers its zones);
  * - `chase`: one white zone going round, a zone every [stepMs];
  * - `pulse`: [color] on every zone, flashing at [bpm] from the start of the test (60 % deep, decaying in 0.4 of a beat);
- * - `steps`: black and [color] in turn, every [stepMs] (for the delay from the picture to the lights).
+ * - `steps`: black and [color] in turn, every [stepMs] (for the delay from the picture to the lights);
+ * - `clicks`: white for 100 ms from every whole second of the capture, the frames on which the calibration clicks are (`/tv/clicks`):
+ *   a film of the TV with its sound then shows how far the light is from the click ([atFrame]; spikes/lights_offset.py).
  *
  * Plain Kotlin: the 16 colours of a pattern at [elapsedMs] since its start.
  */
@@ -39,8 +41,18 @@ class LightPatterns(val pattern: String, val color: Int = Colors.rgb(255, 255, 2
         else -> IntArray(Zones.COUNT)
     }
 
+    /** True if the pattern is set by the capture frame rather than the time since its start. */
+    val byFrame: Boolean get() = pattern == "clicks"
+
+    /** The colours of the `clicks` pattern at capture [frame] (at [rate]): white for the first 100 ms of every second, else black. */
+    fun atFrame(frame: Long, rate: Int): IntArray {
+        val inSecond = ((frame % rate) + rate) % rate
+        val on = inSecond < rate / 10
+        return IntArray(Zones.COUNT) { if (on) Colors.rgb(255, 255, 255) else Colors.rgb(0, 0, 0) }
+    }
+
     companion object {
-        val NAMES = listOf("solid", "split", "zones", "chase", "pulse", "steps")
+        val NAMES = listOf("solid", "split", "zones", "chase", "pulse", "steps", "clicks")
 
         /** "ff8800" or "#ff8800" as a colour; null if it is not one. */
         fun parseColor(s: String?): Int? {

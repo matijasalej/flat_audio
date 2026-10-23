@@ -66,7 +66,7 @@
   .lights { margin-top: 30px; }
   .lights .head { display: flex; justify-content: space-between; align-items: baseline; margin: 0 4px 10px; color: var(--muted); font-size: 15px; }
   .lights .head span:first-child { font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
-  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
   .colour { appearance: none; border: 0; border-radius: 16px; background: var(--card); color: var(--text); font: inherit; font-size: 17px; font-weight: 600; height: 56px; }
   .colour:active { background: var(--card-hi); }
 </style>
@@ -104,6 +104,7 @@
     <div class="head"><span>Lights</span><span id="lightsNow">&ndash;</span></div>
     <div class="pair">
       <button class="colour" data-step="less">Less colour</button>
+      <button class="colour" data-step="keep">Just right</button>
       <button class="colour" data-step="more">More colour</button>
     </div>
   </section>

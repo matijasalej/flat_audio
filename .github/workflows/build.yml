@@ -57,13 +57,15 @@ jobs:
           esac
           cargo ndk --version
 
-      - name: Check that the vendored librespot-core is the one in use
+      - name: Check that the vendored librespot crates are the ones in use
         working-directory: native
         run: |
-          cargo tree --target aarch64-linux-android -p librespot-core --depth 0 | tee "$RUNNER_TEMP/tree.txt"
-          grep -q 'native/vendor/librespot-core' "$RUNNER_TEMP/tree.txt" || { echo "::error::the [patch] for librespot-core is not applied"; exit 1; }
+          for crate in librespot-core librespot-playback; do
+            cargo tree --target aarch64-linux-android -p "$crate" --depth 0 | tee "$RUNNER_TEMP/tree-$crate.txt"
+            grep -q "native/vendor/$crate" "$RUNNER_TEMP/tree-$crate.txt" || { echo "::error::the [patch] for $crate is not applied"; exit 1; }
+          done
 
-      # The ring, the epoch logic and the calibration source are plain Rust and run on the runner itself.
+      # The ring, the epoch logic, the calibration source and the key back-off are plain Rust and run on the runner itself.
       - name: Rust unit tests
         working-directory: native
         run: cargo test --lib

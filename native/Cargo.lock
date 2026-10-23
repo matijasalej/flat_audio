@@ -1325,7 +1325,6 @@ dependencies = [
 [[package]]
 name = "librespot-playback"
 version = "0.8.0"
-source = "git+https://github.com/librespot-org/librespot?rev=99b6088bf3ea028f90192676ac1a337fa4b2ed12#99b6088bf3ea028f90192676ac1a337fa4b2ed12"
 dependencies = [
  "form_urlencoded",
  "futures-util",

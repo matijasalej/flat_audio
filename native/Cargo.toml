@@ -38,8 +38,15 @@ android_logger = "0.13"
 # down a request whose client token was issued to another client id. The vendored copy fixes that in
 # three places (client token, user agent, claimed version), the same change Rusty carries
 # (https://github.com/SerafiniJose/rusty). See the header of vendor/librespot-core/Cargo.toml.
+#
+# The vendored librespot-core also spaces out the audio key requests after an error and reports
+# them, and the commands a controller sends, to the engine. The vendored librespot-playback is
+# librespot PR #1799 (a refused audio key no longer makes Spirc skip through the queue) with one
+# change of ours: the player stays in its loading state, so that the engine can load the same track
+# again later. See the headers of the two vendored Cargo.toml files and src/keyguard.rs.
 [patch."https://github.com/librespot-org/librespot"]
 librespot-core = { path = "vendor/librespot-core" }
+librespot-playback = { path = "vendor/librespot-playback" }
 
 # `strip = "symbols"` drops .symtab/.strtab only, the dynamic symbol table survives, so JNI method
 # resolution is unaffected. `panic` stays at the default `unwind`: tokio turns a panicking task into

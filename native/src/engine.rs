@@ -10,6 +10,8 @@
 //!   credentials with a growing delay, for as long as the engine runs.
 //! * Credentials that arrive from a phone win over the cached ones until one connect succeeded.
 //! * Nothing here ends the process: errors become events for the Kotlin side and retries.
+//! * A refused audio key does not make the player skip through the queue: the patched player holds the
+//!   track, and `keyguard.rs` decides when to load it again (see there).
 
 use std::future::Future;
 use std::io::Read;
@@ -20,10 +22,12 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use librespot_connect::{ConnectConfig, Spirc};
+use librespot_core::audio_key::{self, KeyOutcome};
 use librespot_core::authentication::Credentials;
 use librespot_core::cache::Cache;
 use librespot_core::config::DeviceType;
 use librespot_core::error::ErrorKind;
+use librespot_core::user_commands;
 use librespot_core::{Error, Session, SessionConfig};
 use librespot_discovery::Discovery;
 use librespot_playback::audio_backend::Sink;
@@ -32,10 +36,11 @@ use librespot_playback::mixer::{Mixer, MixerConfig};
 use librespot_playback::player::{Player, PlayerEvent};
 use log::{info, warn};
 use serde_json::{json, Value};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{interval, sleep_until, timeout, Instant};
 
 use crate::events::{mask, EventQueue};
+use crate::keyguard::{Action, KeyGuard, Phase, UserCommand};
 use crate::mixer::ForwardMixer;
 use crate::ring::{FrameRing, PlayerEvents, RingSink};
 
@@ -61,6 +66,93 @@ pub struct Config {
 pub struct Shared {
     pub ring: Arc<FrameRing>,
     pub events: Arc<EventQueue>,
+}
+
+/// What the key guard needs to know of the player's events.
+#[derive(Debug, PartialEq)]
+enum GuardSignal {
+    Loading { uri: String, request_id: u64, position_ms: u32 },
+    Refused { uri: String, request_id: u64, start_playback: bool },
+    /// A track is playing or paused: it loaded.
+    Loaded,
+    Stopped,
+}
+
+fn guard_signal(ev: &PlayerEvent) -> Option<GuardSignal> {
+    match ev {
+        PlayerEvent::Loading { track_id, play_request_id, position_ms } => Some(GuardSignal::Loading {
+            uri: track_id.to_uri(),
+            request_id: *play_request_id,
+            position_ms: *position_ms,
+        }),
+        PlayerEvent::AudioKeyUnavailable { track_id, play_request_id, start_playback } => {
+            Some(GuardSignal::Refused {
+                uri: track_id.to_uri(),
+                request_id: *play_request_id,
+                start_playback: *start_playback,
+            })
+        }
+        PlayerEvent::Playing { .. } | PlayerEvent::Paused { .. } => Some(GuardSignal::Loaded),
+        PlayerEvent::Stopped { .. } => Some(GuardSignal::Stopped),
+        _ => None,
+    }
+}
+
+/// The state of the key guard for the Kotlin side.
+fn key_fields(guard: &KeyGuard, now: std::time::Instant) -> Value {
+    let status = guard.status(now);
+    json!({
+        "phase": status.phase.name(),
+        "count": status.refusals,
+        "total": status.total,
+        "retry_in_s": status.retry_in_s.map_or(-1, |s| s as i64),
+        "track_id": guard.track().map(|t| t.uri.clone()),
+        "position_ms": guard.track().map(|t| t.position_ms),
+    })
+}
+
+/// Does what the guard decided: pauses Spirc, loads the track again, tells Kotlin.
+fn run_actions(
+    actions: Vec<Action>,
+    spirc: &Option<Spirc>,
+    player: &Player,
+    events: &EventQueue,
+    guard: &KeyGuard,
+    now: std::time::Instant,
+) {
+    for action in actions {
+        match action {
+            Action::Pause => {
+                // The phone then shows a paused device instead of a loading one.
+                if let Some(s) = spirc {
+                    if let Err(e) = s.pause() {
+                        warn!("cannot pause Spirc after a refused audio key: {e}");
+                    }
+                }
+                let fields = key_fields(guard, now);
+                info!("Spotify refused the audio key: {fields}");
+                events.push("key_refused", fields);
+            }
+            Action::Retry { position_ms } => {
+                info!("loading the track again after a refused audio key, at {position_ms} ms");
+                // Spirc must be playing again (the player's loading state takes its start-or-not from
+                // it), and seeking a player that is still loading restarts the load of the same track.
+                if let Some(s) = spirc {
+                    if let Err(e) = s.play() {
+                        warn!("cannot resume Spirc for the retry: {e}");
+                    }
+                }
+                player.seek(position_ms);
+                let mut fields = key_fields(guard, now);
+                fields["position_ms"] = json!(position_ms);
+                events.push("key_retry", fields);
+            }
+            Action::GiveUp => {
+                warn!("Spotify keeps refusing the audio key, giving up until the user presses play");
+                events.push("key_gave_up", key_fields(guard, now));
+            }
+        }
+    }
 }
 
 struct Backoff {
@@ -210,6 +302,15 @@ pub async fn run(
         .ring
         .set_event_source(Box::new(PlayerEvents::new(player.get_player_event_channel())));
 
+    // The key guard hears of the player's events, of what the user does (the commands of the Spotify
+    // app) and of what Spotify answers to key requests, and acts in the loop below.
+    let (guard_tx, mut guard_rx) = mpsc::unbounded_channel::<GuardSignal>();
+    let (user_tx, mut user_rx) = mpsc::unbounded_channel::<String>();
+    let (key_tx, mut key_rx) = mpsc::unbounded_channel::<KeyOutcome>();
+    user_commands::set_sink(Some(user_tx));
+    audio_key::set_observer(Some(key_tx));
+    let mut guard = KeyGuard::new();
+
     // Every PlayerEvent also becomes one JSON event.
     let forward_events = events.clone();
     let mut player_rx = player.get_player_event_channel();
@@ -217,6 +318,9 @@ pub async fn run(
         while let Some(ev) = player_rx.recv().await {
             let (t, fields) = describe_event(&ev);
             forward_events.push(t, fields);
+            if let Some(signal) = guard_signal(&ev) {
+                let _ = guard_tx.send(signal);
+            }
         }
     });
 
@@ -244,6 +348,7 @@ pub async fn run(
     let mut ticker = interval(Duration::from_secs(2));
 
     let exit: Result<(), String> = loop {
+        let guard_deadline = guard.deadline().map(Instant::from_std);
         tokio::select! {
             biased;
 
@@ -255,6 +360,59 @@ pub async fn run(
                 if player.is_invalid() {
                     break Err("the player thread ended".to_string());
                 }
+            }
+
+            Some(signal) = guard_rx.recv() => {
+                let now = std::time::Instant::now();
+                match signal {
+                    GuardSignal::Loading { uri, request_id, position_ms } => {
+                        let before = guard.phase();
+                        guard.on_loading(now, &uri, request_id, position_ms);
+                        if before != Phase::Ok && guard.phase() == Phase::Ok {
+                            events.push("key_reset", key_fields(&guard, now));
+                        }
+                    }
+                    GuardSignal::Refused { uri, request_id, start_playback } => {
+                        let actions = guard.on_refused(now, &uri, request_id, start_playback);
+                        run_actions(actions, &spirc, &player, &events, &guard, now);
+                    }
+                    GuardSignal::Loaded => {
+                        if let Some(refusals) = guard.on_success() {
+                            info!("the audio key was granted again after {refusals} refusals");
+                            events.push("key_recovered", json!({ "refusals": refusals, "total": guard.status(now).total }));
+                        }
+                    }
+                    GuardSignal::Stopped => {
+                        if guard.phase() != Phase::Ok {
+                            guard.on_stopped();
+                            events.push("key_reset", key_fields(&guard, now));
+                        }
+                    }
+                }
+            }
+
+            Some(name) = user_rx.recv() => {
+                let now = std::time::Instant::now();
+                let before = guard.phase();
+                guard.on_user(now, UserCommand::from_name(&name));
+                if before != Phase::Ok {
+                    info!("command '{name}' while the audio key is refused");
+                    let mut fields = key_fields(&guard, now);
+                    fields["command"] = json!(name);
+                    events.push("key_user", fields);
+                }
+            }
+
+            Some(outcome) = key_rx.recv() => {
+                if outcome != KeyOutcome::Granted {
+                    events.push("audio_key", json!({ "outcome": format!("{outcome:?}") }));
+                }
+            }
+
+            _ = sleep_opt(guard_deadline) => {
+                let now = std::time::Instant::now();
+                let actions = guard.poll(now);
+                run_actions(actions, &spirc, &player, &events, &guard, now);
             }
 
             creds = next_credentials(&mut discovery) => {
@@ -292,6 +450,10 @@ pub async fn run(
                 warn!("Spirc ended, the session was lost");
                 spirc_task = None;
                 spirc = None;
+                if guard.phase() != Phase::Ok {
+                    guard.reset();
+                    events.push("key_reset", key_fields(&guard, std::time::Instant::now()));
+                }
                 events.push("session_lost", json!({}));
                 if !session.is_invalid() {
                     session.shutdown();
@@ -439,6 +601,8 @@ pub async fn run(
     };
 
     // Shutdown. The ring goes first: it releases a player thread that waits for room in it.
+    user_commands::set_sink(None);
+    audio_key::set_observer(None);
     shared.ring.close();
     teardown(&mut spirc, &mut spirc_task, &session).await;
     if let Some(d) = discovery.take() {
@@ -540,6 +704,14 @@ fn describe_event(ev: &PlayerEvent) -> (&'static str, Value) {
         Unavailable { play_request_id, track_id } => (
             "unavailable",
             json!({ "play_request_id": play_request_id, "track_id": track_id.to_uri() }),
+        ),
+        AudioKeyUnavailable { play_request_id, track_id, start_playback } => (
+            "audio_key_unavailable",
+            json!({
+                "play_request_id": play_request_id,
+                "track_id": track_id.to_uri(),
+                "start_playback": start_playback,
+            }),
         ),
         VolumeChanged { volume } => (
             "volume_changed",
@@ -671,6 +843,73 @@ mod tests {
         assert_eq!(v["percent"], 50);
         assert_eq!(describe_event(&PlayerEvent::VolumeChanged { volume: 0 }).1["percent"], 0);
         assert_eq!(describe_event(&PlayerEvent::VolumeChanged { volume: 65535 }).1["percent"], 100);
+    }
+
+    #[test]
+    fn the_key_guard_hears_of_loads_refusals_and_plays() {
+        let track_id = SpotifyUri::from_uri(TRACK).unwrap();
+        assert_eq!(
+            guard_signal(&PlayerEvent::Loading {
+                play_request_id: 3,
+                track_id: track_id.clone(),
+                position_ms: 1200
+            }),
+            Some(GuardSignal::Loading { uri: TRACK.to_string(), request_id: 3, position_ms: 1200 })
+        );
+        assert_eq!(
+            guard_signal(&PlayerEvent::AudioKeyUnavailable {
+                play_request_id: 3,
+                track_id: track_id.clone(),
+                start_playback: true
+            }),
+            Some(GuardSignal::Refused { uri: TRACK.to_string(), request_id: 3, start_playback: true })
+        );
+        assert_eq!(
+            guard_signal(&PlayerEvent::Playing { play_request_id: 3, track_id: track_id.clone(), position_ms: 0 }),
+            Some(GuardSignal::Loaded)
+        );
+        assert_eq!(
+            guard_signal(&PlayerEvent::Stopped { play_request_id: 3, track_id: track_id.clone() }),
+            Some(GuardSignal::Stopped)
+        );
+        // a plain "unavailable" (region, removed track) is not a key problem: Spirc skips it as always
+        assert_eq!(
+            guard_signal(&PlayerEvent::Unavailable { play_request_id: 3, track_id }),
+            None
+        );
+        assert_eq!(guard_signal(&PlayerEvent::VolumeChanged { volume: 1 }), None);
+    }
+
+    #[test]
+    fn a_refused_key_is_reported_with_its_track_and_whether_it_should_play() {
+        let track_id = SpotifyUri::from_uri(TRACK).unwrap();
+        let (t, v) = describe_event(&PlayerEvent::AudioKeyUnavailable {
+            play_request_id: 5,
+            track_id,
+            start_playback: false,
+        });
+        assert_eq!(t, "audio_key_unavailable");
+        assert_eq!(v["track_id"], TRACK);
+        assert_eq!(v["play_request_id"], 5);
+        assert_eq!(v["start_playback"], false);
+    }
+
+    #[test]
+    fn the_guard_fields_for_kotlin_name_the_phase_and_the_countdown() {
+        let t0 = std::time::Instant::now();
+        let mut guard = KeyGuard::new();
+        guard.on_loading(t0, TRACK, 4, 2500);
+        guard.on_refused(t0, TRACK, 4, true);
+        let v = key_fields(&guard, t0);
+        assert_eq!(v["phase"], "waiting");
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["total"], 1);
+        assert_eq!(v["retry_in_s"], 3);
+        assert_eq!(v["track_id"], TRACK);
+        assert_eq!(v["position_ms"], 2500);
+        let idle = key_fields(&KeyGuard::new(), t0);
+        assert_eq!(idle["phase"], "ok");
+        assert_eq!(idle["retry_in_s"], -1);
     }
 
     #[test]

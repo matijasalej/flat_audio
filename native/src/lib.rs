@@ -16,8 +16,10 @@
 mod calib;
 mod engine;
 mod events;
+mod keyguard;
 mod mixer;
 mod ring;
+mod source;
 
 use std::cell::RefCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -416,6 +418,65 @@ pub extern "system" fn Java_io_github_matijasalej_wholeflat_NativeBridge_kRead(
         fill_meta(&env, &meta, &ring.snapshot(), 0);
     }
     code
+}
+
+/// A source on the Kotlin side (see `source.rs` and `source/AudioSource.kt`): playback begins or resumes.
+#[no_mangle]
+pub extern "system" fn Java_io_github_matijasalej_wholeflat_NativeBridge_sourceStart(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    if let Some(ring) = ring_of_engine() {
+        source::RingInput::new(ring).start();
+    }
+}
+
+/// A source on the Kotlin side: playback pauses.
+#[no_mangle]
+pub extern "system" fn Java_io_github_matijasalej_wholeflat_NativeBridge_sourcePause(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    if let Some(ring) = ring_of_engine() {
+        source::RingInput::new(ring).pause();
+    }
+}
+
+/// A source on the Kotlin side: the audio jumps (a seek or a skip).
+#[no_mangle]
+pub extern "system" fn Java_io_github_matijasalej_wholeflat_NativeBridge_sourceFlush(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    if let Some(ring) = ring_of_engine() {
+        source::RingInput::new(ring).flush();
+    }
+}
+
+/// A source on the Kotlin side writes `frames` stereo frames of `sampleRate` Hz from `buf`. Returns
+/// `frames`, -1 if the engine is closed or not running, -2 if the ring does not take that sample rate.
+#[no_mangle]
+pub extern "system" fn Java_io_github_matijasalej_wholeflat_NativeBridge_sourceWrite(
+    env: JNIEnv,
+    _class: JClass,
+    buf: JShortArray,
+    frames: jint,
+    sample_rate: jint,
+) -> jint {
+    let Some(ring) = ring_of_engine() else {
+        return -1;
+    };
+    let capacity = env.get_array_length(&buf).unwrap_or(0) as usize / CHANNELS;
+    let n = (frames.max(0) as usize).min(capacity);
+    let mut pcm = vec![0i16; n * CHANNELS];
+    if env.get_short_array_region(&buf, 0, &mut pcm).is_err() {
+        return -1;
+    }
+    match source::RingInput::new(ring).write(&pcm, sample_rate.max(0) as u32) {
+        Ok(()) => n as jint,
+        Err(source::SourceError::UnsupportedRate(_)) => -2,
+        Err(source::SourceError::Closed) => -1,
+    }
 }
 
 /// Starts the calibration click track (`seconds` of it) as a start event through the ring.

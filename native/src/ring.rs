@@ -455,6 +455,19 @@ impl FrameRing {
         true
     }
 
+    /// A source other than librespot reports that its audio jumped (a seek, a skip): everything that has
+    /// not been played yet is void, and the next frame written opens a new epoch (a start event).
+    /// librespot's player events lead to the same.
+    pub fn request_flush(&self) {
+        let mut g = self.lock();
+        g.drain_events();
+        g.flush_requested = true;
+        g.last_end_of_track = false;
+        g.apply_flush_if_playing();
+        drop(g);
+        self.cv.notify_all();
+    }
+
     // ---- the calibration source ------------------------------------------------------------------
 
     /// The calibration source takes over: a synthetic epoch, pending frames dropped.

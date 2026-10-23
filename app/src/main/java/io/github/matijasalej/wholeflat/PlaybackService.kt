@@ -26,11 +26,13 @@ import android.widget.Toast
 import io.github.matijasalej.wholeflat.capture.CaptureFeed
 import io.github.matijasalej.wholeflat.capture.CaptureListener
 import io.github.matijasalej.wholeflat.capture.CaptureSource
+import io.github.matijasalej.wholeflat.capture.MediaWatch
 import io.github.matijasalej.wholeflat.capture.SourceArbiter
 import io.github.matijasalej.wholeflat.source.NativeRingControl
 import io.github.matijasalej.wholeflat.source.SourceBridge
 import io.github.matijasalej.wholeflat.source.SourceStatus
 import io.github.matijasalej.wholeflat.source.TrackInfo
+import io.github.matijasalej.wholeflat.sync.LyricsRepository
 import io.github.matijasalej.wholeflat.sync.VolumeCurve
 import org.json.JSONObject
 import java.io.File
@@ -119,8 +121,23 @@ class PlaybackService : Service() {
         tvRenderer.captureAlive = { captureSource.state == "running" }
         tvRenderer.sonosTargetMs = { kitchen.lyricsTargetMs() }
         tvRenderer.track = {
-            TvRenderer.Track(AppState.captureTitle?.takeIf { it.isNotBlank() } ?: DEVICE_NAME, AppState.captureArtist, null, null)
+            val n = MediaWatch.nowPlaying
+            TvRenderer.Track(
+                n?.title?.takeIf { it.isNotBlank() } ?: AppState.captureTitle?.takeIf { it.isNotBlank() } ?: DEVICE_NAME,
+                n?.artist ?: AppState.captureArtist, n?.album, n?.artUri,
+            )
         }
+        val lyricsRepository = LyricsRepository(
+            HttpLyricsFetcher("WholeFlatAudio/${BuildInfo.versionName} (https://github.com/matijasalej/flat_audio)"),
+            log = { AppLog.add("lyrics", it) },
+        )
+        val coverCache = CoverCache()
+        AppState.lyrics = lyricsRepository
+        AppState.covers = coverCache
+        tvRenderer.scenes = LyricsScenes(
+            { AppState.nowPlaying() }, { MediaWatch.art }, coverCache, lyricsRepository, { Settings.values.lyricsOffsetMs },
+            { Pair(AppState.captureTitle?.takeIf { it.isNotBlank() } ?: DEVICE_NAME, AppState.captureArtist) },
+        )
         synced = SyncedController(this, kitchen, tvRenderer, tv)
         kitchen.onSource = { source ->
             // the Sonos follows the box's music volume while the capture is the source

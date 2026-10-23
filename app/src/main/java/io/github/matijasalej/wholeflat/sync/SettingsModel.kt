@@ -57,6 +57,8 @@ class SettingsValues(
     val tvReanchorMin: Int,
     /** How the lyrics picture is put on the video encoder: "auto" (hardware canvas, else software canvas, else OpenGL), "hw", "sw" or "gl". */
     val tvRender: String,
+    /** Moves the lyrics earlier (positive) or later (negative) against the sound, for what the media session's clock does not tell (ms). */
+    val lyricsOffsetMs: Int,
     /** Lyrics on the TV in Synced mode (the screen on, the Ambilight on); off, the TV's screen is off and only the sound plays. */
     val karaoke: Boolean,
     /** The Ambilight of the TV follows the audio in Synced mode and is put back afterwards. */
@@ -91,6 +93,7 @@ class SettingsModel {
     var tvPcrLeadMs = DEFAULT_TV_PCR_LEAD_MS
     var tvReanchorMin = 0
     var tvRender = TV_RENDER_AUTO
+    var lyricsOffsetMs = 0
     var karaoke = false
     var ambilightSynced = true
     var ambilightStyle = DEFAULT_AMBILIGHT_STYLE
@@ -100,7 +103,7 @@ class SettingsModel {
     fun values(): SettingsValues = SettingsValues(
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
-        captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPcrLeadMs, tvReanchorMin, tvRender, karaoke,
+        captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPcrLeadMs, tvReanchorMin, tvRender, lyricsOffsetMs, karaoke,
         ambilightSynced, ambilightStyle, ambilightMenu,
     )
 
@@ -130,6 +133,7 @@ class SettingsModel {
         o.put(TV_PCR_LEAD_MS, tvPcrLeadMs)
         o.put(TV_REANCHOR_MIN, tvReanchorMin)
         o.put(TV_RENDER, tvRender)
+        o.put(LYRICS_OFFSET_MS, lyricsOffsetMs)
         o.put(KARAOKE, karaoke)
         o.put(AMBILIGHT_SYNCED, ambilightSynced)
         o.put(AMBILIGHT_STYLE, ambilightStyle)
@@ -247,6 +251,10 @@ class SettingsModel {
             val t = json.get(TV_RENDER).toString().trim().lowercase()
             if (t in TV_RENDERS && t != tvRender) { tvRender = t; changed.add(TV_RENDER) }
         }
+        if (json.has(LYRICS_OFFSET_MS)) {
+            val v = number(json.get(LYRICS_OFFSET_MS))?.coerceIn(-MAX_LYRICS_OFFSET_MS, MAX_LYRICS_OFFSET_MS)
+            if (v != null && v != lyricsOffsetMs) { lyricsOffsetMs = v; changed.add(LYRICS_OFFSET_MS) }
+        }
         if (json.has(KARAOKE)) {
             val v = bool(json.get(KARAOKE))
             if (v != null && v != karaoke) { karaoke = v; changed.add(KARAOKE) }
@@ -311,6 +319,7 @@ class SettingsModel {
         const val TV_PCR_LEAD_MS = "tv_pcr_lead_ms"
         const val TV_REANCHOR_MIN = "tv_reanchor_min"
         const val TV_RENDER = "tv_render"
+        const val LYRICS_OFFSET_MS = "lyrics_offset_ms"
         const val KARAOKE = "karaoke"
         const val AMBILIGHT_SYNCED = "ambilight_synced"
         const val AMBILIGHT_STYLE = "ambilight_style"
@@ -368,6 +377,7 @@ class SettingsModel {
         const val MIN_TV_PCR_LEAD_MS = 100
         const val MAX_TV_PCR_LEAD_MS = 3_000
         const val MAX_TV_REANCHOR_MIN = 24 * 60
+        const val MAX_LYRICS_OFFSET_MS = 3_000
 
         /** The ways the lyrics picture can be put on the encoder (see `LyricsRenderer`). */
         const val TV_RENDER_AUTO = "auto"

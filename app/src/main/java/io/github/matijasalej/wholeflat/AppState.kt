@@ -3,7 +3,10 @@ package io.github.matijasalej.wholeflat
 import android.os.SystemClock
 import android.util.Log
 import io.github.matijasalej.wholeflat.capture.CaptureSource
+import io.github.matijasalej.wholeflat.capture.MediaWatch
 import io.github.matijasalej.wholeflat.sync.KeyMessage
+import io.github.matijasalej.wholeflat.sync.LyricsRepository
+import io.github.matijasalej.wholeflat.sync.NowPlaying
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
@@ -90,6 +93,23 @@ object AppState {
     @Volatile var capture: CaptureSource? = null
     @Volatile var tvRenderer: TvRenderer? = null
     @Volatile var synced: SyncedController? = null
+
+    /** The lyrics of the track that plays, and its cover: the lyrics picture of the TV and the phone page read them. */
+    @Volatile var lyrics: LyricsRepository? = null
+    @Volatile var covers: CoverCache? = null
+
+    /**
+     * The track that plays now with its position: Whole Flat's own Spotify Connect playback when that is the source, else what the media
+     * session of the captured player says. Null while there is none.
+     */
+    fun nowPlaying(): NowPlaying? {
+        if (source == "librespot") {
+            val t = title ?: return null
+            val at = if (positionAt > 0L) NowPlaying.toNanoTime(positionAt, SystemClock.elapsedRealtime(), System.nanoTime()) else System.nanoTime()
+            return NowPlaying("librespot", playback == "playing", t, artist, null, durationMs, trackUri, null, positionMs, at, 1.0)
+        }
+        return MediaWatch.nowPlaying
+    }
 
     /**
      * ok, key_refused (Spotify refuses the audio key of this account: the engine holds the track and tries

@@ -2,13 +2,16 @@ package io.github.matijasalej.wholeflat.capture
 
 import android.content.ComponentName
 import android.content.Context
+import android.graphics.Bitmap
 import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import io.github.matijasalej.wholeflat.AppLog
+import io.github.matijasalej.wholeflat.sync.NowPlaying
 import org.json.JSONObject
 
 /**
@@ -23,7 +26,19 @@ import org.json.JSONObject
 object MediaWatch {
     private const val TAG = "media"
 
-    class Info(val playing: Boolean, val packageName: String, val title: String?, val artist: String?)
+    /**
+     * What the watched sessions say now: playing or not, the package and the title and artist of the session that plays (or the first), and
+     * everything else of that track in [now] (album, length, media id, cover address, position) with the cover itself in [art] when the
+     * session gives it as a picture.
+     */
+    class Info(
+        val playing: Boolean,
+        val packageName: String,
+        val title: String?,
+        val artist: String?,
+        val now: NowPlaying? = null,
+        val art: Bitmap? = null,
+    )
 
     @Volatile
     var listener: ((Info) -> Unit)? = null
@@ -36,6 +51,12 @@ object MediaWatch {
     @Volatile
     var lastInfo: Info? = null
         private set
+
+    /** The track that plays (or played last) with its position, null while no session has a title. */
+    val nowPlaying: NowPlaying? get() = lastInfo?.now?.takeIf { it.hasTrack }
+
+    /** The cover of that track as the session's own picture, if it has one. */
+    val art: Bitmap? get() = lastInfo?.art
 
     private val handler = Handler(Looper.getMainLooper())
     private val watched = HashMap<String, Pair<MediaController, MediaController.Callback>>()
@@ -135,6 +156,8 @@ object MediaWatch {
         var pkg = ""
         var title: String? = null
         var artist: String? = null
+        var now: NowPlaying? = null
+        var art: Bitmap? = null
         for ((name, pair) in watched) {
             val c = pair.first
             val state = try {
@@ -153,12 +176,58 @@ object MediaWatch {
                 pkg = name
                 title = meta?.getString(MediaMetadata.METADATA_KEY_TITLE)
                 artist = meta?.getString(MediaMetadata.METADATA_KEY_ARTIST)
+                now = nowPlayingOf(name, c, meta, isPlaying)
+                art = artOf(meta)
             }
             if (isPlaying) playing = true
         }
-        val info = Info(playing, pkg, title, artist)
+        val info = Info(playing, pkg, title, artist, now, art)
         lastInfo = info
         listener?.invoke(info)
+    }
+
+    /** The track of a session as [NowPlaying]: the position is brought from the session's clock (elapsed realtime) to nanoTime with one reading of both. */
+    private fun nowPlayingOf(pkg: String, c: MediaController, meta: MediaMetadata?, playing: Boolean): NowPlaying? {
+        val state = try {
+            c.playbackState
+        } catch (e: Exception) {
+            null
+        }
+        val elapsedNow = SystemClock.elapsedRealtime()
+        val nanoNow = System.nanoTime()
+        val position = state?.position ?: PlaybackState.PLAYBACK_POSITION_UNKNOWN
+        val at = if (state != null) NowPlaying.toNanoTime(state.lastPositionUpdateTime, elapsedNow, nanoNow) else nanoNow
+        val speed = state?.playbackSpeed?.toDouble()?.takeIf { it > 0.0 } ?: 1.0
+        val duration = meta?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
+        val art = firstHttp(
+            meta?.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI),
+            meta?.getString(MediaMetadata.METADATA_KEY_ART_URI),
+            meta?.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI),
+        )
+        return NowPlaying(
+            pkg,
+            // buffering is not moving the position either; only a session that plays carries it on
+            playing && state?.state == PlaybackState.STATE_PLAYING,
+            meta?.getString(MediaMetadata.METADATA_KEY_TITLE),
+            meta?.getString(MediaMetadata.METADATA_KEY_ARTIST),
+            meta?.getString(MediaMetadata.METADATA_KEY_ALBUM),
+            duration,
+            meta?.getString(MediaMetadata.METADATA_KEY_MEDIA_ID),
+            art,
+            if (position == PlaybackState.PLAYBACK_POSITION_UNKNOWN) -1L else position,
+            at,
+            speed,
+        )
+    }
+
+    private fun firstHttp(vararg uris: String?): String? = uris.firstOrNull { it != null && (it.startsWith("http://") || it.startsWith("https://")) }
+
+    private fun artOf(meta: MediaMetadata?): Bitmap? = try {
+        meta?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+            ?: meta?.getBitmap(MediaMetadata.METADATA_KEY_ART)
+            ?: meta?.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+    } catch (e: Exception) {
+        null
     }
 
     fun statusJson(): JSONObject {
@@ -170,6 +239,17 @@ object MediaWatch {
             o.put("package", i.packageName)
             o.put("title", i.title ?: JSONObject.NULL)
             o.put("artist", i.artist ?: JSONObject.NULL)
+            val n = i.now
+            if (n != null) {
+                o.put("album", n.album ?: JSONObject.NULL)
+                o.put("duration_ms", n.durationMs)
+                o.put("media_id", n.mediaId ?: JSONObject.NULL)
+                o.put("art_uri", n.artUri ?: JSONObject.NULL)
+                o.put("art_bitmap", i.art != null)
+                o.put("position_ms", n.positionMs)
+                o.put("position_now_ms", n.positionAt(System.nanoTime()))
+                o.put("speed", n.speed)
+            }
         }
         return o
     }

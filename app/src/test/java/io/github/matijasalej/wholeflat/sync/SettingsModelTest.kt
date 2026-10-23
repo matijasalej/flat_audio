@@ -34,6 +34,7 @@ class SettingsModelTest {
         assertEquals(700, o.getInt("tv_pcr_lead_ms"))
         assertEquals(0, o.getInt("tv_reanchor_min"))
         assertEquals("auto", o.getString("tv_render"))
+        assertEquals(0, o.getInt("lyrics_offset_ms"))
         assertEquals(false, o.getBoolean("karaoke"))
         assertEquals(true, o.getBoolean("ambilight_synced"))
         assertEquals("FOLLOW_AUDIO", o.getString("ambilight_style"))
@@ -49,7 +50,7 @@ class SettingsModelTest {
                 "tv_screen_off", "tv_wake", "tv_ip",
                 "capture_enabled", "capture_living_latency_ms", "capture_lead_ms", "kitchen_target_ms", "kitchen_floor_ms",
                 "kitchen_volume", "capture_volume_mirror", "kitchen_format", "kitchen_flac_block",
-                "mode", "tv_latency_ms", "tv_format", "tv_burst_ms", "tv_extra_ms", "tv_pcr_lead_ms", "tv_reanchor_min", "tv_render", "karaoke",
+                "mode", "tv_latency_ms", "tv_format", "tv_burst_ms", "tv_extra_ms", "tv_pcr_lead_ms", "tv_reanchor_min", "tv_render", "lyrics_offset_ms", "karaoke",
                 "ambilight_synced", "ambilight_style", "ambilight_menu",
             ),
             keys,
@@ -200,6 +201,17 @@ class SettingsModelTest {
         assertEquals("gl", m.values().tvRender)
         assertTrue(m.applyJson(JSONObject("""{"tv_render": "vulkan"}""")).isEmpty())
         assertEquals("gl", m.tvRender)
+    }
+
+    @Test
+    fun theLyricsOffsetIsLimitedToThreeSeconds() {
+        val m = SettingsModel()
+        assertEquals(setOf("lyrics_offset_ms"), m.applyJson(JSONObject("""{"lyrics_offset_ms": -250}""")))
+        assertEquals(-250, m.values().lyricsOffsetMs)
+        m.applyJson(JSONObject("""{"lyrics_offset_ms": 99999}"""))
+        assertEquals(SettingsModel.MAX_LYRICS_OFFSET_MS, m.lyricsOffsetMs)
+        m.applyJson(JSONObject("""{"lyrics_offset_ms": -99999}"""))
+        assertEquals(-SettingsModel.MAX_LYRICS_OFFSET_MS, m.lyricsOffsetMs)
     }
 
     @Test

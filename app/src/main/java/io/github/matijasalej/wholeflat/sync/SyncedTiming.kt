@@ -31,12 +31,21 @@ object SyncedTiming {
     const val AUTO_L16_LATENCY_MS = 300
 
     /**
-     * The video stream (MPEG-TS, constant rate): the TV plays what it is given at the pace it is given it, starting at the key picture
-     * its connection began at, so its latency from our write to its sound is **the age of that key picture when the connection was made
-     * (the backlog) plus about 0.49 s**. In the device tests, three runs gave the same extra, to 10 ms: a backlog of 1.60 s gave 2.10 s,
-     * one of 2.17 s gave 2.66 s. The backlog of the connection that stays open is what counts (see `KitchenSession.liveBacklogMs`).
+     * The video stream (MPEG-TS, constant rate): the TV plays what it is given at the pace it is given it, starting at the key picture its
+     * connection began at, so its latency from our write to its sound is **the age of that key picture when the connection was made (the
+     * backlog) plus about 0.63 s**: 1.60 s of backlog gave 2.23 s of latency in the click check of 23 Oct against the doorway recording
+     * (the 0.49 s of the first tests had the start of the recording folded into it). A backlog that is smaller than the TV's preroll does not
+     * make the latency smaller: see [AUTO_TS_PREROLL_MS]. The backlog of the connection that stays open is what counts (see
+     * `KitchenSession.liveBacklogMs`).
      */
-    const val AUTO_TS_EXTRA_MS = 490
+    const val AUTO_TS_EXTRA_MS = 631
+
+    /**
+     * The least backlog (ms) that the TV's latency is counted from: a TV that is given a connection with less than this to start from
+     * (a backlog of 0.79 s) played as if it had about 1.05 s, which is what it needs to begin (its latency was 1.68 s there, 2.23 s at 1.60 s).
+     * From two points only; the stream waits for a backlog of the burst (1.5 s) before Play, so the connection of the TV is normally above it.
+     */
+    const val AUTO_TS_PREROLL_MS = 1_050
 
     /** What is counted as the backlog before the TV has made a connection: the lead of its start and the spacing of the key pictures of the warm-up. */
     const val WARMUP_KEY_SPACING_MS = 100
@@ -50,7 +59,7 @@ object SyncedTiming {
 
     /**
      * X for [format] ("ts" or "l16") from the setting [settingMs] (-1: auto): the video stream's is the [backlogMs] of the connection the
-     * TV plays (NaN before it has one: the [burstMs] of the start and a little more) plus [extraMs]; a setting that is not negative
+     * TV plays (NaN before it has one: the [burstMs] of the start and a little more; not less than the [prerollMs] of the TV) plus [extraMs]; a setting that is not negative
      * is the latency itself.
      */
     fun tvLatencyMs(
@@ -59,11 +68,12 @@ object SyncedTiming {
         backlogMs: Double = Double.NaN,
         burstMs: Int = 1_500,
         extraMs: Int = AUTO_TS_EXTRA_MS,
+        prerollMs: Int = AUTO_TS_PREROLL_MS,
     ): Int {
         if (settingMs >= 0) return settingMs
         if (format != "ts") return AUTO_L16_LATENCY_MS
         val backlog = if (backlogMs.isNaN()) (burstMs + WARMUP_KEY_SPACING_MS).toDouble() else backlogMs
-        return Math.round(backlog + extraMs).toInt()
+        return Math.round(maxOf(backlog, prerollMs.toDouble()) + extraMs).toInt()
     }
 
     /** D, the delay of both rooms after the capture (ms). [pipelineMs] NaN: the default is used. */

@@ -22,18 +22,30 @@ class SyncedTimingTest {
     }
 
     @Test
-    fun theLatencyOfTheVideoStreamIsTheBacklogOfTheConnectionPlusHalfASecond() {
-        // the device tests: a backlog of 1.60 s gave 2.10 s, one of 2.17 s gave 2.66 s (the same extra, to 10 ms)
-        assertEquals(2_090, SyncedTiming.tvLatencyMs(-1, "ts", backlogMs = 1_600.0))
-        assertEquals(2_660, SyncedTiming.tvLatencyMs(-1, "ts", backlogMs = 2_170.0))
+    fun theLatencyOfTheVideoStreamIsTheBacklogOfTheConnectionPlus631Ms() {
+        // the click check of 23 Oct against the doorway recording: a backlog of 1.595 s and a latency of 2.226 s
+        assertEquals(2_231, SyncedTiming.tvLatencyMs(-1, "ts", backlogMs = 1_600.0))
+        assertEquals(2_226, SyncedTiming.tvLatencyMs(-1, "ts", backlogMs = 1_595.3))
+        assertEquals(2_801, SyncedTiming.tvLatencyMs(-1, "ts", backlogMs = 2_170.0))
         // the extra is a setting
         assertEquals(2_110, SyncedTiming.tvLatencyMs(-1, "ts", backlogMs = 1_600.0, extraMs = 510))
         assertEquals(1_580, SyncedTiming.tvLatencyMs(-1, "ts", backlogMs = 1_600.0, extraMs = -20))
         // before the TV has a connection: the lead of the start and the spacing of the warm-up's key pictures
-        assertEquals(2_090, SyncedTiming.tvLatencyMs(-1, "ts"))
-        assertEquals(1_090, SyncedTiming.tvLatencyMs(-1, "ts", burstMs = 500))
+        assertEquals(2_231, SyncedTiming.tvLatencyMs(-1, "ts"))
         // a latency that is set is the latency, whatever the backlog
         assertEquals(1_800, SyncedTiming.tvLatencyMs(1_800, "ts", backlogMs = 2_170.0))
+    }
+
+    @Test
+    fun aBacklogBelowThePrerollOfTheTvPlaysAsIfItWereThePreroll() {
+        // 0.79 s of backlog gave a latency of 1.68 s (the extra needed was 0.89 s there): the TV needs about 1.05 s to begin
+        assertEquals(1_681, SyncedTiming.tvLatencyMs(-1, "ts", backlogMs = 787.5))
+        assertEquals(1_681, SyncedTiming.tvLatencyMs(-1, "ts", burstMs = 500))
+        // the preroll is a setting; 0 takes the backlog as it is
+        assertEquals(1_419, SyncedTiming.tvLatencyMs(-1, "ts", backlogMs = 787.5, prerollMs = 0))
+        assertEquals(1_900, SyncedTiming.tvLatencyMs(-1, "ts", backlogMs = 787.5, prerollMs = 1_269))
+        // at or above the preroll it makes no difference
+        assertEquals(1_050 + 631, SyncedTiming.tvLatencyMs(-1, "ts", backlogMs = 1_050.0))
     }
 
     @Test

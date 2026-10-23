@@ -47,10 +47,12 @@ class SettingsValues(
     val tvBurstMs: Int,
     /**
      * What the TV adds to the age of the key picture it started at (the backlog) between our write and its sound (ms): its latency is the
-     * backlog plus this, 490 ms in the device tests (the same on each of three runs, to 10 ms). The common delay of the two rooms is the
-     * hold of the stream plus that latency.
+     * backlog plus this, 631 ms in the click check against the doorway recording (the 490 ms of the first tests had the start of the recording
+     * folded into it). The common delay of the two rooms is the hold of the stream plus that latency.
      */
     val tvExtraMs: Int,
+    /** The least backlog the TV's latency is counted from (ms): a connection with less than this to start from plays as if it had this much (see [SyncedTiming.AUTO_TS_PREROLL_MS]). */
+    val tvPrerollMs: Int,
     /** How far the PCR of the video stream runs behind the timestamps of what it carries (ms): the lead a player wants; ffmpeg writes 700. */
     val tvPcrLeadMs: Int,
     /** A re-anchor of the TV's stream (a restart with a warm-up) is asked for when the stream is this old (minutes) and a song ends; 0: never. */
@@ -90,6 +92,7 @@ class SettingsModel {
     var tvFormat = TV_FORMAT_TS
     var tvBurstMs = DEFAULT_TV_BURST_MS
     var tvExtraMs = DEFAULT_TV_EXTRA_MS
+    var tvPrerollMs = DEFAULT_TV_PREROLL_MS
     var tvPcrLeadMs = DEFAULT_TV_PCR_LEAD_MS
     var tvReanchorMin = 0
     var tvRender = TV_RENDER_AUTO
@@ -103,7 +106,7 @@ class SettingsModel {
     fun values(): SettingsValues = SettingsValues(
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
-        captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
+        captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPrerollMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
         ambilightStyle, ambilightMenu,
     )
 
@@ -130,6 +133,7 @@ class SettingsModel {
         o.put(TV_FORMAT, tvFormat)
         o.put(TV_BURST_MS, tvBurstMs)
         o.put(TV_EXTRA_MS, tvExtraMs)
+        o.put(TV_PREROLL_MS, tvPrerollMs)
         o.put(TV_PCR_LEAD_MS, tvPcrLeadMs)
         o.put(TV_REANCHOR_MIN, tvReanchorMin)
         o.put(TV_RENDER, tvRender)
@@ -238,6 +242,10 @@ class SettingsModel {
             val v = number(json.get(TV_EXTRA_MS))?.coerceIn(MIN_TV_EXTRA_MS, MAX_TV_EXTRA_MS)
             if (v != null && v != tvExtraMs) { tvExtraMs = v; changed.add(TV_EXTRA_MS) }
         }
+        if (json.has(TV_PREROLL_MS)) {
+            val v = number(json.get(TV_PREROLL_MS))?.coerceIn(0, MAX_TV_PREROLL_MS)
+            if (v != null && v != tvPrerollMs) { tvPrerollMs = v; changed.add(TV_PREROLL_MS) }
+        }
         if (json.has(TV_PCR_LEAD_MS)) {
             val v = number(json.get(TV_PCR_LEAD_MS))?.coerceIn(MIN_TV_PCR_LEAD_MS, MAX_TV_PCR_LEAD_MS)
             if (v != null && v != tvPcrLeadMs) { tvPcrLeadMs = v; changed.add(TV_PCR_LEAD_MS) }
@@ -318,6 +326,7 @@ class SettingsModel {
         const val TV_FORMAT = "tv_format"
         const val TV_BURST_MS = "tv_burst_ms"
         const val TV_EXTRA_MS = "tv_extra_ms"
+        const val TV_PREROLL_MS = "tv_preroll_ms"
         const val TV_PCR_LEAD_MS = "tv_pcr_lead_ms"
         const val TV_REANCHOR_MIN = "tv_reanchor_min"
         const val TV_RENDER = "tv_render"
@@ -366,8 +375,12 @@ class SettingsModel {
         const val DEFAULT_TV_BURST_MS = 1_500
         const val MAX_TV_BURST_MS = 5_000
 
-        /** The TV's latency is the backlog of its connection plus this (ms): 490 in the device tests. */
-        const val DEFAULT_TV_EXTRA_MS = 490
+        /** The TV's latency is the backlog of its connection plus this (ms): 631 against the doorway recording (the first tests said 490, with the start of the recording folded in). */
+        const val DEFAULT_TV_EXTRA_MS = 631
+
+        /** A connection with a backlog below this plays as if it had this much (ms); see [SyncedTiming.AUTO_TS_PREROLL_MS]. */
+        const val DEFAULT_TV_PREROLL_MS = 1_050
+        const val MAX_TV_PREROLL_MS = 3_000
         const val MIN_TV_EXTRA_MS = -1_000
         const val MAX_TV_EXTRA_MS = 3_000
 

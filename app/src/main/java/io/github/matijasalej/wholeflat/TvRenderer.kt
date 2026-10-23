@@ -654,7 +654,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     /** X, the TV's own delay from our write to its sound (ms), for the format in use. */
     fun tvLatencyMs(): Int {
         val v = Settings.values
-        return SyncedTiming.tvLatencyMs(v.tvLatencyMs, activeFormat, session?.liveBacklogMs() ?: Double.NaN, v.tvBurstMs, v.tvExtraMs)
+        return SyncedTiming.tvLatencyMs(v.tvLatencyMs, activeFormat, session?.liveBacklogMs() ?: Double.NaN, v.tvBurstMs, v.tvExtraMs, v.tvPrerollMs)
     }
 
     /**

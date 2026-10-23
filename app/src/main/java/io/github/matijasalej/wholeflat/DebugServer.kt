@@ -37,6 +37,8 @@ import kotlin.concurrent.thread
  *   GET  /kitchen/rejoin        restarts the Sonos stream (only the kitchen)
  *   GET  /kitchen/search        looks for Sonos speakers again
  *   GET  /kitchen/select        ?ip=...: use this speaker
+ *   GET  /kitchen/last-sessions the last 10 sessions: every connection of the Sonos to the stream (method, start and end,
+ *                               bytes, blocks, who closed it and why) and the transport state and status seen meanwhile
  *   GET  /capture               the capture of the Cast receiver: state, grants, level, activity, media session
  *   GET  /capture/start         an attempt now, also without the adb grants (the consent dialog then shows on the TV)
  *   GET  /capture/restart       ends the capture in progress; it starts again by itself
@@ -217,6 +219,7 @@ object DebugServer {
                 AppState.kitchen?.rejoinNow()
                 sendJson(out, 200, JSONObject().put("ok", AppState.kitchen != null), head)
             }
+            "/kitchen/last-sessions" -> sendJson(out, 200, AppState.kitchen?.lastSessionsJson() ?: JSONArray(), head)
             "/kitchen/search" -> {
                 AppState.kitchen?.searchNow()
                 sendJson(out, 200, JSONObject().put("ok", AppState.kitchen != null), head)
@@ -373,7 +376,7 @@ object DebugServer {
         sb.append("<h1>Whole Flat Audio ").append(escapeHtml(BuildInfo.versionName)).append("</h1><table>")
         renderRows(sb, status, 0)
         sb.append("</table><p>")
-        for (link in listOf("/status.json", "/settings", "/kitchen", "/capture", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/capture/restart", "/tv/run")) {
+        for (link in listOf("/status.json", "/settings", "/kitchen", "/kitchen/last-sessions", "/capture", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/capture/restart", "/tv/run")) {
             sb.append("<a href=\"").append(link).append("\">").append(link).append("</a>")
         }
         sb.append("</p><h2 style=\"font-size:15px\">Log (last 120 lines)</h2><pre>")

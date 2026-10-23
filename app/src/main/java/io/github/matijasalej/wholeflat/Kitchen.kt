@@ -8,6 +8,7 @@ import io.github.matijasalej.wholeflat.capture.CaptureLead
 import io.github.matijasalej.wholeflat.capture.CaptureStart
 import io.github.matijasalej.wholeflat.capture.CaptureTracker
 import io.github.matijasalej.wholeflat.capture.SourceArbiter
+import io.github.matijasalej.wholeflat.sync.SessionHistory
 import io.github.matijasalej.wholeflat.sync.SonosPolicy
 import io.github.matijasalej.wholeflat.sync.SonosXml
 import io.github.matijasalej.wholeflat.sync.StartBackoff
@@ -16,6 +17,7 @@ import io.github.matijasalej.wholeflat.sync.StreamBuilder
 import io.github.matijasalej.wholeflat.sync.StreamView
 import io.github.matijasalej.wholeflat.sync.SyncController
 import io.github.matijasalej.wholeflat.sync.VolumeCurve
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
 import java.util.UUID
@@ -157,6 +159,10 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     @Volatile
     private var capturePlannedLagMs = Double.NaN
 
+    /** How far before "now" the current captured stream began at Play (ms): the lead plus the kitchen offset, as far as the buffer allowed. */
+    @Volatile
+    private var captureAheadMs = Double.NaN
+
     @Volatile
     private var captureStarts = 0
 
@@ -207,6 +213,12 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     /** The last `playbackState` and error fields of an answer of the websocket. */
     @Volatile
     private var lastWsError = ""
+
+    /** The last ten sessions with the connections the speaker made to their streams (`/kitchen/last-sessions`). */
+    private val history = SessionHistory(10)
+
+    /** The last speaker state that was put in the log of a session, to note only changes of it. */
+    private var lastNotedWs = ""
 
     /** How soon a start may be tried again after failed ones (see [StartBackoff]). */
     private val backoff = StartBackoff()
@@ -345,8 +357,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             return
         }
         s.uri = "http://$host:${DebugServer.PORT}/k/${s.token}.flac"
-        sessions[s.token] = s
-        session = s
+        registerSession(s)
         state = State.STARTING
         if (!prepare(s, soapFor(dev))) {
             advices[epoch] = StartAdvice.Alone
@@ -458,6 +469,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val api = soapFor(dev)
         val tSent = System.nanoTime()
         s.playSentNanos = tSent
+        s.record?.playSent(tSent)
         s.arm(tSent + lkNanos)
         var result = api.play()
         var attempts = 1
@@ -523,8 +535,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val host = Net.localAddressFor(dev.ip) ?: return false
         val s = KitchenSession(newToken(), meta.epoch, meta.kind, -1L, channelsFor(meta.kind))
         s.uri = "http://$host:${DebugServer.PORT}/k/${s.token}.flac"
-        sessions[s.token] = s
-        session = s
+        registerSession(s)
         currentEpoch = meta.epoch
         state = State.STARTING
         AppLog.add(TAG, "joining the kitchen ($why), session ${s.token}")
@@ -589,6 +600,10 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         lastPositionMs = p.positionMs
         lastWsState = p.state
         lastWsError = p.error
+        if (p.state + "|" + p.error != lastNotedWs) {
+            lastNotedWs = p.state + "|" + p.error
+            noteSpeaker(lastTransport, lastTransportStatus, s.uri, p.state, p.error)
+        }
         if (p.state != "PLAYBACK_STATE_PLAYING" || p.positionMs < 0) {
             notPlayingReadings++
             val sincePlay = System.nanoTime() - s.playSentNanos
@@ -792,8 +807,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
                 newToken(), CAPTURE_EPOCH, KIND_CAPTURE, -1L, StreamBuilder.ChannelMode.STEREO, feed, feed.generation,
             )
             s.uri = "http://$host:${DebugServer.PORT}/k/${s.token}.flac"
-            sessions[s.token] = s
-            session = s
+            registerSession(s)
             state = State.STARTING
             AppLog.add(TAG, "capture: getting the kitchen ready ($why), session ${s.token}")
             if (!prepare(s, soapFor(dev))) return false
@@ -824,6 +838,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         )
         s.startRingFrame = plan.startFrame
         capturePlannedLagMs = plan.plannedLagMs
+        captureAheadMs = plan.aheadFrames * 1000.0 / feed.rate
         captureStarts++
         AppLog.add(
             TAG,
@@ -959,12 +974,37 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
 
     override fun sessionFor(token: String): KitchenSession? = sessions[token]
 
+    /** A session was made: the speaker finds it by its token, it is the current one, and its log begins. */
+    private fun registerSession(s: KitchenSession) {
+        sessions[s.token] = s
+        session = s
+        s.record = history.begin(s.token, if (s.isCapture) "capture" else "ring", System.nanoTime(), System.currentTimeMillis())
+    }
+
+    /** The log of the last sessions, newest first: what the speaker did with each stream and what it showed. */
+    fun lastSessionsJson(): JSONArray = history.toJson(System.nanoTime())
+
+    /** "ours", "foreign:<scheme>" or "" for the track URI of a poll, for the log of a session. */
+    private fun uriKind(uri: String): String = when {
+        uri.isEmpty() -> ""
+        SonosPolicy.isOurUri(uri) -> "ours"
+        else -> "foreign:" + uri.substringBefore(':').take(24)
+    }
+
+    /** Puts the speaker's state in the log of the newest session, while it runs and for a while after. */
+    private fun noteSpeaker(transport: String, status: String, uri: String, ws: String, wsError: String) {
+        val rec = history.latest() ?: return
+        val now = System.nanoTime()
+        if (rec.wantsNotes(now)) rec.noteTransport(now, transport, status, uriKind(uri), ws, wsError)
+    }
+
     /** Ends a session. With [commands], the speaker is muted and stopped (it may still hold seconds of our audio). */
     private fun endSession(s: KitchenSession, why: String, commands: Boolean) {
         if (!s.cancelled) {
             s.cancelled = true
             s.endReason = why
             sessions.remove(s.token)
+            s.record?.ended(System.nanoTime(), why)
             AppLog.add(TAG, "session ${s.token} ended: $why")
         }
         if (session === s) {
@@ -1125,6 +1165,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         pollFailures = 0
         lastTransport = r.transport
         lastTransportStatus = r.status
+        noteSpeaker(r.transport, r.status, r.uri, lastWsState, lastWsError)
         if (!reachable) {
             reachable = true
             AppLog.add(TAG, "the speaker answers (${r.transport})")
@@ -1390,6 +1431,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val lag = if (cs != null) lagCapture.recentMs() else Double.NaN
         // how far behind the captured moment the kitchen sounds; it includes the kitchen offset, which moves it
         o.put("lag_ms", jsonNumber(round1(lag)))
+        // how far ahead of the capture the stream was sent when it began (null for a session that is not a captured one)
+        o.put("lead_ms", jsonNumber(round1(if (cs != null) captureAheadMs else Double.NaN)))
         o.put("lag_target_ms", jsonNumber(round1(if (cs != null) lagCapture.targetMs(offset) else Double.NaN)))
         o.put("lag_locked", cs != null && lagCapture.isLocked)
         // and behind the living room's sound: the same, less the time the living room needs from capture to sound

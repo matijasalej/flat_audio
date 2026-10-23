@@ -122,6 +122,14 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     @Volatile
     private var sonosQuiet = false
 
+    /**
+     * The token of our stream that someone paused on the speaker itself during the session that just ended: the
+     * kitchen leaves the speaker alone while that stream is still paused there. A paused stream of ours from an
+     * earlier session or run is nobody's, and does not count.
+     */
+    @Volatile
+    private var pausedOnSpeakerToken: String? = null
+
     @Volatile
     private var lkNanos = DEFAULT_LK_NANOS
 
@@ -344,9 +352,49 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         timer.schedule(Runnable { sendPlay(s, plan.tCmdNanos) }, maxOf(0L, delayMs - 3L), TimeUnit.MILLISECONDS)
     }
 
+    /**
+     * What the speaker holds right now, asked afresh (the last poll can be seconds old): [Availability.BUSY] for
+     * something that plays, and whether a paused foreign session has to be taken over.
+     */
+    private class Holder(val kind: SonosPolicy.Availability, val takeover: Boolean, val uri: String)
+
+    private fun whoHolds(api: SonosSoap): Holder {
+        val t = api.transportInfo()
+        if (!t.ok) return Holder(SonosPolicy.Availability.FREE, false, "") // the steps that follow fail on their own if it is gone
+        val state = SonosXml.tag(t.body, "CurrentTransportState") ?: ""
+        if (state == "STOPPED" || state == "NO_MEDIA_PRESENT") return Holder(SonosPolicy.Availability.FREE, false, "")
+        val p = api.positionInfo()
+        val uri = if (p.ok) SonosXml.tag(p.body, "TrackURI") ?: "" else ""
+        return Holder(SonosPolicy.classify(state, uri), SonosPolicy.needsTakeover(state, uri), uri)
+    }
+
+    /**
+     * A paused session of someone else (a Spotify Connect one, `x-sonos-vli:...`) holds the transport and ignores a
+     * UPnP Stop. Switching the speaker to its own queue lets go of it; the stream is set after that.
+     */
+    private fun takeOver(api: SonosSoap, heldUri: String) {
+        val queue = SonosPolicy.queueUri(device?.udn ?: "")
+        if (queue == null) {
+            AppLog.add(TAG, "a paused session holds the speaker ($heldUri) but its player id is unknown, setting our stream over it")
+            return
+        }
+        val a = api.setUri(queue, "")
+        val b = api.stop()
+        AppLog.add(TAG, "took over a paused session ($heldUri): own queue ${a.describe()}, stop ${b.describe()}")
+    }
+
     /** Sets the speaker up for a stream: muted, stopped, at the right volume, URL loaded. False if that failed. */
     private fun prepare(s: KitchenSession, api: SonosSoap): Boolean {
         unmuteTask?.cancel(false)
+        val holder = whoHolds(api)
+        if (holder.kind == SonosPolicy.Availability.BUSY) {
+            // it started to play something else since the last poll: not ours to take, not a failed start
+            AppLog.add(TAG, "the speaker plays something else now (${holder.uri}), leaving it alone")
+            busyElsewhere = true
+            endSession(s, "the speaker plays something else", false)
+            state = baseState()
+            return false
+        }
         synchronized(muteLock) {
             if (!sonosQuiet) {
                 val m = api.setMute(true)
@@ -358,6 +406,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
                 sonosQuiet = true
             }
         }
+        if (holder.takeover) takeOver(api, holder.uri)
         val volume = sonosVolume()
         if (volume >= 0) api.setVolume(volume)
         val didl = SonosXml.didlTrack(TITLE, s.uri)
@@ -989,13 +1038,18 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             checkSession(s, r, kind)
             return
         }
-        // Something else uses the speaker, or someone paused our stream on the speaker itself (then the
-        // kitchen stays quiet until the speaker is stopped or free).
+        // Only something else that plays keeps the kitchen out, or a stream of ours that someone paused on the
+        // speaker during the session that just ended (then the kitchen stays quiet until the speaker is stopped or
+        // plays). A foreign session that is paused or stopped is free (it is taken over when a stream is set),
+        // and so is a paused stream of ours from an earlier session or run.
+        val pausedHere = pausedOnSpeakerToken
         busyElsewhere = when (kind) {
             SonosPolicy.Availability.BUSY -> true
-            SonosPolicy.Availability.OURS -> r.transport == "PAUSED_PLAYBACK"
+            SonosPolicy.Availability.OURS ->
+                r.transport == "PAUSED_PLAYBACK" && pausedHere != null && SonosPolicy.tokenOf(r.uri) == pausedHere
             SonosPolicy.Availability.FREE -> false
         }
+        if (!busyElsewhere) pausedOnSpeakerToken = null
         if (kind == SonosPolicy.Availability.OURS && (r.transport == "PLAYING" || r.transport == "TRANSITIONING")) {
             // a stream of ours from before this run: its server is gone
             AppLog.add(TAG, "stopping a leftover stream of ours")
@@ -1025,6 +1079,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         if (ours && r.transport == "PAUSED_PLAYBACK") {
             AppLog.add(TAG, "the kitchen was paused on the speaker itself, leaving it alone")
             busyElsewhere = true
+            pausedOnSpeakerToken = s.token
             endSession(s, "paused on the speaker", false)
             state = baseState()
             return

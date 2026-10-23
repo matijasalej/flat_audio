@@ -71,15 +71,50 @@ class SonosXmlTest {
     }
 
     @Test
-    fun onlyAFreeSpeakerMayBeTaken() {
+    fun onlyAForeignSourceThatPlaysKeepsTheKitchenOut() {
         val other = "x-rincon-stream:RINCON_123"
         assertEquals(SonosPolicy.Availability.FREE, SonosPolicy.classify("STOPPED", ""))
         assertEquals(SonosPolicy.Availability.FREE, SonosPolicy.classify("NO_MEDIA_PRESENT", ""))
         assertEquals(SonosPolicy.Availability.FREE, SonosPolicy.classify("STOPPED", other))
         assertEquals(SonosPolicy.Availability.BUSY, SonosPolicy.classify("PLAYING", other))
-        assertEquals(SonosPolicy.Availability.BUSY, SonosPolicy.classify("PAUSED_PLAYBACK", other))
         assertEquals(SonosPolicy.Availability.BUSY, SonosPolicy.classify("TRANSITIONING", other))
+        // paused is free: a paused Spotify Connect session must not keep the kitchen out
+        assertEquals(SonosPolicy.Availability.FREE, SonosPolicy.classify("PAUSED_PLAYBACK", other))
+        assertEquals(
+            SonosPolicy.Availability.FREE,
+            SonosPolicy.classify("PAUSED_PLAYBACK", "x-sonos-vli:RINCON_542A1B9AEFC601400:2,spotify:abc"),
+        )
+        // anything else that is not playing is free as well
+        assertEquals(SonosPolicy.Availability.FREE, SonosPolicy.classify("", other))
         assertEquals(SonosPolicy.Availability.OURS, SonosPolicy.classify("PLAYING", "http://h:8080/k/ab.flac"))
         assertEquals(SonosPolicy.Availability.OURS, SonosPolicy.classify("STOPPED", "http://h:8080/k/ab.flac"))
+        assertEquals(SonosPolicy.Availability.OURS, SonosPolicy.classify("PAUSED_PLAYBACK", "http://h:8080/k/ab.flac"))
+    }
+
+    @Test
+    fun aPausedForeignSessionIsTakenOverBeforeOurStreamIsSet() {
+        val vli = "x-sonos-vli:RINCON_542A1B9AEFC601400:2,spotify:6f3a"
+        assertTrue(SonosPolicy.needsTakeover("PAUSED_PLAYBACK", vli))
+        assertTrue(SonosPolicy.needsTakeover("PAUSED_PLAYBACK", "x-rincon-queue:RINCON_542A1B9AEFC601400#0"))
+        // nothing to take over when it is stopped, playing (that is busy), ours or empty
+        assertFalse(SonosPolicy.needsTakeover("STOPPED", vli))
+        assertFalse(SonosPolicy.needsTakeover("PLAYING", vli))
+        assertFalse(SonosPolicy.needsTakeover("PAUSED_PLAYBACK", "http://h:8080/k/ab.flac"))
+        assertFalse(SonosPolicy.needsTakeover("PAUSED_PLAYBACK", ""))
+    }
+
+    @Test
+    fun theQueueUriIsBuiltFromTheUdn() {
+        assertEquals(
+            "x-rincon-queue:RINCON_542A1B9AEFC601400#0",
+            SonosPolicy.queueUri("uuid:RINCON_542A1B9AEFC601400"),
+        )
+        // a sub-device of the same speaker names the same player
+        assertEquals(
+            "x-rincon-queue:RINCON_542A1B9AEFC601400#0",
+            SonosPolicy.queueUri("uuid:RINCON_542A1B9AEFC601400_MR"),
+        )
+        assertNull(SonosPolicy.queueUri(""))
+        assertNull(SonosPolicy.queueUri("uuid:something-else"))
     }
 }

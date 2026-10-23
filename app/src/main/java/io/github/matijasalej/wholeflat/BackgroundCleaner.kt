@@ -1,6 +1,8 @@
 package io.github.matijasalej.wholeflat
 
 import android.app.ActivityManager
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Handler
@@ -34,6 +36,15 @@ class BackgroundCleaner(private val context: Context, private val tv: TvControl)
     @Volatile
     private var lastAsked = 0
 
+    // the apps that were asked at the last run, and when (wall clock), for the watch for those that come back
+    private var asked: Set<String> = emptySet()
+    private var askedAtWallMs = 0L
+    private var lastWatchMs = 0L
+    private val comebacks = HashMap<String, Int>()
+
+    @Volatile
+    private var lastComeback = ""
+
     /** Asks the apps in the background to give up their processes; [why] is for the log. */
     fun run(why: String) {
         if (!Settings.values.backgroundCleanup) return
@@ -58,12 +69,66 @@ class BackgroundCleaner(private val context: Context, private val tv: TvControl)
         runs++
         lastRunMs = android.os.SystemClock.elapsedRealtime()
         lastAsked = victims.size
+        asked = victims.toHashSet()
+        askedAtWallMs = System.currentTimeMillis()
         // the system takes a moment to give the memory back
         main.postDelayed({
             val after = memory()
             lastSummary = "asked ${victims.size} of ${installed.size} apps${if (failed > 0) " ($failed refused)" else ""}; available memory ${before.first} -> ${after.first} MB, swap free ${before.second} -> ${after.second} MB"
             AppLog.add(TAG, "cleanup ($why): $lastSummary")
         }, 2_000L)
+    }
+
+    /**
+     * Looks (at most every 30 s) for apps that were asked to stop and have done something since (an activity resumed, a foreground service
+     * started: usage events), and asks them again at once; the log says which came back, how long after it was stopped, and the count. A
+     * foreground service is not a background process, so `killBackgroundProcesses` does not end it: the log then says what does
+     * (`adb shell cmd appops set <package> RUN_ANY_IN_BACKGROUND ignore`, or `am force-stop`).
+     */
+    fun watch() {
+        if (!Settings.values.backgroundCleanup || asked.isEmpty()) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastWatchMs < WATCH_EVERY_MS) return
+        lastWatchMs = now
+        val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager ?: return
+        val wall = System.currentTimeMillis()
+        val events = try {
+            usm.queryEvents(askedAtWallMs, wall)
+        } catch (t: Throwable) {
+            null
+        } ?: return
+        val e = UsageEvents.Event()
+        val back = LinkedHashMap<String, Int>()
+        val times = HashMap<String, Long>()
+        while (events.hasNextEvent()) {
+            events.getNextEvent(e)
+            val pkg = e.packageName ?: continue
+            if (pkg !in asked) continue
+            if (e.eventType == EVENT_ACTIVITY_RESUMED || e.eventType == EVENT_FOREGROUND_SERVICE_START) {
+                back[pkg] = e.eventType
+                times[pkg] = e.timeStamp
+            }
+        }
+        if (back.isEmpty()) return
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return
+        for ((pkg, type) in back) {
+            val n = (comebacks[pkg] ?: 0) + 1
+            comebacks[pkg] = n
+            try {
+                am.killBackgroundProcesses(pkg)
+            } catch (t: Throwable) {
+                // refused
+            }
+            val after = ((times[pkg] ?: wall) - askedAtWallMs) / 1000
+            lastComeback = "$pkg came back ${after} s after it was stopped (${if (type == EVENT_FOREGROUND_SERVICE_START) "a foreground service started" else "an activity resumed"}, #$n)"
+            AppLog.add(
+                TAG,
+                "cleanup: $lastComeback: asked to stop again" +
+                    if (type == EVENT_FOREGROUND_SERVICE_START) "; a foreground service is not a background process, so this may not end it: adb shell cmd appops set $pkg RUN_ANY_IN_BACKGROUND ignore (or am force-stop $pkg)" else "",
+            )
+        }
+        // what came back has been dealt with; the next look is from now on
+        askedAtWallMs = wall
     }
 
     /** Switches the screensaver off if it is on and the grant is there; returns what happened. */
@@ -110,6 +175,8 @@ class BackgroundCleaner(private val context: Context, private val tv: TvControl)
         o.put("last_run_s_ago", if (lastRunMs == 0L) JSONObject.NULL else (android.os.SystemClock.elapsedRealtime() - lastRunMs) / 1000)
         o.put("last_asked", lastAsked)
         o.put("last_summary", lastSummary.ifEmpty { JSONObject.NULL })
+        o.put("comebacks", JSONObject(comebacks as Map<*, *>))
+        o.put("last_comeback", lastComeback.ifEmpty { JSONObject.NULL })
         o.put("write_secure_settings", context.checkSelfPermission(WRITE_SECURE) == PackageManager.PERMISSION_GRANTED)
         o.put("screensaver", ensureScreensaverNote())
         return o
@@ -124,6 +191,11 @@ class BackgroundCleaner(private val context: Context, private val tv: TvControl)
 
     private companion object {
         const val TAG = "cleanup"
+        const val WATCH_EVERY_MS = 30_000L
+
+        /** UsageEvents.Event types: ACTIVITY_RESUMED (1) and FOREGROUND_SERVICE_START (19, Android 10). */
+        const val EVENT_ACTIVITY_RESUMED = 1
+        const val EVENT_FOREGROUND_SERVICE_START = 19
         const val SCREENSAVER = "screensaver_enabled"
         const val WRITE_SECURE = "android.permission.WRITE_SECURE_SETTINGS"
     }

@@ -14,7 +14,28 @@ object BoxStats {
         null
     }
 
-    /** "load 2.1/1.5/1.2, 345 MB available, 120 MB swap free" (whatever can be read). */
+    /** What this process holds (MB): the resident set, what of it is swapped out, and the native heap; -1 where it cannot be read. */
+    class Own(val rssMb: Long, val swapMb: Long, val nativeHeapMb: Long)
+
+    fun own(): Own {
+        var rss = -1L
+        var swap = -1L
+        try {
+            val t = File("/proc/self/status").readText()
+            rss = BoxLoad.meminfoMb(t, "VmRSS") ?: -1L
+            swap = BoxLoad.meminfoMb(t, "VmSwap") ?: -1L
+        } catch (t: Throwable) {
+            // not readable
+        }
+        val heap = try {
+            android.os.Debug.getNativeHeapAllocatedSize() / (1024 * 1024)
+        } catch (t: Throwable) {
+            -1L
+        }
+        return Own(rss, swap, heap)
+    }
+
+    /** "load 2.1/1.5/1.2, 345 MB available, 120 MB swap free, this app 210 MB (30 MB swapped out)" (whatever can be read). */
     fun brief(): String {
         val parts = ArrayList<String>()
         try {
@@ -31,6 +52,8 @@ object BoxStats {
         } catch (t: Throwable) {
             // not readable
         }
+        val o = own()
+        if (o.rssMb >= 0) parts.add("this app ${o.rssMb} MB" + if (o.swapMb > 0) " (${o.swapMb} MB swapped out)" else "")
         return if (parts.isEmpty()) "no load figures" else parts.joinToString(", ")
     }
 }

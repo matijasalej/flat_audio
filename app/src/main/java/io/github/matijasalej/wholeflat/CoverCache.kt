@@ -111,13 +111,13 @@ class CoverCache(private val download: (String) -> Bitmap? = ::downloadCover) {
     }
 
     companion object {
-        private const val MAX_KEPT = 6
+        private const val MAX_KEPT = 3
         private const val RETRY_NANOS = 60_000_000_000L
         private const val ART_RETRY_NANOS = 5_000_000_000L
 
-        /** The squares the cover is drawn from: twice the size of the footer cover and of the big cover (see [LyricsLayout]). */
+        /** The squares the cover is drawn from: twice the size of the footer cover and one and a half times the big cover (see [LyricsLayout]); 1.4 MB at most each. */
         val SMALL_PX = LyricsLayout.COVER_SIZE.toInt() * 2
-        val BIG_PX = LyricsLayout.BIG_COVER.toInt() * 2
+        val BIG_PX = LyricsLayout.BIG_COVER.toInt() * 3 / 2
     }
 }
 

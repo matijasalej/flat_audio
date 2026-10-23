@@ -82,7 +82,7 @@ class TvTsPipeline(
     private val spec = params().video
     private val frameNanos = 1_000_000_000L / spec.fps
 
-    override val history = TsHistory(maxOf(HISTORY_BYTES, spec.muxRate / 8L * 14), HISTORY_NANOS)
+    override val history = TsHistory(maxOf(HISTORY_BYTES, spec.muxRate / 8L * HISTORY_SECONDS), HISTORY_SECONDS * 1_000_000_000L)
     private val rate = feed.rate
     private val mux = TsMuxer(pcrPid = if (audioOnly) TsMuxer.AUDIO_PID else TsMuxer.VIDEO_PID, muxRate = spec.muxRate, hasVideo = !audioOnly)
     private val writer = TsWriter(mux, history) { t -> slotOf(t) }
@@ -750,9 +750,12 @@ class TvTsPipeline(
     companion object {
         private const val TAG = "tvvideo"
 
-        /** The ring holds the last 12 s or 16 MB of the stream (9 Mbit/s is 1.1 MB a second); a connection starts up to 2.5 s back. */
-        private const val HISTORY_BYTES = 16L shl 20
-        private const val HISTORY_NANOS = 12_000_000_000L
+        /**
+         * The ring holds the last 8 s of the stream (9 Mbit/s is 1.1 MB a second, so 9 MB; it was 12 s and 16 MB, of which 85 % is padding, on a box
+         * whose swap was full); a connection starts at a key picture 1.5 to 2.5 s back and the TV's looks at the stream read from there.
+         */
+        private const val HISTORY_BYTES = 4L shl 20
+        private const val HISTORY_SECONDS = 8L
         const val AUDIO_BITRATE = 192_000
 
         /**

@@ -6,7 +6,7 @@ package io.github.matijasalej.wholeflat.sync
  * MIME type in the item it is given. The setting `kitchen_format` is one of the Sonos formats or [AUTO], which picks per source (see
  * [resolve]); the TV's format is not a setting of the Sonos.
  *
- * @param forSonos whether the Sonos can be given this format (and the setting `kitchen_format` may name it)
+ * @param forSonos whether the Sonos can be given this format (and the setting `kitchen_format` may name it); [L16] and [TS] are the TV's
  */
 enum class StreamFormat(val key: String, val ext: String, val mime: String, val forSonos: Boolean = true) {
     FLAC("flac", "flac", "audio/flac"),
@@ -14,6 +14,9 @@ enum class StreamFormat(val key: String, val ext: String, val mime: String, val 
 
     /** What the Philips TV takes: audio/L16 at 44.1 kHz stereo, big-endian, with no header and no length (see [L16]). */
     L16("l16", "l16", "audio/L16;rate=44100;channels=2", forSonos = false),
+
+    /** What the Philips TV takes as a live lyrics video with its sound: an MPEG transport stream of H.264 and AAC (see [TsMuxer]). */
+    TS("ts", "ts", "video/mpeg", forSonos = false),
     ;
 
     companion object {

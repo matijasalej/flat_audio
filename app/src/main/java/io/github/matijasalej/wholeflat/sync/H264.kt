@@ -78,10 +78,11 @@ object H264 {
      * The access unit for a transport stream from one buffer of the encoder: an access unit delimiter first, then (for an IDR picture)
      * the parameter sets (the ones in the buffer, else [parameterSets] from the codec-config buffer), then the other NAL units as
      * they came. Start codes are four bytes throughout. A delimiter that the encoder made itself is dropped, there is one only.
+     * [key]: the encoder says it is a key picture even if it has no IDR slice, which gets the parameter sets all the same.
      */
-    fun accessUnit(frame: ByteArray, off: Int, len: Int, parameterSets: ByteArray?): ByteArray {
+    fun accessUnit(frame: ByteArray, off: Int, len: Int, parameterSets: ByteArray?, key: Boolean = false): ByteArray {
         val list = nals(frame, off, len)
-        val idr = list.any { it.type == NAL_IDR }
+        val idr = key || list.any { it.type == NAL_IDR }
         val haveSps = list.any { it.type == NAL_SPS }
         val havePps = list.any { it.type == NAL_PPS }
         val out = ByteArrayOutputStream(len + 64)

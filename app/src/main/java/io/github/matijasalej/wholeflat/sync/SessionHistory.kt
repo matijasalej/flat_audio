@@ -41,6 +41,14 @@ class ConnRecord(
     @Volatile var holdErrorMs = Double.NaN
     @Volatile var trimmedFrames = 0L
 
+    /**
+     * For a transport stream: how old the key place was that the connection started at (ms; the part of the stream that was sent at once is
+     * the burst), the bytes of that burst, and how old the newest data was when it was written (ms, the most after the burst).
+     */
+    @Volatile var startAgeMs = Double.NaN
+    @Volatile var burstBytes = -1L
+    @Volatile var behindMsMax = Double.NaN
+
     /** "peer" or "server" once it is closed. */
     @Volatile var closedBy = ""
     @Volatile var reason = ""
@@ -78,6 +86,9 @@ class ConnRecord(
             o.put("hold_error_ms", Math.round(holdErrorMs * 10.0) / 10.0)
             o.put("trimmed_frames", trimmedFrames)
         }
+        if (!startAgeMs.isNaN()) o.put("start_age_ms", Math.round(startAgeMs * 10.0) / 10.0)
+        if (burstBytes >= 0) o.put("burst_bytes", burstBytes)
+        if (!behindMsMax.isNaN()) o.put("behind_ms_max", Math.round(behindMsMax * 10.0) / 10.0)
         o.put("closed_by", if (closedBy.isEmpty()) JSONObject.NULL else closedBy)
         o.put("reason", if (reason.isEmpty()) JSONObject.NULL else reason)
         return o

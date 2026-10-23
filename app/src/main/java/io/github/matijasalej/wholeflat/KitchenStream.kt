@@ -2,6 +2,8 @@ package io.github.matijasalej.wholeflat
 
 import io.github.matijasalej.wholeflat.capture.CaptureFeed
 import io.github.matijasalej.wholeflat.capture.CaptureFrames
+import io.github.matijasalej.wholeflat.sync.CalibrationClicks
+import io.github.matijasalej.wholeflat.sync.ClickSource
 import io.github.matijasalej.wholeflat.sync.Flac
 import io.github.matijasalej.wholeflat.sync.FrameSource
 import io.github.matijasalej.wholeflat.sync.HoldController
@@ -11,6 +13,8 @@ import io.github.matijasalej.wholeflat.sync.SessionClock
 import io.github.matijasalej.wholeflat.sync.SessionRecord
 import io.github.matijasalej.wholeflat.sync.StreamBuilder
 import io.github.matijasalej.wholeflat.sync.StreamFormat
+import io.github.matijasalej.wholeflat.sync.TsFeed
+import io.github.matijasalej.wholeflat.sync.TsHistory
 import io.github.matijasalej.wholeflat.sync.Wav
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -94,6 +98,32 @@ class KitchenSession(
     /** The send buffer to ask of the socket (bytes; 0: leave it as the system has it). */
     @Volatile
     var sendBufferBytes = 0
+
+    /** For a stream of [StreamFormat.TS]: the live transport stream that the connections read from. */
+    @Volatile
+    var ts: TsFeed? = null
+
+    /** Called at every GET of the renderer, with the time (System.nanoTime): the warm-up of the TV counts them. */
+    @Volatile
+    var onGet: ((Long) -> Unit)? = null
+
+    /** The time of the last GET (System.nanoTime), 0 before the first. */
+    @Volatile
+    var lastGetNanos = 0L
+
+    /** The pitch of the click track that replaces the music of a captured stream while the calibration clicks are on (Hz; 0: never). */
+    @Volatile
+    var clickHz = 0
+
+    private val tsOpen = AtomicInteger()
+
+    fun tsConnectionOpened() {
+        tsOpen.incrementAndGet()
+    }
+
+    fun tsConnectionClosed() {
+        tsOpen.decrementAndGet()
+    }
 
     /** The statistics of a connection are put in the log every this many ms (0: not). */
     @Volatile
@@ -197,8 +227,8 @@ class KitchenSession(
         }
     }
 
-    /** Open connections after Play. */
-    val streamCount: Int get() = synchronized(streams) { streams.size }
+    /** Open connections after Play (of a transport stream: all that are open). */
+    val streamCount: Int get() = synchronized(streams) { streams.size } + tsOpen.get()
 
     companion object {
         /** The ring plays 44.1 kHz. */
@@ -366,6 +396,23 @@ object KitchenStreams {
         "Connection: close\r\n\r\n"
 
     /**
+     * The headers of a transport stream for the TV's renderer, as the device test that the TV played sent them: a live stream of video
+     * (`video/mpeg`), no seeking and no connection stalling (the DLNA flags), no length, the connection closed at its end.
+     */
+    const val RESPONSE_HEAD_TS = "HTTP/1.1 200 OK\r\n" +
+        "Content-Type: video/mpeg\r\n" +
+        "Accept-Ranges: none\r\n" +
+        "Connection: close\r\n" +
+        "transferMode.dlna.org: Streaming\r\n" +
+        "contentFeatures.dlna.org: DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n\r\n"
+
+    /** How long a connection that comes before the stream has a key picture waits for the first one (ms). */
+    private const val TS_START_WAIT_MS = 4_000L
+
+    /** One write of a transport stream carries at most this much (the burst at the start goes out in pieces of it). */
+    private const val TS_MAX_WRITE_BYTES = 256 * 1024
+
+    /**
      * The frames between two trims of a stream (a trim is one frame dropped or repeated): 10 ms for Spotify's, which is up to
      * 2.3 ms of correction per second; 5 ms for a captured one, up to 4.5 ms per second, which is a speed change of the kitchen
      * of 0.45 %, the most that the lag steering of the capture mode (`kitchen_target_ms`) lets itself use.
@@ -376,6 +423,7 @@ object KitchenStreams {
     fun responseHead(format: StreamFormat): String = when (format) {
         StreamFormat.WAV -> RESPONSE_HEAD_WAV
         StreamFormat.L16 -> RESPONSE_HEAD_L16
+        StreamFormat.TS -> RESPONSE_HEAD_TS
         else -> RESPONSE_HEAD
     }
 
@@ -426,7 +474,7 @@ object KitchenStreams {
         conn.prepareForStream()
         session.addConn(conn)
         try {
-            stream(host, session, remote, userAgent, conn, range)
+            if (session.format == StreamFormat.TS) streamTs(session, remote, userAgent, conn, range) else stream(host, session, remote, userAgent, conn, range)
         } finally {
             session.removeConn(conn)
         }
@@ -468,7 +516,11 @@ object KitchenStreams {
         val connectionId = rec?.id ?: count
         val frames: FrameSource? = when {
             startFrame < 0 -> null
-            capture != null -> CaptureFrames(capture.buffer, session.captureGeneration)
+            capture != null -> {
+                val captured = CaptureFrames(capture.buffer, session.captureGeneration)
+                // for the calibration of the rooms the music is replaced by the click track of the stream's own pitch
+                if (session.clickHz > 0) ClickSource(captured, rate, session.clickHz) { CalibrationClicks.active() } else captured
+            }
             else -> ringFrames(session.epoch)
         }
         val source: FrameSource = when {
@@ -547,6 +599,7 @@ object KitchenStreams {
                 StreamFormat.WAV -> pending.write(Wav.header(rate))
                 StreamFormat.FLAC -> pending.write(Flac.streamHeader(rate, blockFrames))
                 StreamFormat.L16 -> if (session.leadInFrames > 0) pending.write(L16.silence(session.leadInFrames)) // no header; a lead-in of silence, if asked for
+                StreamFormat.TS -> Unit // served by streamTs
             }
 
             // One write for what is ready: the headers, and every frame that is due and exists at this moment.
@@ -651,6 +704,7 @@ object KitchenStreams {
                     StreamFormat.WAV -> Wav.pcm(builder.block, blockFrames)
                     StreamFormat.L16 -> L16.pcm(builder.block, blockFrames)
                     StreamFormat.FLAC -> Flac.frame(blockNo, builder.block, rate, blockFrames)
+                    StreamFormat.TS -> ByteArray(0)
                 }
                 if (format == StreamFormat.WAV) {
                     if (!Wav.fits(dataBytes, chunk.size)) {
@@ -689,6 +743,169 @@ object KitchenStreams {
                     "$blockNo blocks, $bytes bytes, by the ${if (closedBy == "peer") (if (session.realTime) "TV" else "Sonos") else "app"} ($reason)",
             )
             if (live && lost && wasCurrent) host.streamLost(session, reason)
+        }
+    }
+
+    /**
+     * A connection of the TV to the live transport stream: the headers, then the stream from a key place of the ring on, as fast as the TV
+     * reads (the part that exists already, the burst) and then as it is made. The place it starts at is the newest key picture that is at
+     * least `lead` old (the way the stream was started in the device test), or with a lead of 0 the first one made after the connection
+     * (the encoder is asked for one). Every connection is for itself and none is closed because another came; one that cannot keep up with
+     * the ring is closed ("lapped") rather than given a stream with a hole in it. What the TV does is in the log: where each connection
+     * started, how much it was given at once, how fast it read and how far behind the newest data it was.
+     */
+    private fun streamTs(session: KitchenSession, remote: String, userAgent: String, conn: ClientConn, range: String) {
+        val out = conn.out
+        val began = System.nanoTime()
+        val count = session.nextConnectionId()
+        val rec = session.record?.openConnection("GET", remote, userAgent, session.armed, began)
+        rec?.range = range
+        val connectionId = rec?.id ?: count
+        session.lastGetNanos = began
+        session.tsConnectionOpened()
+        try {
+            session.onGet?.invoke(began)
+        } catch (t: Throwable) {
+            AppLog.error(TAG, "the GET hook failed", t)
+        }
+        val peer = PeerWatch(conn)
+        var reason = "peer closed"
+        var closedBy = "peer"
+        var bytes = 0L
+        var writes = 0L
+        var blockedTotal = 0.0
+        var blockedMax = 0.0
+        var behindMax = 0.0
+        val statsEveryNanos = session.statsEveryMs * 1_000_000L
+        var intervalStart = began
+        var intervalBytes = 0L
+        var intervalWrites = 0
+        var intervalBlockedMs = 0.0
+        var intervalBlockedMax = 0.0
+        var intervalBehindMax = 0.0
+        try {
+            if (session.sendBufferBytes > 0) conn.limitSendBuffer(session.sendBufferBytes)
+            val feedSource = session.ts
+            if (feedSource == null) {
+                reason = "no live stream"
+                closedBy = "server"
+                return
+            }
+            val history: TsHistory = feedSource.history
+            val lead = feedSource.leadNanos()
+            out.write(RESPONSE_HEAD_TS.toByteArray(Charsets.ISO_8859_1))
+            out.flush()
+            var pos: Long?
+            if (lead > 0) {
+                pos = history.startFor(began, lead) ?: history.keyAfter(began, TS_START_WAIT_MS)
+            } else {
+                feedSource.requestSync()
+                pos = history.keyAfter(began, TS_START_WAIT_MS) ?: history.startFor(began, 0)
+            }
+            if (pos == null) {
+                reason = "the stream has no key picture to start at"
+                closedBy = "server"
+                return
+            }
+            val startNanos = history.nanosAt(pos)
+            val startAgeMs = if (startNanos == null) Double.NaN else (began - startNanos) / 1e6
+            val burst = history.endPos - pos
+            rec?.startAgeMs = startAgeMs
+            rec?.burstBytes = burst
+            log(
+                "$remote GET session ${session.token} conn $connectionId, the live video stream from the key place that is " +
+                    "${if (startAgeMs.isNaN()) "?" else "%.0f".format(java.util.Locale.US, startAgeMs)} ms old ($burst bytes at once, lead ${lead / 1_000_000L} ms)" +
+                    (if (range.isNotEmpty()) ", Range: $range" else "") + " [$userAgent]",
+            )
+            while (true) {
+                if (session.cancelled) {
+                    reason = "session ended" + (session.endReason?.let { ": $it" } ?: "")
+                    closedBy = "server"
+                    break
+                }
+                if (peer.closed) {
+                    reason = "peer " + peer.how
+                    closedBy = "peer"
+                    break
+                }
+                when (val r = history.read(pos!!, TS_MAX_WRITE_BYTES, 100)) {
+                    is TsHistory.Read.Timeout -> continue
+                    is TsHistory.Read.Lapped -> {
+                        reason = "the TV reads too slowly: the ring has moved on (lapped)"
+                        closedBy = "server"
+                        break
+                    }
+                    is TsHistory.Read.Closed -> {
+                        reason = "the stream ended"
+                        closedBy = "server"
+                        break
+                    }
+                    is TsHistory.Read.Data -> {
+                        val t0 = System.nanoTime()
+                        out.write(r.bytes)
+                        out.flush()
+                        val t1 = System.nanoTime()
+                        pos = r.next
+                        val blockedMs = (t1 - t0) / 1e6
+                        val behindMs = (t1 - r.lastNanos) / 1e6
+                        bytes += r.bytes.size
+                        writes++
+                        session.bytesSent.addAndGet(r.bytes.size.toLong())
+                        blockedTotal += blockedMs
+                        if (blockedMs > blockedMax) blockedMax = blockedMs
+                        // how far behind the newest data the connection was is counted after the burst (the first 3 s are the catching up)
+                        if (t1 - began > 3_000_000_000L && behindMs > behindMax) behindMax = behindMs
+                        if (rec != null) {
+                            if (rec.firstByteMs < 0) rec.firstByteMs = session.record?.ms(t1) ?: 0L
+                            rec.bytes = bytes
+                            rec.writes = writes
+                            rec.writeMsTotal = blockedTotal
+                            rec.writeMsMax = blockedMax
+                            rec.behindMsMax = behindMax
+                        }
+                        if (statsEveryNanos > 0) {
+                            intervalBytes += r.bytes.size
+                            intervalWrites++
+                            intervalBlockedMs += blockedMs
+                            if (blockedMs > intervalBlockedMax) intervalBlockedMax = blockedMs
+                            if (behindMs > intervalBehindMax) intervalBehindMax = behindMs
+                            if (t1 - intervalStart >= statsEveryNanos) {
+                                val seconds = (t1 - intervalStart) / 1e9
+                                log(
+                                    "conn $connectionId, last ${"%.1f".format(java.util.Locale.US, seconds)} s: $intervalWrites writes, $intervalBytes bytes " +
+                                        "(${"%.0f".format(java.util.Locale.US, intervalBytes * 8 / seconds / 1000.0)} kbit/s), a write blocked " +
+                                        "${"%.1f".format(java.util.Locale.US, intervalBlockedMs / maxOf(1, intervalWrites))} ms on average and " +
+                                        "${"%.1f".format(java.util.Locale.US, intervalBlockedMax)} ms at most, the data written was up to " +
+                                        "${"%.0f".format(java.util.Locale.US, intervalBehindMax)} ms old",
+                                )
+                                intervalStart = t1
+                                intervalBytes = 0
+                                intervalWrites = 0
+                                intervalBlockedMs = 0.0
+                                intervalBlockedMax = 0.0
+                                intervalBehindMax = 0.0
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: IOException) {
+            reason = "peer: " + e.message
+            closedBy = "peer"
+        } catch (e: InterruptedException) {
+            reason = "interrupted"
+            closedBy = "server"
+        } finally {
+            session.tsConnectionClosed()
+            val ended = System.nanoTime()
+            if (rec != null) {
+                rec.bytes = bytes
+                session.record?.closeConnection(rec, ended, closedBy, reason)
+            }
+            log(
+                "session ${session.token} conn $connectionId closed after ${(ended - began) / 1_000_000L} ms, $bytes bytes, " +
+                    "by the ${if (closedBy == "peer") "TV" else "app"} ($reason)",
+            )
         }
     }
 

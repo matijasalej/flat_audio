@@ -14,6 +14,23 @@ object TvDidl {
             "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" " +
             "xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\""
 
+    /** What the renderer accepts for the video stream (the protocolInfo of its sink list: any MPEG stream). */
+    const val PROTOCOL_INFO_VIDEO = "http-get:*:video/mpeg:*"
+
+    /**
+     * The item for the lyrics video: a video item with [title] and the stream [url], and nothing else, as in the device test that the TV
+     * played (it takes `object.item.videoItem` with `http-get:*:video/mpeg:*`).
+     */
+    fun video(title: String, url: String): String {
+        val sb = StringBuilder()
+        sb.append("<DIDL-Lite ").append(NS).append("><item id=\"1\" parentID=\"0\" restricted=\"1\">")
+        sb.append("<dc:title>").append(SonosXml.escape(title)).append("</dc:title>")
+        sb.append("<upnp:class>object.item.videoItem</upnp:class>")
+        sb.append("<res protocolInfo=\"").append(SonosXml.escape(PROTOCOL_INFO_VIDEO)).append("\">").append(SonosXml.escape(url)).append("</res>")
+        sb.append("</item></DIDL-Lite>")
+        return sb.toString()
+    }
+
     /** The DIDL-Lite document for [url]; the artist, the album and the cover are left out when null or empty. */
     fun track(title: String, artist: String?, album: String?, artUri: String?, url: String): String {
         val sb = StringBuilder()

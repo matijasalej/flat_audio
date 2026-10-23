@@ -18,8 +18,8 @@ class TsHistory(private val maxBytes: Long = 6L shl 20, private val maxAgeNanos:
 
     /** What a read gives. */
     sealed class Read {
-        /** Bytes from the position asked for (whole units), and the position after them. */
-        class Data(val bytes: ByteArray, val next: Long) : Read()
+        /** Bytes from the position asked for (whole units), the position after them, and when the newest unit among them was appended (System.nanoTime). */
+        class Data(val bytes: ByteArray, val next: Long, val lastNanos: Long) : Read()
 
         /** Nothing new within the time asked for. */
         object Timeout : Read()
@@ -151,6 +151,7 @@ class TsHistory(private val maxBytes: Long = 6L shl 20, private val maxAgeNanos:
         var total = 0
         val parts = ArrayList<ByteArray>()
         var next = pos
+        var last = 0L
         for (e in entries) {
             val entryEnd = e.pos + e.bytes.size
             if (entryEnd <= pos) continue
@@ -160,6 +161,7 @@ class TsHistory(private val maxBytes: Long = 6L shl 20, private val maxAgeNanos:
             parts.add(if (skip == 0) e.bytes else e.bytes.copyOfRange(skip, e.bytes.size))
             total += take
             next = entryEnd
+            last = e.nanos
             if (total >= maxBytes) break
         }
         val out = if (parts.size == 1) parts[0] else ByteArray(total).also {
@@ -169,6 +171,6 @@ class TsHistory(private val maxBytes: Long = 6L shl 20, private val maxAgeNanos:
                 at += p.size
             }
         }
-        return Read.Data(out, next)
+        return Read.Data(out, next, last)
     }
 }

@@ -42,6 +42,11 @@ class CaptureClock(private val rate: Int) {
     fun frameAtNanos(nanos: Long): Long? =
         if (!hasAnchor) null else anchorFrame + Math.floorDiv((nanos - anchorNanos) * rate, NANOS)
 
+    /** The frame captured at [nanos] as a fraction (frame numbers are whole samples; this is for clocks that are to be smooth); null before the first anchor. */
+    @Synchronized
+    fun frameAtNanosExact(nanos: Long): Double? =
+        if (!hasAnchor) null else anchorFrame + (nanos - anchorNanos).toDouble() * rate / NANOS
+
     private companion object {
         const val NANOS = 1_000_000_000L
     }

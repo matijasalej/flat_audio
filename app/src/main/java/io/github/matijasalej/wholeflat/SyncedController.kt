@@ -45,6 +45,10 @@ class SyncedController(
     private val tv: TvControl,
 ) {
     private val exec = ScheduledThreadPoolExecutor(1, ThreadFactory { r -> Thread(r, "wf-synced").also { it.isDaemon = true } })
+    private val cleaner = BackgroundCleaner(context, tv)
+
+    /** The state of the clean-up of the background and of the screensaver, for `/sys`. */
+    fun cleanupJson(): JSONObject = cleaner.statusJson()
     private val manager = ModeManager()
     private val prefs: SharedPreferences = context.applicationContext.getSharedPreferences("wholeflat_tv", Context.MODE_PRIVATE)
 
@@ -127,6 +131,7 @@ class SyncedController(
             tickSoon()
         }
         Settings.addListener(settingsListener)
+        post { AppLog.add("cleanup", "the screensaver: ${cleaner.ensureScreensaverOff()}") }
         exec.scheduleWithFixedDelay({ post { tick() } }, 2_000, TICK_MS, TimeUnit.MILLISECONDS)
         AppLog.add(TAG, "Synced mode: started, mode ${Settings.values.mode}")
     }
@@ -195,7 +200,7 @@ class SyncedController(
         val inputs = ModeManager.Inputs(
             nowMs = now, mode = mode, source = source, captureAlive = captureAlive, silentForMs = silent,
             tvKnown = tv.currentIp() != null, tv = tvState, leftCount = renderer.leftCount, leftKind = leftKind,
-            foreground = foreground, backoffRemainingMs = renderer.backoffRemainingMs(), failedGrabs = renderer.failedGrabs(), idleForMs = idle,
+            foreground = foreground, backoffRemainingMs = renderer.backoffRemainingMs(), failedGrabs = renderer.failedGrabs(), idleForMs = idle, retryingTv = renderer.restarting,
         )
         lastInputs = "mode ${mode.key}, source $source, capture ${if (captureAlive) "alive" else "gone"}, silent ${if (silent > 86_400_000L) "never" else "${silent / 1000} s"}, " +
             "TV ${renderer.state.label}, in front ${foreground.name.lowercase()}"
@@ -203,6 +208,7 @@ class SyncedController(
             when (action) {
                 is ModeManager.Action.Grab -> {
                     AppLog.add(TAG, "taking the TV: ${manager.lastWhy.ifEmpty { "synced" }}")
+                    cleaner.run("taking the TV")
                     lastDecision = "grab"
                     renderer.grab(manager.lastWhy)
                 }
@@ -229,9 +235,11 @@ class SyncedController(
         val effectiveMode = Mode.of(Settings.values.mode) ?: mode
         // the TV plays our music (not just the splash of the warm-up)
         val playing = renderer.state == TvRenderer.State.PLAYING && renderer.live && effectiveMode == Mode.SYNCED
+        // while the music plays the box is freed of what it does not need, now and then
+        if ((playing || source == "capture") && silent < CLEANUP_WHILE_SOUND_MS && now - cleaner.lastRunMs >= CLEANUP_EVERY_MS) cleaner.run("every 10 minutes while the music plays")
         kitchen.holdStart = if (effectiveMode == Mode.SYNCED && renderer.warming) "the TV is warming up (a splash and silence), its music is not live yet" else null
         // while the TV warms up again (a re-anchor) the kitchen is not sent back to the lag of Lyrics mode: it would be started twice
-        holdTheKitchen(playing, now, keepTarget = effectiveMode == Mode.SYNCED && renderer.warming)
+        holdTheKitchen(playing, now, keepTarget = effectiveMode == Mode.SYNCED && (renderer.warming || renderer.restarting))
         present(effectiveMode, playing, source, now)
         reanchorCheck(playing, silent)
         recoverAfterCrash(now)
@@ -473,6 +481,9 @@ class SyncedController(
         private const val RECOVER_AFTER_MS = 20_000L
 
         /** The kitchen is started again when it is this far from the lag it is to have (ms), and not more often than this (ms). */
+        /** The apps in the background are asked to give up their processes this often while the music plays, and only if there was sound lately. */
+        private const val CLEANUP_EVERY_MS = 600_000L
+        private const val CLEANUP_WHILE_SOUND_MS = 120_000L
         private const val RESTART_FAR_MS = 150.0
         private const val RESTART_EVERY_MS = 20_000L
 

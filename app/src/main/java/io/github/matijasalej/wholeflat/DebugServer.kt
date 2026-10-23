@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Process
 import android.os.SystemClock
+import io.github.matijasalej.wholeflat.sync.BoxLoad
 import io.github.matijasalej.wholeflat.sync.CalibrationClicks
 import io.github.matijasalej.wholeflat.sync.ClickTrack
 import org.json.JSONArray
@@ -539,6 +540,42 @@ object DebugServer {
         val runtime = Runtime.getRuntime()
         o.put("heap_used_mb", (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024))
         o.put("heap_max_mb", runtime.maxMemory() / (1024 * 1024))
+        // the load of the box: what the kernel says, and how much of it is ours
+        val loadText = readProc("/proc/loadavg")
+        o.put("load_avg", BoxLoad.parseLoadavg(loadText ?: "")?.let { JSONArray(it) } ?: JSONObject.NULL)
+        val mem = readProc("/proc/meminfo") ?: ""
+        o.put("mem_available_mb", BoxLoad.meminfoMb(mem, "MemAvailable") ?: JSONObject.NULL)
+        o.put("mem_total_mb", BoxLoad.meminfoMb(mem, "MemTotal") ?: JSONObject.NULL)
+        o.put("swap_free_mb", BoxLoad.meminfoMb(mem, "SwapFree") ?: JSONObject.NULL)
+        o.put("swap_total_mb", BoxLoad.meminfoMb(mem, "SwapTotal") ?: JSONObject.NULL)
+        val cores = Runtime.getRuntime().availableProcessors()
+        o.put("cores", cores)
+        val cpu = ourCpuPercentOfOneCore()
+        o.put("our_cpu_percent_of_one_core", Math.round(cpu * 10.0) / 10.0)
+        o.put("our_cpu_percent_of_the_box", Math.round(cpu / cores * 10.0) / 10.0)
+        o.put("cleanup", AppState.synced?.cleanupJson() ?: JSONObject.NULL)
         return o
+    }
+
+    private fun readProc(path: String): String? = try {
+        java.io.File(path).readText()
+    } catch (e: Exception) {
+        null
+    }
+
+    private var cpuSampleWallMs = 0L
+    private var cpuSampleCpuMs = 0L
+
+    /** The CPU time this process used since the last look (the first look: since it started), in percent of one core. */
+    @Synchronized
+    private fun ourCpuPercentOfOneCore(): Double {
+        val wall = SystemClock.elapsedRealtime()
+        val cpu = Process.getElapsedCpuTime()
+        val fromWall = if (cpuSampleWallMs == 0L) Process.getStartElapsedRealtime() else cpuSampleWallMs
+        val fromCpu = if (cpuSampleWallMs == 0L) 0L else cpuSampleCpuMs
+        cpuSampleWallMs = wall
+        cpuSampleCpuMs = cpu
+        val dt = wall - fromWall
+        return if (dt <= 0) 0.0 else (cpu - fromCpu) * 100.0 / dt
     }
 }

@@ -65,6 +65,8 @@ class SettingsValues(
     val lyricsOffsetMs: Int,
     /** What the TV shows in Synced mode: "listen" (screen off, lights off), "ambilight" (screen off, lights on) or "screen" (the lyrics video, lights on); see [Display]. */
     val display: String,
+    /** Whether the apps in the background are asked to give up their processes at each grab of the TV and every ten minutes while the music plays (see BackgroundCleaner). */
+    val backgroundCleanup: Boolean,
     /** The Ambilight style in Synced mode (JointSpace `styleName`) and its `menuSetting`. */
     val ambilightStyle: String,
     val ambilightMenu: String,
@@ -99,6 +101,7 @@ class SettingsModel {
     var tvVideo = TvVideoSpec.DEFAULT.text()
     var lyricsOffsetMs = 0
     var display = Display.DEFAULT.key
+    var backgroundCleanup = true
     var ambilightStyle = DEFAULT_AMBILIGHT_STYLE
     var ambilightMenu = DEFAULT_AMBILIGHT_MENU
 
@@ -107,7 +110,7 @@ class SettingsModel {
         kitchenEnabled, kitchenOffsetMs, kitchenBalance, livingFixedVolume, tvScreenOff, tvWake, tvIp,
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
         captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPrerollMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
-        ambilightStyle, ambilightMenu,
+        backgroundCleanup, ambilightStyle, ambilightMenu,
     )
 
     fun toJson(): JSONObject {
@@ -140,6 +143,7 @@ class SettingsModel {
         o.put(TV_VIDEO, tvVideo)
         o.put(LYRICS_OFFSET_MS, lyricsOffsetMs)
         o.put(DISPLAY, display)
+        o.put(BACKGROUND_CLEANUP, backgroundCleanup)
         o.put(AMBILIGHT_STYLE, ambilightStyle)
         o.put(AMBILIGHT_MENU, ambilightMenu)
         return o
@@ -273,6 +277,10 @@ class SettingsModel {
             val v = Display.of(json.get(DISPLAY).toString())?.key
             if (v != null && v != display) { display = v; changed.add(DISPLAY) }
         }
+        if (json.has(BACKGROUND_CLEANUP)) {
+            val v = bool(json.get(BACKGROUND_CLEANUP))
+            if (v != null && v != backgroundCleanup) { backgroundCleanup = v; changed.add(BACKGROUND_CLEANUP) }
+        }
         if (json.has(AMBILIGHT_STYLE)) {
             // a JointSpace style name: capital letters, digits and underscores
             val v = json.get(AMBILIGHT_STYLE).toString().trim().uppercase()
@@ -333,6 +341,7 @@ class SettingsModel {
         const val TV_VIDEO = "tv_video"
         const val LYRICS_OFFSET_MS = "lyrics_offset_ms"
         const val DISPLAY = "display"
+        const val BACKGROUND_CLEANUP = "background_cleanup"
         const val AMBILIGHT_STYLE = "ambilight_style"
         const val AMBILIGHT_MENU = "ambilight_menu"
 

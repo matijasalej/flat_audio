@@ -38,6 +38,7 @@ class SettingsModelTest {
         assertEquals("1080p30 cbr 6000 gop1", o.getString("tv_video"))
         assertEquals(0, o.getInt("lyrics_offset_ms"))
         assertEquals("listen", o.getString("display"))
+        assertEquals(true, o.getBoolean("background_cleanup"))
         assertEquals("FOLLOW_AUDIO", o.getString("ambilight_style"))
         assertEquals("ENERGY_ADAPTIVE_BRIGHTNESS", o.getString("ambilight_menu"))
     }
@@ -51,7 +52,7 @@ class SettingsModelTest {
                 "tv_screen_off", "tv_wake", "tv_ip",
                 "capture_enabled", "capture_living_latency_ms", "capture_lead_ms", "kitchen_target_ms", "kitchen_floor_ms",
                 "kitchen_volume", "capture_volume_mirror", "kitchen_format", "kitchen_flac_block",
-                "mode", "tv_latency_ms", "tv_format", "tv_burst_ms", "tv_extra_ms", "tv_preroll_ms", "tv_pcr_lead_ms", "tv_reanchor_min", "tv_render", "tv_video", "lyrics_offset_ms", "display",
+                "mode", "tv_latency_ms", "tv_format", "tv_burst_ms", "tv_extra_ms", "tv_preroll_ms", "tv_pcr_lead_ms", "tv_reanchor_min", "tv_render", "tv_video", "lyrics_offset_ms", "display", "background_cleanup",
                 "ambilight_style", "ambilight_menu",
             ),
             keys,

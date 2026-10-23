@@ -21,6 +21,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <!-- Frees the box of what it does not need while the music runs: the apps in the background are asked to give up their processes
+         (a normal permission), and the screensaver is switched off where the grant below was given over adb:
+         adb shell pm grant io.github.matijasalej.wholeflat android.permission.WRITE_SECURE_SETTINGS -->
+    <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
     <!-- Which app is in front, so that the TV's screen is not switched off under a video. Not grantable
          from a dialog: adb shell appops set io.github.matijasalej.wholeflat GET_USAGE_STATS allow -->
     <uses-permission

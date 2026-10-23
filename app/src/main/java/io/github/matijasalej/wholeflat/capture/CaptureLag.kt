@@ -65,6 +65,23 @@ class CaptureLag(samples: Int = 11, private val minLagMs: Double = MIN_LAG_MS) {
         return if (v.isNaN()) v else maxOf(0.0, v)
     }
 
+    /** The median of the last [n] readings (ms), NaN before the first: the lag as it is now, quick to follow a step. */
+    fun recentMs(n: Int): Double {
+        val v = tracker.recent(n)
+        return if (v.isNaN()) v else maxOf(0.0, v)
+    }
+
+    /**
+     * How far the lag of the last [n] readings is from the locked one (ms, positive: later than locked), NaN
+     * before the lock. A step of the lag (the speaker stalled or skipped) shows here, a change of the kitchen
+     * offset does not.
+     */
+    fun movedMs(n: Int): Double {
+        val locked = tracker.locked ?: return Double.NaN
+        val v = tracker.recent(n)
+        return if (v.isNaN()) Double.NaN else v - locked
+    }
+
     companion object {
         /** The target lag is never smaller than this (ms). */
         const val MIN_LAG_MS = 100.0

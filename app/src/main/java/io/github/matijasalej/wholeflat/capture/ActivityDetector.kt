@@ -9,7 +9,10 @@ package io.github.matijasalej.wholeflat.capture
  *
  * A start is announced early as a [Event.CANDIDATE] (at the first sound), so that the speaker can be
  * prepared while the 200 ms are being waited for; if the sound stops again the candidate is cancelled.
- * The MediaSession of the player can say the same sooner ([hint]), but the audio decides.
+ * The MediaSession of the player can say the same sooner ([hint]), but the audio decides: a hint that no
+ * sound follows within [hintTimeoutNanos] is withdrawn, and not repeated until the player has said that it
+ * stopped (a player that says "playing" while its audio is blocked must not make the speaker flap).
+ * At most one candidate is open at a time.
  *
  * Plain Kotlin; the time comes from the chunk timestamps, not from counting chunks.
  */
@@ -53,6 +56,12 @@ class ActivityDetector(
     private var silentSince = -1L
     private var hintedAt = -1L
 
+    /** A [Event.CANDIDATE] was announced and neither a start nor a cancel has followed. */
+    private var candidateOpen = false
+
+    /** A hint was given for this "playing" episode of the player, and not withdrawn by the player itself. */
+    private var hintLatched = false
+
     /** Seconds since the last sound, for the status (-1 before the first). */
     fun silentForNanos(nowNanos: Long): Long = if (lastSound < 0) -1L else nowNanos - lastSound
 
@@ -63,6 +72,8 @@ class ActivityDetector(
         lastSound = -1L
         silentSince = -1L
         hintedAt = -1L
+        candidateOpen = false
+        hintLatched = false
     }
 
     /** One chunk of captured audio: when it was read and its peak level in dBFS. */
@@ -72,16 +83,21 @@ class ActivityDetector(
         if (peakDb > silenceDb) {
             lastSound = tNanos
             silentSince = -1L
-            hintedAt = -1L
             if (state != State.ACTIVE) {
                 if (runStart < 0) {
                     runStart = tNanos
-                    if (state == State.IDLE) out.add(Event.CANDIDATE)
+                    if (state == State.IDLE && !candidateOpen) {
+                        candidateOpen = true
+                        out.add(Event.CANDIDATE)
+                    }
                 }
                 if (tNanos - runStart >= startNanos) {
                     out.add(if (state == State.IDLE) Event.START else Event.RESUME)
                     state = State.ACTIVE
                     runStart = -1L
+                    hintedAt = -1L
+                    candidateOpen = false
+                    hintLatched = false
                 }
             }
             return out
@@ -98,11 +114,18 @@ class ActivityDetector(
             State.IDLE, State.PAUSED -> {
                 if (runStart >= 0 && tNanos - silentSince > gapNanos) {
                     runStart = -1L
-                    if (state == State.IDLE) out.add(Event.CANDIDATE_CANCELLED)
+                    // a blip is cancelled, unless the player's own hint is still waiting for its sound
+                    if (state == State.IDLE && candidateOpen && hintedAt < 0) {
+                        candidateOpen = false
+                        out.add(Event.CANDIDATE_CANCELLED)
+                    }
                 }
                 if (state == State.IDLE && hintedAt >= 0 && runStart < 0 && tNanos - hintedAt >= hintTimeoutNanos) {
                     hintedAt = -1L
-                    out.add(Event.CANDIDATE_CANCELLED)
+                    if (candidateOpen) {
+                        candidateOpen = false
+                        out.add(Event.CANDIDATE_CANCELLED)
+                    }
                 }
             }
         }
@@ -122,14 +145,28 @@ class ActivityDetector(
     fun hint(playing: Boolean, tNanos: Long): List<Event> {
         val out = ArrayList<Event>(1)
         if (playing) {
-            if (state == State.IDLE && runStart < 0 && hintedAt < 0) {
+            if (state == State.IDLE && !hintLatched) {
+                hintLatched = true
                 hintedAt = tNanos
-                out.add(Event.CANDIDATE)
+                if (!candidateOpen) {
+                    candidateOpen = true
+                    out.add(Event.CANDIDATE)
+                }
             }
-        } else if (state == State.ACTIVE) {
-            state = State.PAUSED
-            runStart = -1L
-            out.add(Event.PAUSE)
+        } else {
+            hintLatched = false
+            if (state == State.ACTIVE) {
+                state = State.PAUSED
+                runStart = -1L
+                out.add(Event.PAUSE)
+            } else if (state == State.IDLE && hintedAt >= 0) {
+                // the player took it back before any sound
+                hintedAt = -1L
+                if (candidateOpen && runStart < 0) {
+                    candidateOpen = false
+                    out.add(Event.CANDIDATE_CANCELLED)
+                }
+            }
         }
         return out
     }

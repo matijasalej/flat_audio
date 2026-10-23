@@ -35,6 +35,19 @@ class LagTrackerTest {
     }
 
     @Test
+    fun theMedianOfTheLastFewFollowsAStepQuickly() {
+        val t = LagTracker(samples = 11)
+        repeat(11) { t.add(440.0) }
+        repeat(2) { t.add(1_140.0) }
+        assertEquals("two of the last five have moved", 440.0, t.recent(5), 0.0)
+        t.add(1_140.0)
+        assertEquals("three of five: the median has moved", 1_140.0, t.recent(5), 0.0)
+        assertEquals("the whole window still says 440", 440.0, t.recent(), 0.0)
+        assertEquals("fewer readings than asked for: the median of what there is", 1_140.0, LagTracker().apply { add(1_140.0) }.recent(5), 0.0)
+        assertTrue(LagTracker().recent(5).isNaN())
+    }
+
+    @Test
     fun resetStartsMeasuringAgain() {
         val t = LagTracker(samples = 2)
         t.add(1.0)

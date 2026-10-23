@@ -38,6 +38,14 @@ class LagTracker(private val samples: Int = 11) {
     @Synchronized
     fun recent(): Double = if (last.isEmpty()) Double.NaN else median(last.toList())
 
+    /** The median of the last [n] readings (fewer if there are not that many), NaN before the first. */
+    @Synchronized
+    fun recent(n: Int): Double {
+        if (last.isEmpty()) return Double.NaN
+        val all = last.toList()
+        return median(if (all.size <= n) all else all.subList(all.size - n, all.size))
+    }
+
     val count: Int
         @Synchronized get() = first.size
 

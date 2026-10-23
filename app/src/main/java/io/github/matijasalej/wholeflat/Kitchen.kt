@@ -4,7 +4,9 @@ import android.content.Context
 import android.content.SharedPreferences
 import io.github.matijasalej.wholeflat.capture.CaptureFeed
 import io.github.matijasalej.wholeflat.capture.CaptureLag
+import io.github.matijasalej.wholeflat.capture.CaptureLead
 import io.github.matijasalej.wholeflat.capture.CaptureStart
+import io.github.matijasalej.wholeflat.capture.CaptureTracker
 import io.github.matijasalej.wholeflat.capture.SourceArbiter
 import io.github.matijasalej.wholeflat.sync.SonosPolicy
 import io.github.matijasalej.wholeflat.sync.SonosXml
@@ -132,6 +134,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
 
     private val arbiter = SourceArbiter()
     private val lagCapture = CaptureLag()
+    private val captureLead = CaptureLead()
+    private val captureTracker = CaptureTracker(captureController, lagCapture, captureLead, CaptureFeed.RATE)
 
     /** The audio the capture hands over; set by the service. */
     @Volatile
@@ -146,6 +150,9 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
 
     @Volatile
     private var captureStarts = 0
+
+    @Volatile
+    private var captureRelocks = 0
 
     /** Called on the control thread whenever the source that feeds the speaker changes. */
     @Volatile
@@ -424,7 +431,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         controller = if (s.isCapture) captureController else ringController
         controller.reset()
         controller.offsetMs = effectiveOffsetMs()
-        if (s.isCapture) lagCapture.reset()
+        if (s.isCapture) captureTracker.startStream(capturePlannedLagMs)
         notPlayingReadings = 0
         lastSummaryReadings = 0
         badPolls = 0
@@ -535,7 +542,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         clock.refine(tMid, heard)
         s.playingReadings++
         if (s.isCapture) {
-            handleCaptureReading(s, stream, clock.startNanos, tMid, p.positionMs, heard)
+            handleCaptureReading(s, stream, clock.startNanos, tMid, p.positionMs)
             return
         }
         if (s.playingReadings == LEARN_LK_AT) learnLk(s, clock.startNanos)
@@ -724,7 +731,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             writeIndex = feed.buffer.writeIndex,
             validStart = feed.buffer.validStart,
             rate = feed.rate,
-            leadMs = v.captureLeadMs,
+            leadMs = captureLead.effectiveMs(v.captureLeadMs),
             offsetMs = v.kitchenOffsetMs,
             lkMs = lkNanos / 1e6,
         )
@@ -747,7 +754,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     /**
      * A reading of the Sonos for a captured stream. There is no second room to compare with: the first
      * readings measure how long after the capture the kitchen sounds (the speaker's own buffer decides),
-     * and then the controller holds that lag against the drift of the speaker's clock.
+     * and then the controller holds that lag against the drift of the speaker's clock. A step of the lag
+     * is measured again, not restarted; see [CaptureTracker].
      */
     private fun handleCaptureReading(
         s: KitchenSession,
@@ -755,44 +763,43 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         startNanos: Long,
         tMid: Long,
         positionMs: Long,
-        heard: Double,
     ) {
         val feed = s.capture ?: return
         if (feed.generation != s.captureGeneration) return // the session is about to end
-        val frame = stream.map.ringOfStream(heard) ?: return
-        val captured = feed.clock.nanosOfFrame(Math.round(frame)) ?: return
-        val lagMs = (tMid - captured) / 1e6
         val offset = Settings.values.kitchenOffsetMs
-        if (!lagCapture.isLocked) {
-            if (lagCapture.onReading(lagMs, offset)) {
-                controller.reset()
-                controller.offsetMs = lagCapture.controllerOffsetMs(offset)
+        val outcome = captureTracker.onReading(
+            tMid, positionMs, stream.map, { stream.builder.unappliedBudget() }, feed.clock, offset, lkNanos / 1e6,
+        )
+        when (outcome) {
+            is CaptureTracker.Outcome.Locked -> {
+                AppLog.add(
+                    TAG,
+                    "capture: the kitchen sounds ${fmt(outcome.lagMs)} ms after the capture (expected ${fmt(outcome.expectedMs)} ms" +
+                        ", Play to sound ${(startNanos - s.playSentNanos) / 1_000_000L} ms), holding that" +
+                        if (outcome.leadRaised) "; the speaker needs more than asked, the next stream starts ${captureLead.learnedMs} ms ahead" else "",
+                )
                 lastSummaryReadings = 0
+            }
+            is CaptureTracker.Outcome.Trim -> {
+                stream.builder.addTrim(outcome.frames)
                 AppLog.add(
                     TAG,
-                    "capture: the kitchen sounds ${fmt(lagCapture.locked ?: Double.NaN)} ms after the capture " +
-                        "(planned ${fmt(capturePlannedLagMs)} ms, Play to sound ${(startNanos - s.playSentNanos) / 1_000_000L} ms), holding that",
+                    "trim ${outcome.frames} frames (median error ${fmt(controller.errorMs)} ms, lag ${fmt(lagCapture.recentMs())} ms)",
                 )
             }
-            return
-        }
-        lagCapture.onReading(lagMs, offset)
-        controller.offsetMs = lagCapture.controllerOffsetMs(offset)
-        val base = lagCapture.baseNanos()
-        val view = StreamView(stream.map, { stream.builder.unappliedBudget() }, { f -> feed.clock.nanosOfFrame(f)?.plus(base) })
-        when (val decision = controller.onReading(tMid, positionMs, view)) {
-            is SyncController.Decision.Trim -> {
-                stream.builder.addTrim(decision.frames)
+            is CaptureTracker.Outcome.Relock -> {
+                captureRelocks++
                 AppLog.add(
                     TAG,
-                    "trim ${decision.frames} frames (median error ${fmt(controller.errorMs)} ms, lag ${fmt(lagCapture.recentMs())} ms)",
+                    "capture: the lag moved from ${fmt(outcome.fromMs)} to about ${fmt(outcome.toMs)} ms (the speaker stalled or skipped), " +
+                        "measuring it again instead of restarting the stream",
                 )
             }
-            is SyncController.Decision.Rejoin -> rejoin(decision.reason)
-            is SyncController.Decision.Hold -> Unit
+            is CaptureTracker.Outcome.Rejoin -> rejoin(outcome.reason)
+            is CaptureTracker.Outcome.Hold, is CaptureTracker.Outcome.Waiting -> Unit
         }
         val n = controller.readings
-        if (n > 0 && n % SUMMARY_EVERY_READINGS == 0 && n != lastSummaryReadings) {
+        if (lagCapture.isLocked && n > 0 && n % SUMMARY_EVERY_READINGS == 0 && n != lastSummaryReadings) {
             lastSummaryReadings = n
             AppLog.add(
                 TAG,
@@ -1073,6 +1080,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     private fun onSettings(changed: Set<String>) {
         val v = Settings.values
         controller.offsetMs = effectiveOffsetMs()
+        if (changed.contains("capture_lead_ms")) captureLead.reset()
         if (changed.contains("kitchen_enabled")) {
             if (!v.kitchenEnabled) {
                 session?.let { endSession(it, "the kitchen was switched off", true) }
@@ -1229,6 +1237,9 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         o.put("room_offset_ms", jsonNumber(round1(lag - Settings.values.captureLivingLatencyMs)))
         o.put("capture_starts", captureStarts)
         o.put("capture_planned_lag_ms", jsonNumber(round1(capturePlannedLagMs)))
+        o.put("capture_lead_ms", captureLead.effectiveMs(Settings.values.captureLeadMs))
+        o.put("capture_lead_learned_ms", captureLead.learnedMs)
+        o.put("capture_relocks", captureRelocks)
         val read = JSONObject()
         read.put("age_ms", if (lastReadingNanos == 0L) -1L else (System.nanoTime() - lastReadingNanos) / 1_000_000L)
         read.put("position_ms", lastPositionMs)

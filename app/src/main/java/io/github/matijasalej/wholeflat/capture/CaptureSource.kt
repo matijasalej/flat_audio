@@ -110,6 +110,10 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
     @Volatile
     private var mediaPlaying = false
 
+    /** When the media sessions began to say "playing" (elapsedRealtime), 0 if they do not. */
+    @Volatile
+    private var mediaPlayingSince = 0L
+
     @Volatile
     var title: String? = null
         private set
@@ -590,6 +594,8 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
     }
 
     private fun onMedia(info: MediaWatch.Info) {
+        if (info.playing && !mediaPlaying) mediaPlayingSince = SystemClock.elapsedRealtime()
+        if (!info.playing) mediaPlayingSince = 0L
         mediaPlaying = info.playing
         title = info.title
         artist = info.artist
@@ -684,6 +690,21 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
         return if (ns < 0) -1.0 else ns / 1e9
     }
 
+    /**
+     * A player whose media session says it plays while the captured audio stays silent: the app may keep
+     * its audio from being captured (a newer Spotify TV app, say). Null when all is as it should be.
+     */
+    fun warning(): String? {
+        if (state != "running") return null
+        val since = mediaPlayingSince
+        if (!mediaPlaying || since == 0L || SystemClock.elapsedRealtime() - since < WARN_AFTER_MS) return null
+        val quietFor = silentSeconds()
+        if (detector.state == ActivityDetector.State.ACTIVE || (quietFor in 0.0..WARN_QUIET_SECONDS)) return null
+        val who = MediaWatch.lastInfo?.packageName?.takeIf { it.isNotEmpty() } ?: "a player"
+        return "The media session of $who says it plays, but the captured audio is silent. The app may not allow its audio " +
+            "to be captured (an older version of the Spotify TV app may be needed), or it plays through another path."
+    }
+
     /** One line for the screen. */
     fun summaryText(): String {
         val sb = StringBuilder()
@@ -701,6 +722,7 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
             else -> sb.append(state.replace('_', ' '))
         }
         problem?.let { sb.append("\n            ").append(it) }
+        warning()?.let { sb.append("\n            ").append(it) }
         return sb.toString()
     }
 
@@ -709,6 +731,7 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
         o.put("enabled", Settings.values.captureEnabled)
         o.put("state", state)
         o.put("problem", problem ?: JSONObject.NULL)
+        o.put("warning", warning() ?: JSONObject.NULL)
         o.put("last_error", lastError ?: JSONObject.NULL)
         o.put("attempts", attempts)
         o.put("retry_in_s", if (state == "retry") Math.max(0L, (retryAtMs - SystemClock.elapsedRealtime() + 999) / 1000) else -1)
@@ -757,6 +780,8 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
         private const val TIMESTAMP_EVERY_NANOS = 250_000_000L
         private const val LOG_EVERY_MS = 30_000L
         private const val GOOD_RUN_MS = 30_000L
+        private const val WARN_AFTER_MS = 15_000L
+        private const val WARN_QUIET_SECONDS = 10.0
         private const val MAX_TIMELINE = 40
 
         /** The running source, for the activity and the service. */

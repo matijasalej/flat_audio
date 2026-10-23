@@ -78,6 +78,21 @@ class CaptureLagTest {
     }
 
     @Test
+    fun aStepOfTheLagShowsInTheLastReadingsButAnOffsetChangeDoesNot() {
+        val lag = CaptureLag()
+        assertTrue("not locked yet", lag.movedMs(5).isNaN())
+        lockedAt(lag, 440.0)
+        assertEquals(0.0, lag.movedMs(5), 0.0)
+        // the offset changes: the readings stay where they were
+        lag.onReading(440.0, 80)
+        assertEquals(0.0, lag.movedMs(5), 0.0)
+        // the lag steps up by 700 ms: five readings are enough to see it
+        repeat(5) { lag.onReading(1_140.0, 0) }
+        assertEquals(700.0, lag.movedMs(5), 0.0)
+        assertEquals(1_140.0, lag.recentMs(5), 0.0)
+    }
+
+    @Test
     fun resetStartsMeasuringAgain() {
         val lag = CaptureLag()
         lockedAt(lag, 480.0)

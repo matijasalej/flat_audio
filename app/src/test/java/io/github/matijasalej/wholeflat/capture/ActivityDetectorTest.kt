@@ -143,12 +143,56 @@ class ActivityDetectorTest {
     }
 
     @Test
-    fun soundAfterAHintIsAStartAsUsual() {
+    fun soundAfterAHintIsAStartWithoutASecondCandidate() {
         val d = ActivityDetector()
         d.hint(true, 0)
         val e = run(d, 500, 500, loud)
         assertEquals(State.ACTIVE, d.state)
-        assertTrue(e.any { it.second == Event.START })
+        assertEquals("the candidate was announced by the hint", listOf(Event.START), events(e))
+        assertEquals(700L, e[0].first)
+    }
+
+    @Test
+    fun aHintThatWasWithdrawnIsNotRepeatedUntilThePlayerSaysItStopped() {
+        val d = ActivityDetector()
+        assertEquals(listOf(Event.CANDIDATE), d.hint(true, 0))
+        val e = run(d, 100, 4_000, quiet)
+        assertEquals(listOf(Event.CANDIDATE_CANCELLED), events(e))
+        // the player keeps saying "playing" (its audio may be blocked): no new candidate, however often
+        assertTrue(d.hint(true, 5_000 * ms).isEmpty())
+        assertTrue(d.hint(true, 9_000 * ms).isEmpty())
+        // it stops and plays again: a new episode
+        assertTrue(d.hint(false, 10_000 * ms).isEmpty())
+        assertEquals(listOf(Event.CANDIDATE), d.hint(true, 11_000 * ms))
+    }
+
+    @Test
+    fun aBlipDoesNotWithdrawTheHintBeforeItsTimeout() {
+        val d = ActivityDetector()
+        d.hint(true, 0)
+        val blip = run(d, 500, 60, loud) + run(d, 560, 1_000, quiet)
+        assertTrue("the player still says it plays: $blip", blip.isEmpty())
+        val late = run(d, 1_560, 3_000, quiet)
+        assertEquals(listOf(Event.CANDIDATE_CANCELLED), events(late))
+    }
+
+    @Test
+    fun aPlayerThatTakesItsHintBackCancelsTheCandidate() {
+        val d = ActivityDetector()
+        assertEquals(listOf(Event.CANDIDATE), d.hint(true, 0))
+        assertEquals(listOf(Event.CANDIDATE_CANCELLED), d.hint(false, 500 * ms))
+        // and sound after that is a fresh candidate
+        assertEquals(listOf(Event.CANDIDATE, Event.START), events(run(d, 1_000, 400, loud)))
+    }
+
+    @Test
+    fun aSoundCandidateIsNotAnnouncedAgainByAHint() {
+        val d = ActivityDetector()
+        val first = run(d, 0, 100, loud)
+        assertEquals(listOf(Event.CANDIDATE), events(first))
+        assertTrue("already open", d.hint(true, 100 * ms).isEmpty())
+        val rest = run(d, 100, 400, loud)
+        assertEquals(listOf(Event.START), events(rest))
     }
 
     @Test

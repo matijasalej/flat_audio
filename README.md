@@ -108,7 +108,7 @@ adb shell cmd notification allow_listener io.github.matijasalej.wholeflat/io.git
 
 | Setting | Meaning |
 | --- | --- |
-| `capture_lead_ms` (40 to 3000, default 150) | How much audio is sent to the Sonos ahead when the stream starts. A smaller number is a smaller lag; if the kitchen stutters, make it bigger. It is read when a stream starts. |
+| `capture_lead_ms` (40 to 3000, default 150) | How much audio is sent to the Sonos ahead when the stream starts. A smaller number is a smaller lag; if the kitchen stutters, make it bigger. It is read when a stream starts. If the Sonos turns out to need more than asked (it waits for audio before it plays, or it stalls and fills its buffer again), the app remembers that until it is restarted or you change this setting, and starts the next streams that far ahead; `kitchen.capture_lead_ms` is the lead in use and `kitchen.capture_lead_learned_ms` what was learned. |
 | `kitchen_offset_ms` | Still works in capture mode: a positive value makes the lag bigger by that much, a negative one smaller (never below 100 ms). A change of more than about 60 ms restarts the stream. |
 | `capture_living_latency_ms` (default 0) | How much later than it is captured the living room sounds (the Chromecast's output buffer and the TV's delay). It is only subtracted in the reported `kitchen.room_offset_ms`; nothing is steered with it. |
 | `capture_enabled` (default on) | Switches the capture off. |
@@ -188,7 +188,7 @@ The **capture source** (`app/.../capture/CaptureSource.kt`) is the second one. I
 - At a start the app prepares the Sonos (mute, stop, set the stream URL), then places the first frame in the living room's audio track so that it is heard when the Sonos's first sound arrives (about 0.29 s after Play), using `AudioTrack.getTimestamp`, and sends Play at that moment.
 - During playback the app asks the Sonos for its play position five times a second over its local websocket, maps it to the music frame it is playing, and compares that with when the living room plays the same frame. Small errors are removed by dropping or repeating single frames in the stream (never more than one per 10 ms); an error of more than 40 ms for three readings restarts only the Sonos stream at the right frame.
 - If the Sonos goes away (sleep, Bluetooth, another app), the living room keeps playing. The app polls the Sonos every 3 s and listens for its announcements; when it is free again, it joins the music in progress.
-- In capture mode there is no living room to follow, so the stream starts a little in the past (`capture_lead_ms`), the first readings of the Sonos's position measure how long after the capture the kitchen sounds, and that lag is then held constant with the same frame trims (a tolerance of 8 ms, and a re-join at 60 ms for five readings).
+- In capture mode there is no living room to follow, so the stream starts a little in the past (`capture_lead_ms`), the first readings of the Sonos's position measure how long after the capture the kitchen sounds, and that lag is then held constant with the same frame trims (a tolerance of 8 ms). If the lag itself steps (the Sonos stalled and filled its buffer again), it is measured again instead of restarting the stream (`kitchen.capture_relocks`); the stream is restarted only for a lag beyond 5 s, after six such steps, or when a change of the kitchen offset is more than the trims can follow (about 60 ms at once).
 
 ## Building
 

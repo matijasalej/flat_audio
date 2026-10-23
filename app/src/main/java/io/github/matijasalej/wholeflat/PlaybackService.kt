@@ -8,9 +8,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioTrack
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
@@ -21,9 +18,9 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
-import android.os.Process
 import android.os.SystemClock
 import android.system.Os
+import io.github.matijasalej.wholeflat.sync.VolumeCurve
 import org.json.JSONObject
 import kotlin.concurrent.thread
 
@@ -32,7 +29,7 @@ import kotlin.concurrent.thread
  *
  * - the wake, Wi-Fi and multicast locks (libmdns needs the multicast lock before the native start),
  * - the native Spotify Connect engine (librespot, see NativeBridge),
- * - the audio thread: NativeBridge.readPcm -> AudioTrack,
+ * - the living room: the AudioTrack pull thread (see LivingRoom),
  * - the event thread: NativeBridge.nextEvent -> status model, log, MediaSession, notification,
  * - the debug HTTP server.
  *
@@ -44,9 +41,6 @@ class PlaybackService : Service() {
         private const val TAG = "service"
         private const val CHANNEL_ID = "playback"
         private const val NOTIFICATION_ID = 1
-        private const val SAMPLE_RATE = 44_100
-        private const val BUFFER_MS = 200
-        private const val IDLE_PAUSE_MS = 500L
         private const val NETWORK_WAIT_MS = 60_000L
         private const val RESTART_WINDOW_MS = 10 * 60_000L
         private const val MAX_RESTARTS_PER_WINDOW = 5
@@ -61,12 +55,12 @@ class PlaybackService : Service() {
     @Volatile
     private var running = false
 
-    /** Bumped whenever the audio and event threads have to end (stop or native restart). */
+    /** Bumped whenever the event thread has to end (stop or native restart). */
     @Volatile
     private var epoch = 0
 
+    private lateinit var livingRoom: LivingRoom
     private var bootThread: Thread? = null
-    private var audioThread: Thread? = null
     private var eventThread: Thread? = null
     private val restartTimes = ArrayList<Long>()
     private var lastNotificationText = ""
@@ -91,9 +85,15 @@ class PlaybackService : Service() {
             return
         }
         AppState.service = "starting"
+        Settings.init(this)
+        livingRoom = LivingRoom(this)
+        AppState.livingRoom = livingRoom
+        Settings.addListener(settingsListener)
+        applyVolume()
         acquireLocks()
         createMediaSession()
         registerNetworkCallback()
+        livingRoom.start()
         DebugServer.ensureStarted(this)
     }
 
@@ -116,7 +116,7 @@ class PlaybackService : Service() {
         } catch (t: Throwable) {
             AppLog.error(TAG, "NativeBridge.stop failed", t)
         }
-        for (t in listOf(bootThread, audioThread, eventThread)) {
+        for (t in listOf(bootThread, eventThread)) {
             try {
                 t?.join(1500)
             } catch (e: InterruptedException) {
@@ -124,6 +124,13 @@ class PlaybackService : Service() {
             }
         }
         unregisterNetworkCallback()
+        try {
+            if (::livingRoom.isInitialized) livingRoom.stop()
+        } catch (t: Throwable) {
+            AppLog.error(TAG, "stopping the living room failed", t)
+        }
+        AppState.livingRoom = null
+        Settings.removeListener(settingsListener)
         try {
             mediaSession?.isActive = false
             mediaSession?.release()
@@ -147,7 +154,6 @@ class PlaybackService : Service() {
         AppState.session = "idle"
         AppState.sessionUser = null
         AppState.playback = "stopped"
-        AppState.audio = "idle"
         super.onDestroy()
     }
 
@@ -200,7 +206,7 @@ class PlaybackService : Service() {
         AppState.service = "running"
         AppLog.add(TAG, "native engine started: ${AppState.nativeVersion}")
         val myEpoch = epoch
-        audioThread = thread(name = "wf-audio") { audioLoop(myEpoch) }
+        livingRoom.engineReset()
         eventThread = thread(name = "wf-events") { eventLoop(myEpoch) }
         updateNotification()
         return true
@@ -230,7 +236,7 @@ class PlaybackService : Service() {
             } catch (t: Throwable) {
                 AppLog.error(TAG, "NativeBridge.stop failed", t)
             }
-            for (t in listOf(audioThread, eventThread)) {
+            for (t in listOf(eventThread)) {
                 try {
                     if (t !== Thread.currentThread()) t?.join(2000)
                 } catch (e: InterruptedException) {
@@ -331,125 +337,22 @@ class PlaybackService : Service() {
         }
     }
 
-    // ---- audio ---------------------------------------------------------------------------------
+    // ---- settings and volume -------------------------------------------------------------------
 
-    private fun createTrack(): AudioTrack? {
-        return try {
-            val minBytes = AudioTrack.getMinBufferSize(
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_OUT_STEREO,
-                AudioFormat.ENCODING_PCM_16BIT,
-            )
-            val wantBytes = SAMPLE_RATE * 4 * BUFFER_MS / 1000 // 4 bytes per stereo frame
-            val bytes = maxOf(minBytes, wantBytes) / 4 * 4
-            val track = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build(),
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(SAMPLE_RATE)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-                        .build(),
-                )
-                .setBufferSizeInBytes(bytes)
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
-            if (track.state != AudioTrack.STATE_INITIALIZED) {
-                track.release()
-                AppLog.error(TAG, "AudioTrack did not initialise")
-                null
-            } else {
-                AppLog.add(TAG, "AudioTrack open: $bytes bytes buffer (min $minBytes), session ${track.audioSessionId}")
-                track
-            }
-        } catch (e: Exception) {
-            AppLog.error(TAG, "cannot create the AudioTrack", e)
-            null
-        }
+    private val settingsListener: (Set<String>) -> Unit = { changed ->
+        if (changed.contains("living_fixed_volume")) applyVolume()
     }
 
-    private fun pauseTrack(track: AudioTrack?) {
-        try {
-            track?.pause()
-            track?.flush()
-        } catch (e: IllegalStateException) {
-            AppLog.error(TAG, "AudioTrack.pause failed", e)
+    /** The living room plays at full level, unless "living room fixed volume" is off. */
+    private fun applyVolume() {
+        if (!::livingRoom.isInitialized) return
+        val raw = AppState.volumeRaw
+        val gain = if (Settings.values.livingFixedVolume || raw < 0) {
+            1.0f
+        } else {
+            VolumeCurve.logGain(raw / 65535.0).toFloat()
         }
-    }
-
-    private fun audioLoop(myEpoch: Int) {
-        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-        val buffer = ShortArray(4096) // 2048 stereo frames, about 46 ms
-        var track: AudioTrack? = null
-        var playing = false
-        var lastData = SystemClock.elapsedRealtime()
-        var lastStats = lastData
-        try {
-            while (running && epoch == myEpoch) {
-                val n = NativeBridge.readPcm(buffer, 100)
-                val now = SystemClock.elapsedRealtime()
-                if (n < 0) break
-                if (n == 0) {
-                    // No data: after about half a second the stream is paused or between tracks.
-                    if (playing && now - lastData >= IDLE_PAUSE_MS) {
-                        pauseTrack(track)
-                        playing = false
-                        AppState.audio = "paused"
-                    }
-                    continue
-                }
-                lastData = now
-                var current = track
-                if (current == null) {
-                    current = createTrack()
-                    if (current == null) {
-                        Thread.sleep(1000)
-                        continue
-                    }
-                    track = current
-                }
-                if (!playing) {
-                    current.play()
-                    playing = true
-                    AppState.audio = "playing"
-                }
-                var offset = 0
-                while (offset < n && running) {
-                    val written = current.write(buffer, offset, n - offset)
-                    if (written < 0) {
-                        AppLog.error(TAG, "AudioTrack.write returned $written, reopening the track")
-                        current.release()
-                        track = null
-                        playing = false
-                        break
-                    }
-                    if (written == 0) Thread.sleep(5)
-                    offset += written
-                }
-                AppState.framesWritten += n / 2
-                if (now - lastStats >= 1000) {
-                    lastStats = now
-                    track?.let { AppState.underruns = it.underrunCount }
-                }
-            }
-        } catch (t: Throwable) {
-            AppLog.error(TAG, "audio thread died", t)
-        } finally {
-            try {
-                track?.pause()
-                track?.flush()
-                track?.release()
-            } catch (e: Exception) {
-                // released already
-            }
-            AppState.audio = "idle"
-            AppLog.add(TAG, "audio thread ended")
-        }
+        livingRoom.gain = gain
     }
 
     // ---- events --------------------------------------------------------------------------------
@@ -532,7 +435,11 @@ class PlaybackService : Service() {
                 AppState.trackUri = o.optString("track_id").ifEmpty { null }
                 publishMetadata()
             }
-            "volume_changed" -> AppState.volumePercent = o.optInt("percent", -1)
+            "volume_changed" -> {
+                AppState.volumePercent = o.optInt("percent", -1)
+                AppState.volumeRaw = o.optInt("volume", -1)
+                applyVolume()
+            }
             "error" -> AppState.lastError = o.optString("where") + ": " + o.optString("message")
             "engine_exit" -> {
                 if (o.optBoolean("unexpected") && running) {

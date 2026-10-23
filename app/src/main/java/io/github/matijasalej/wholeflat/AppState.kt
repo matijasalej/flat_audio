@@ -66,10 +66,11 @@ object AppState {
     /** Spotify volume 0..100, -1 until the first report. */
     @Volatile var volumePercent: Int = -1
 
-    /** idle, playing, paused (no data) */
-    @Volatile var audio: String = "idle"
-    @Volatile var framesWritten: Long = 0
-    @Volatile var underruns: Int = 0
+    /** The same volume as librespot has it, 0..65535, -1 until the first report. */
+    @Volatile var volumeRaw: Int = -1
+
+    /** The rooms, for their status; set by the service. */
+    @Volatile var livingRoom: LivingRoom? = null
 
     @Volatile var network: String = "unknown"
     @Volatile var lastError: String? = null
@@ -112,9 +113,8 @@ object AppState {
         o.put("duration_ms", durationMs)
         o.put("position_ms", currentPositionMs())
         o.put("volume_percent", volumePercent)
-        o.put("audio", audio)
-        o.put("frames_written", framesWritten)
-        o.put("underruns", underruns)
+        o.put("volume_raw", volumeRaw)
+        o.put("living_room", livingRoom?.statusJson() ?: JSONObject.NULL)
         o.put("network", network)
         o.put("last_error", lastError ?: JSONObject.NULL)
         o.put("events", eventCount)
@@ -143,8 +143,13 @@ object AppState {
             sb.append("\n")
         }
         sb.append("Volume    : ").append(if (volumePercent >= 0) "$volumePercent %" else "-").append("\n")
-        sb.append("Audio     : ").append(audio).append("  frames ").append(framesWritten)
-        sb.append("  underruns ").append(underruns).append("\n")
+        livingRoom?.let { lr ->
+            sb.append("Living    : ").append(lr.state)
+            if (lr.dataFlowing) sb.append("  ").append(lr.epochKind)
+            sb.append("  underruns ").append(lr.underruns)
+            sb.append("  stalls ").append(lr.stalls)
+            sb.append("  recoveries ").append(lr.recoveries).append("\n")
+        }
         sb.append("Network   : ").append(network).append("\n")
         sb.append("Events    : ").append(eventCount)
         val age = ageSeconds(lastEventAt)

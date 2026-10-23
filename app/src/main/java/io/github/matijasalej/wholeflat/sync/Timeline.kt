@@ -29,11 +29,24 @@ class TrackTimeline(private val rate: Int = RATE) {
     var hasAnchor = false
         private set
 
+    /** When the anchor was last set (`System.nanoTime()` clock), 0 if never. */
+    @Volatile
+    var anchorSetNanos = 0L
+        private set
+
     @Synchronized
-    fun setAnchor(trackFrame: Long, nanos: Long) {
+    fun setAnchor(trackFrame: Long, nanos: Long, setAtNanos: Long = nanos) {
         anchorFrame = trackFrame
         anchorNanos = nanos
+        anchorSetNanos = setAtNanos
         hasAnchor = true
+    }
+
+    /** The track was flushed or recreated: its frame numbers start again, the old anchor is wrong. */
+    @Synchronized
+    fun clearAnchor() {
+        hasAnchor = false
+        anchorSetNanos = 0L
     }
 
     @Synchronized

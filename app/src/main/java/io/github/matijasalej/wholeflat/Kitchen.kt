@@ -288,7 +288,15 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         }
         val volume = sonosVolume()
         if (volume >= 0) api.setVolume(volume)
-        val set = api.setUri(s.uri, SonosXml.didlTrack(TITLE, s.uri))
+        val didl = SonosXml.didlTrack(TITLE, s.uri)
+        var set = api.setUri(s.uri, didl)
+        var tries = 1
+        while (!set.ok && set.upnpError == 701 && tries < 3) {
+            // "transition not available": the Stop from a moment ago is still being worked off
+            sleepQuietly(80)
+            set = api.setUri(s.uri, didl)
+            tries++
+        }
         if (!set.ok) {
             prepFailed(s, "SetAVTransportURI", set)
             return false

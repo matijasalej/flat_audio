@@ -132,6 +132,11 @@ class LivingRoom(private val context: Context) {
     @Volatile
     private var bufferFrames = 0
 
+    /** none, timestamp (AudioTrack.getTimestamp) or head (the playback head position, if the device has no timestamps) */
+    @Volatile
+    var anchorSource = "none"
+        private set
+
     // ---- threads and the track -----------------------------------------------------------------
 
     @Volatile
@@ -159,6 +164,7 @@ class LivingRoom(private val context: Context) {
     private var written = 0L
     private var flushedAtNanos = 0L
     private var lastAnchorPollNanos = 0L
+    private var timestampMissingSinceNanos = 0L
     private var lastUnderrunCount = 0
 
     /** The ring frame after the last one written, while the current run goes on. */
@@ -519,6 +525,7 @@ class LivingRoom(private val context: Context) {
         filter.reset()
         flushedAtNanos = System.nanoTime()
         lastAnchorPollNanos = 0L
+        timestampMissingSinceNanos = 0L
     }
 
     /** Pause, discard what is queued, play again: the room falls silent within a few milliseconds. */
@@ -615,12 +622,35 @@ class LivingRoom(private val context: Context) {
         } catch (e: Exception) {
             false
         }
-        if (!ok) return
-        val frame = timestamp.framePosition
-        val nanos = timestamp.nanoTime
-        if (frame <= 0 || frame > written || nanos < flushedAtNanos || nanos > now + 20_000_000L) return
-        val anchor = filter.add(frame, nanos)
-        timeline.setAnchor(anchor.frame, anchor.nanos, now)
+        if (ok) {
+            val frame = timestamp.framePosition
+            val nanos = timestamp.nanoTime
+            if (frame <= 0 || frame > written || nanos < flushedAtNanos || nanos > now + 20_000_000L) return
+            timestampMissingSinceNanos = 0L
+            if (anchorSource != "timestamp") {
+                filter.reset()
+                anchorSource = "timestamp"
+            }
+            val anchor = filter.add(frame, nanos)
+            timeline.setAnchor(anchor.frame, anchor.nanos, now)
+            return
+        }
+        // No timestamp from the HAL. If it stays that way, the playback head position is the next best
+        // thing: it is only updated once per buffer period, so it lags by half a period on average, a
+        // constant that the kitchen offset absorbs.
+        if (timestampMissingSinceNanos == 0L) timestampMissingSinceNanos = now
+        if (now - timestampMissingSinceNanos > HEAD_FALLBACK_NANOS && written > 0) {
+            val head = headFrames(t)
+            if (head > 0 && head <= written) {
+                if (anchorSource != "head") {
+                    filter.reset()
+                    anchorSource = "head"
+                    AppLog.add(TAG, "no audio timestamps from this device, using the playback head position")
+                }
+                val anchor = filter.add(head, now)
+                timeline.setAnchor(anchor.frame, anchor.nanos, now)
+            }
+        }
     }
 
     /** The ring frame heard about 40 ms from now (where a pause would take effect), or -1. */
@@ -704,6 +734,7 @@ class LivingRoom(private val context: Context) {
         o.put("route_changes", routeChanges)
         o.put("buffer_ms", bufferFrames * 1000 / RATE)
         o.put("has_anchor", timeline.hasAnchor)
+        o.put("anchor_source", anchorSource)
         val setAt = timeline.anchorSetNanos
         o.put("anchor_age_ms", if (setAt == 0L) -1L else (System.nanoTime() - setAt) / 1_000_000L)
         o.put("gain", gain.toDouble())
@@ -737,6 +768,7 @@ class LivingRoom(private val context: Context) {
         private const val HINT_AHEAD_NANOS = 40_000_000L
         private const val STALL_NANOS = 1_200_000_000L
         private const val STARTUP_STALL_NANOS = 8_000_000_000L
+        private const val HEAD_FALLBACK_NANOS = 1_500_000_000L
         private const val KIND_CALIBRATION = 3
     }
 }

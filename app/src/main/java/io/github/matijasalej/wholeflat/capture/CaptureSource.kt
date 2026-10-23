@@ -41,7 +41,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *  2. gets the screen capture consent from a translucent activity ([CaptureConsentActivity], answered at
  *     once when PROJECT_MEDIA is allowed), puts [CaptureService] in the foreground with the type
  *     mediaProjection (Android 14 wants that order) and only then gets the MediaProjection;
- *  3. captures the uids of the two player apps as 48 kHz stereo into the [CaptureFeed] and watches the level:
+ *  3. captures the uids of the two player apps as 44.1 kHz stereo into the [CaptureFeed] and watches the level:
  *     the [ActivityDetector] turns it into start, pause, resume and idle for the [CaptureListener];
  *  4. when the projection is lost, or anything fails, tries again with a back-off of 2, 5, 15, 30 and then 60 s.
  *
@@ -472,7 +472,7 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
 
     private fun captureLoop(a: Attempt, record: AudioRecord) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-        val buf = ShortArray(CHUNK_FRAMES * 2)
+        val buf = ShortArray(feed.rate * CHUNK_MS / 1000 * 2)
         val ts = AudioTimestamp()
         var lastTimestampAt = 0L
         var lastLogMs = SystemClock.elapsedRealtime()
@@ -783,8 +783,8 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
         /** The Cast receiver of the Chromecast (it plays what a phone casts) and the Spotify TV app. */
         val PACKAGES = listOf("com.google.android.apps.mediashell", "com.spotify.tv.android")
 
-        /** 20 ms per read. */
-        private const val CHUNK_FRAMES = 960
+        /** A read is 20 ms of audio. */
+        private const val CHUNK_MS = 20
         private const val ACTIVITY_WAIT_MS = 8_000L
         private const val CONSENT_WAIT_MS = 15_000L
         private const val SERVICE_WAIT_MS = 8_000L

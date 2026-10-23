@@ -74,7 +74,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     private val ringController = SyncController()
 
     /**
-     * The captured stream is at 48 kHz, and its time stamps are looser than the living room's (the reads are 20 ms
+     * The captured stream has the capture's sample rate, and its time stamps are looser than the living room's (the reads are 20 ms
      * apart), so the controller is a little more tolerant: it only has to hold the lag constant.
      */
     private val captureController = SyncController(

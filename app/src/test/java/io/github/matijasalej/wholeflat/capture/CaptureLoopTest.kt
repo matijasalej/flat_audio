@@ -18,9 +18,9 @@ import java.util.Random
  * sound, with noise. The capture runs in real time: a frame exists from the moment it is captured.
  */
 class CaptureLoopTest {
-    private val rate = 48_000
+    private val rate = CaptureFeed.RATE
     private val t0 = 1_000_000_000_000L
-    private val chunk = 960
+    private val chunk = rate / 50
 
     /** The Sonos stops playing for [lengthMs] at [atS] seconds after Play (it refills its buffer), then goes on. */
     private class Stall(val atS: Double, val lengthMs: Double)

@@ -109,8 +109,11 @@ class CaptureFeed(val rate: Int = RATE) : PcmSink {
     }
 
     companion object {
-        /** Android's AudioPlaybackCapture is asked for 48 kHz stereo. */
-        const val RATE = 48_000
+        /**
+         * Android's AudioPlaybackCapture is asked for 44.1 kHz stereo: what the Cast receiver plays, and what the ring of
+         * the Spotify engine and the stream to the Sonos use, so nothing is resampled anywhere and both modes are alike.
+         */
+        const val RATE = 44_100
         const val BUFFER_SECONDS = 8
     }
 }

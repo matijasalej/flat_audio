@@ -4,7 +4,7 @@ import io.github.matijasalej.wholeflat.sync.FrameSource
 
 /**
  * The last seconds of the captured audio: interleaved 16 bit stereo frames at the capture's own sample rate
- * (48 kHz), numbered from the start of the capture ("generation"). One writer (the capture thread), any
+ * (44.1 kHz), numbered from the start of the capture ("generation"). One writer (the capture thread), any
  * number of readers (the stream to the Sonos), which read by absolute frame index and do not consume.
  *
  * Unlike the ring of the Spotify engine, the writer never waits: a capture cannot be slowed down, so a

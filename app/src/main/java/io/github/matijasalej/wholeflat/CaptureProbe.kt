@@ -263,6 +263,11 @@ object CaptureProbe {
             return
         }
         serviceRef = service
+        if (s.state != "starting_service" || s.projection != null) {
+            // a second onStartCommand for the same session: the consent token is good for one projection
+            s.note("capture service started again in state ${s.state}, ignored")
+            return
+        }
         s.note("capture service is in the foreground (mediaProjection)")
         val data = s.resultData
         if (data == null) {
@@ -312,22 +317,22 @@ object CaptureProbe {
 
     // ---- the capture thread -------------------------------------------------------------------
 
-    private fun buildRecord(s: Session, projection: MediaProjection): AudioRecord {
+    /**
+     * match=uid captures the app's uid; match=usage the usages MEDIA, UNKNOWN and GAME of every
+     * app, minus this app's own uid ([excludeOwn]) so that a monitor with usage media cannot feed
+     * back into the capture.
+     */
+    private fun buildRecord(s: Session, projection: MediaProjection, excludeOwn: Boolean): AudioRecord {
         val builder = AudioPlaybackCaptureConfiguration.Builder(projection)
         if (s.match == "usage") {
             builder.addMatchingUsage(AudioAttributes.USAGE_MEDIA)
             builder.addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
             builder.addMatchingUsage(AudioAttributes.USAGE_GAME)
-            try {
-                // Keeps this app's own monitor playback out of the capture (it would feed back).
-                builder.excludeUid(Process.myUid())
-                s.excludedOwnUid = true
-            } catch (e: Exception) {
-                s.note("excludeUid is not allowed with usage rules: $e")
-            }
+            if (excludeOwn) builder.excludeUid(Process.myUid())
         } else {
             builder.addMatchingUid(s.uid)
         }
+        s.excludedOwnUid = s.match == "usage" && excludeOwn
         val config = builder.build()
         val format = AudioFormat.Builder()
             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
@@ -347,7 +352,14 @@ object CaptureProbe {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         try {
             val projection = s.projection ?: throw IllegalStateException("no MediaProjection")
-            val record = buildRecord(s, projection)
+            val record = try {
+                buildRecord(s, projection, excludeOwn = true)
+            } catch (e: Exception) {
+                if (s.match != "usage") throw e
+                // maybe the combination of usage rules and a uid exclusion is what the system refuses
+                s.note("AudioRecord with the own uid excluded failed (${why(e)}), trying without")
+                buildRecord(s, projection, excludeOwn = false)
+            }
             s.record = record
             s.note(
                 "AudioRecord built: ${recordStateName(record.state)}, ${record.sampleRate} Hz, ${record.channelCount} ch, " +

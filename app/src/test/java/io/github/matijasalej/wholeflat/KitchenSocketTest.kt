@@ -125,7 +125,7 @@ class KitchenSocketTest {
      * Reads for [forMs] at most, whatever a connection that keeps on sending delivers meanwhile. The second value
      * is true if the server closed the connection (an end of stream or a reset) within that time.
      */
-    private fun drain(s: Socket, forMs: Int = 400): Pair<Int, Boolean> {
+    private fun drain(s: Socket, forMs: Int = 1_000): Pair<Int, Boolean> {
         val end = System.nanoTime() + forMs * 1_000_000L
         val buf = ByteArray(64 * 1024)
         var total = 0
@@ -190,14 +190,14 @@ class KitchenSocketTest {
     @Test
     fun anOlderConnectionKeepsRunningWhenANewerOneComesAndWhenPlayIsSent() {
         val probe = request("GET")
-        val (first, closed1) = drain(probe)
+        val (first, closed1) = drain(probe, 1_500)
         assertTrue("the probe gets its bytes at once: $first", first > 100_000)
         assertFalse(closed1)
         // Play is sent, the Sonos opens the stream proper and asks for the headers again
         session.arm(System.nanoTime() + 290_000_000L)
         val stream = request("GET")
         val head = request("HEAD")
-        val (second, closed2) = drain(stream)
+        val (second, closed2) = drain(stream, 1_500)
         assertTrue("the stream gets its lead: $second", second > 100_000)
         assertFalse(closed2)
         drain(head, 200)

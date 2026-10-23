@@ -2,7 +2,7 @@
 //!
 //! Shape (after librespot's own `main.rs`, with the `exit(1)` paths replaced by retries):
 //!
-//! * One `Player` and one `SoftMixer` live for the whole run. Sessions come and go; the player is
+//! * One `Player` and one `ForwardMixer` live for the whole run. Sessions come and go; the player is
 //!   pointed at the current one with `Player::set_session`.
 //! * Zeroconf discovery runs the whole time, including while a session is up, so a phone can always
 //!   (re-)pair, even after the session was lost. Losing the session hides the device from the
@@ -28,7 +28,6 @@ use librespot_core::{Error, Session, SessionConfig};
 use librespot_discovery::Discovery;
 use librespot_playback::audio_backend::Sink;
 use librespot_playback::config::{Bitrate, PlayerConfig};
-use librespot_playback::mixer::softmixer::SoftMixer;
 use librespot_playback::mixer::{Mixer, MixerConfig};
 use librespot_playback::player::{Player, PlayerEvent};
 use log::{info, warn};
@@ -37,7 +36,8 @@ use tokio::sync::watch;
 use tokio::time::{interval, sleep_until, timeout, Instant};
 
 use crate::events::{mask, EventQueue};
-use crate::ring::{Ring, RingSink};
+use crate::mixer::ForwardMixer;
+use crate::ring::{FrameRing, PlayerEvents, RingSink};
 
 /// The desktop (keymaster) client id. A receiver replays the credential a controller hands over,
 /// and Spotify only honours it under the id that issued it; the Android default makes desktop
@@ -61,7 +61,7 @@ pub struct Config {
 
 /// What the JNI side and the engine thread share.
 pub struct Shared {
-    pub ring: Arc<Ring>,
+    pub ring: Arc<FrameRing>,
     pub events: Arc<EventQueue>,
 }
 
@@ -196,7 +196,9 @@ pub async fn run(
     };
     let mut session = Session::new(session_config.clone(), cache.clone());
 
-    let mixer = match <SoftMixer as Mixer>::open(MixerConfig::default()) {
+    // The volume is stored, not applied: the living room always gets the full signal, the Connect
+    // volume reaches Kotlin as an event (see mixer.rs).
+    let mixer = match <ForwardMixer as Mixer>::open(MixerConfig::default()) {
         Ok(m) => Arc::new(m),
         Err(e) => return Err(format!("mixer: {e}")),
     };
@@ -215,7 +217,13 @@ pub async fn run(
         move || -> Box<dyn Sink> { Box::new(RingSink::new(sink_ring, sink_events)) },
     );
 
-    // Every PlayerEvent becomes one JSON event.
+    // The ring reads the player's events itself (a second receiver), to find the discontinuities of
+    // the audio at exactly the right frame.
+    shared
+        .ring
+        .set_event_source(Box::new(PlayerEvents::new(player.get_player_event_channel())));
+
+    // Every PlayerEvent also becomes one JSON event.
     let forward_events = events.clone();
     let mut player_rx = player.get_player_event_channel();
     let forwarder = tokio::spawn(async move {

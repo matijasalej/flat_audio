@@ -11,6 +11,16 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Capture mode (the audio of the Cast receiver for the kitchen). RECORD_AUDIO is for the AudioRecord of
+         the playback capture; it is granted over adb (pm grant), like the app ops below. The mediaProjection
+         service type is what Android 14 wants for the screen capture. SYSTEM_ALERT_WINDOW lets the service
+         start the consent activity from the background (adb appops set ... SYSTEM_ALERT_WINDOW allow).
+         QUERY_ALL_PACKAGES finds the uids of the two player apps (package visibility, Android 11+). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <!-- Which app is in front, so that the TV's screen is not switched off under a video. Not grantable
          from a dialog: adb shell appops set io.github.matijasalej.wholeflat GET_USAGE_STATS allow -->
     <uses-permission
@@ -23,6 +33,9 @@
     <uses-feature
         android:name="android.hardware.touchscreen"
         android:required="false" />
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
 
     <!-- The launcher is looked up to tell it from a video app (package visibility on Android 11+). -->
     <queries>
@@ -30,6 +43,9 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.HOME" />
         </intent>
+        <!-- the two player apps whose audio is captured -->
+        <package android:name="com.google.android.apps.mediashell" />
+        <package android:name="com.spotify.tv.android" />
     </queries>
 
     <!-- usesCleartextTraffic: the Sonos speakers speak plain HTTP (UPnP on :1400), the TV speaks plain
@@ -58,6 +74,32 @@
             android:name=".PlaybackService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+
+        <!-- Capture mode. The projection lives in a foreground service of its own, started by the result of the
+             consent; the translucent activity only carries the consent request. -->
+        <service
+            android:name=".capture.CaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection|mediaPlayback" />
+
+        <activity
+            android:name=".capture.CaptureConsentActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- Lets the app read the media sessions of the two player apps (play, pause, title). The access is
+             granted over adb: cmd notification allow_listener io.github.matijasalej.wholeflat/io.github.matijasalej.wholeflat.capture.MediaWatcher -->
+        <service
+            android:name=".capture.MediaWatcher"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
 
         <receiver
             android:name=".BootReceiver"

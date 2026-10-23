@@ -52,7 +52,7 @@ class SyncedHoldTest {
     @Test
     fun aSmallErrorAtTheStartIsLeftAloneAndItIsStillPlaced() {
         val hold = SyncedHold(rate)
-        assertTrue(hold.onReading(at(0.0), 5.0, 2_171.0) is SyncedHold.Decision.Hold)
+        assertTrue(hold.onReading(at(0.0), 12.0, 2_171.0) is SyncedHold.Decision.Hold)
         assertTrue(hold.placed)
         assertEquals(0, hold.corrections)
         // 30 ms is inside the band: nothing is done about it, however long it lasts
@@ -111,14 +111,34 @@ class SyncedHoldTest {
         val hold = SyncedHold(rate)
         hold.onReading(at(0.0), 0.0, 2_171.0)
         assertTrue(feed(hold, 0.0, 0.2, 100.0).isEmpty())
-        // a reconnect of the TV: its backlog is another, the common delay moves by 85 ms and the kitchen is 85 ms early of it
-        val d = hold.onReading(at(100.2), -85.0, 2_256.0)
+        // a reconnect of the TV: its backlog is another and the common delay moves by 85 ms: the kitchen moves with it, later, whatever the
+        // reading of the lag says at that moment (it is only good to 10 ms or so)
+        val d = hold.onReading(at(100.2), 7.0, 2_256.0)
         assertTrue(d is SyncedHold.Decision.Trim)
         assertEquals(Math.round(-85.0 * 44.1).toInt(), (d as SyncedHold.Decision.Trim).frames)
+        assertTrue(d.why, d.why.contains("2171") && d.why.contains("2256"))
         assertEquals(1, hold.corrections)
-        // a kitchen offset of 30 ms is a new target too
-        val e = hold.onReading(at(130.0), 30.0, 2_286.0)
+        // a kitchen offset of 10 ms is a new target too, and a small one is no reason to wait for a reading that is better than that
+        val e = hold.onReading(at(130.0), 3.0, 2_246.0)
         assertTrue(e is SyncedHold.Decision.Trim)
+        assertEquals(Math.round(10.0 * 44.1).toInt(), (e as SyncedHold.Decision.Trim).frames)
+        assertEquals(2, hold.corrections)
+    }
+
+    @Test
+    fun aTargetThatMovesBeforeTheStreamWasPlacedIsJustTheTarget() {
+        val hold = SyncedHold(rate)
+        // nothing was read yet: the first reading is placed against the target it brings
+        val d = hold.onReading(at(0.0), 60.0, 2_300.0)
+        assertTrue(d is SyncedHold.Decision.Trim)
+        assertEquals(Math.round(60.0 * 44.1).toInt(), (d as SyncedHold.Decision.Trim).frames)
+    }
+
+    @Test
+    fun aMoveOfTheTargetBeyondWhatATrimIsForIsAFreshStart() {
+        val hold = SyncedHold(rate)
+        hold.onReading(at(0.0), 0.0, 2_171.0)
+        assertTrue(hold.onReading(at(10.0), 0.0, 2_500.0) is SyncedHold.Decision.Restart)
     }
 
     @Test

@@ -11,9 +11,11 @@ import kotlin.math.abs
  * controller that follows the readings to the millisecond only follows their noise (the lag estimate of a stream that holds 2 s of
  * lead moved by 10 to 25 ms from one second to the next, and the continuous trims it caused moved the real kitchen against the TV).
  *
- *  - **Placing.** The first time a stream is seen at its lag, and again when the target moves (a new backlog of the TV after a
- *    reconnect, a changed kitchen offset), the error is trimmed away in one go (the trims reach the speaker at the pace the stream
- *    builder allows, 0.45 %). An error beyond [restartMs] is not trimmed but gets a fresh start (the lead then follows what was measured).
+ *  - **Placing.** The first time a stream is seen at its lag the error is trimmed away in one go (the trims reach the speaker at the
+ *    pace the stream builder allows, 0.45 %); an error beyond [restartMs] is not trimmed but gets a fresh start (the lead then follows
+ *    what was measured). When the target moves later (a new backlog of the TV after a reconnect, a changed kitchen offset) the kitchen
+ *    is moved by the same amount at once, without a measurement: the readings are good to 10 ms or so, a change of the offset can be
+ *    smaller than that, and the kitchen was where it was before.
  *  - **Holding.** Only an error beyond [farMs] that has lasted [farForNanos] without a break is corrected, and at most once in
  *    [everyNanos]. Every correction is reported to the caller, which logs it.
  *
@@ -91,11 +93,11 @@ class SyncedHold(
         this.errorMs = errorMs
         val before = this.targetMs
         this.targetMs = targetMs
-        if (!before.isNaN() && abs(targetMs - before) >= TARGET_STEP_MS) {
-            // a new target: the kitchen is set once more
-            placed = false
+        if (placed && !before.isNaN() && abs(targetMs - before) >= TARGET_STEP_MS) {
+            // a new target: the kitchen moves by as much as the target did (a later target means more frames, an earlier one fewer)
             isFar = false
             farForMs = 0L
+            return move(tNanos, before - targetMs, "the common delay moved from ${fmt(before)} to ${fmt(targetMs)} ms")
         }
         if (!placed) {
             placed = true
@@ -119,6 +121,9 @@ class SyncedHold(
         return correct(tNanos, errorMs, "${fmt(errorMs)} ms off for ${farFor / 1_000_000_000L} s (more than ${farMs.toInt()} ms)", 0.0)
     }
 
+    /** The target moved: the kitchen moves with it, [byMs] being what it has to move earlier (negative: later). */
+    private fun move(tNanos: Long, byMs: Double, why: String): Decision = correct(tNanos, byMs, why, 0.0)
+
     private fun correct(tNanos: Long, errorMs: Double, why: String, minMs: Double): Decision {
         if (abs(errorMs) < minMs) return Decision.Hold
         val frames = Math.round(errorMs * rate / 1000.0).toInt()
@@ -136,8 +141,8 @@ class SyncedHold(
     private fun fmt(v: Double): String = String.format(java.util.Locale.US, "%.1f", v)
 
     companion object {
-        /** The placing leaves an error smaller than this alone (ms): the readings are good to about that. */
-        const val PLACE_MIN_MS = 8.0
+        /** The placing leaves an error smaller than this alone (ms): the readings of the lag are good to 10 ms or so, and an error that small is not heard. */
+        const val PLACE_MIN_MS = 15.0
 
         /** The band inside which the kitchen is left alone (ms). */
         const val FAR_MS = 40.0

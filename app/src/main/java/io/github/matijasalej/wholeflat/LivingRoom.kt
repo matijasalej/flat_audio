@@ -332,6 +332,10 @@ class LivingRoom(private val context: Context) {
         val now = System.nanoTime()
         if (pendingEpoch != e) {
             if (pendingEpoch != -1L) coordinator?.abandon(pendingEpoch)
+            if (dataFlowing) {
+                // the old music stops now, not when the new one is ready
+                flushTrack(t)
+            }
             pendingEpoch = e
             pendingSinceNanos = now
             pendingKind = meta.kind
@@ -340,6 +344,7 @@ class LivingRoom(private val context: Context) {
             state = "preparing"
             starts++
             coordinator?.begin(e, meta.kind, meta.epochStart)
+            return
         }
         val waitedMs = (now - pendingSinceNanos) / 1_000_000L
 
@@ -597,7 +602,8 @@ class LivingRoom(private val context: Context) {
             resetFilter = false
             filter.reset()
         }
-        if (now - lastAnchorPollNanos < ANCHOR_POLL_NANOS) return
+        // without an anchor the next one is wanted as soon as the HAL has one
+        if (timeline.hasAnchor && now - lastAnchorPollNanos < ANCHOR_POLL_NANOS) return
         lastAnchorPollNanos = now
         val u = try {
             t.underrunCount

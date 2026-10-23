@@ -6,6 +6,7 @@ import io.github.matijasalej.wholeflat.sync.SonosPolicy
 import io.github.matijasalej.wholeflat.sync.SonosXml
 import io.github.matijasalej.wholeflat.sync.StartPlanner
 import io.github.matijasalej.wholeflat.sync.StreamBuilder
+import io.github.matijasalej.wholeflat.sync.StreamView
 import io.github.matijasalej.wholeflat.sync.SyncController
 import io.github.matijasalej.wholeflat.sync.VolumeCurve
 import org.json.JSONObject
@@ -83,6 +84,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     private var lastRejoinNanos = 0L
     private var lastFailureNanos = 0L
     private var readingTask: ScheduledFuture<*>? = null
+    private var unmuteTask: ScheduledFuture<*>? = null
     private var notPlayingReadings = 0
     private val volumeScheduled = AtomicBoolean(false)
 
@@ -272,6 +274,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
 
     /** Sets the speaker up for a stream: muted, stopped, at the right volume, URL loaded. False if that failed. */
     private fun prepare(s: KitchenSession, api: SonosSoap): Boolean {
+        unmuteTask?.cancel(false)
         synchronized(muteLock) {
             if (!sonosQuiet) {
                 val m = api.setMute(true)
@@ -461,7 +464,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             AppLog.add(TAG, "kitchen connected")
             onJoined?.invoke()
         }
-        val decision = controller.onReading(tMid, p.positionMs, StreamView(stream))
+        val view = StreamView(stream.map, { stream.builder.unappliedBudget() }, { f -> living.timeline.halNanosOfRing(f) })
+        val decision = controller.onReading(tMid, p.positionMs, view)
         when (decision) {
             is SyncController.Decision.Trim -> stream.builder.addTrim(decision.frames)
             is SyncController.Decision.Rejoin -> rejoin(decision.reason)
@@ -479,19 +483,6 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val before = lkNanos
         lkNanos = (before * 0.6 + observed * 0.4).toLong()
         AppLog.add(TAG, "Play to sound: ${observed / 1_000_000L} ms (was ${before / 1_000_000L}, now ${lkNanos / 1_000_000L})")
-    }
-
-    private inner class StreamView(private val stream: ActiveStream) : SyncController.View {
-        override fun ringOfStream(streamFrame: Double): Double? = stream.map.ringOfStream(streamFrame)
-
-        override fun livingHalNanos(ringFrame: Double): Long? = living.timeline.halNanosOfRing(Math.round(ringFrame))
-
-        override fun netDropsAt(streamFrame: Double): Double = stream.map.netDropsAt(streamFrame)
-
-        override fun pendingTrimFrames(streamFrame: Double): Long {
-            val applied = stream.map.netDropsAt(stream.map.streamEnd.toDouble()) - stream.map.netDropsAt(streamFrame)
-            return Math.round(applied) + stream.builder.unappliedBudget()
-        }
     }
 
     /** Only the kitchen's own stream is restarted; the living room never notices. */
@@ -550,6 +541,21 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             val m = api.setMute(true)
             api.stop()
             sonosQuiet = m.ok
+        }
+        // A stopped Sonos plays out its buffer for about 3 s, muted. After that the speaker is given
+        // back unmuted, so that Bluetooth or the Sonos app can be used on it.
+        unmuteTask?.cancel(false)
+        unmuteTask = later(IDLE_UNMUTE_MS) { unmuteIdle() }
+    }
+
+    private fun unmuteIdle() {
+        if (session != null) return
+        val dev = device ?: return
+        if (!reachable) return
+        synchronized(muteLock) {
+            if (!sonosQuiet) return
+            val m = soapFor(dev).setMute(false)
+            if (m.ok) sonosQuiet = false
         }
     }
 
@@ -949,6 +955,9 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         private const val REJOIN_COOLDOWN_NANOS = 6_000_000_000L
         private const val REJOIN_QUIET_MS = 8_000L
         private const val FAILURE_COOLDOWN_NANOS = 5_000_000_000L
+
+        /** A stopped speaker is unmuted again after this, when its buffer has run dry. */
+        private const val IDLE_UNMUTE_MS = 4_500L
 
         private fun daemonFactory(name: String): ThreadFactory = ThreadFactory { r ->
             val t = Thread(r, name)

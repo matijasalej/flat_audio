@@ -102,6 +102,19 @@ class RingFrameSource(private val epoch: Long) : FrameSource {
     }
 }
 
+/**
+ * For the probe before Play: real frames when the ring has them at once, silence when it does not, so
+ * that the Sonos is never kept waiting for the first bytes of a stream it only wants to look at.
+ */
+class ProbeSource(private val inner: FrameSource) : FrameSource {
+    override fun read(cursor: Long, out: ShortArray, maxFrames: Int, timeoutMs: Int): Int {
+        val n = inner.read(cursor, out, maxFrames, minOf(timeoutMs, 30))
+        if (n != 0) return n
+        java.util.Arrays.fill(out, 0, maxFrames * 2, 0.toShort())
+        return maxFrames
+    }
+}
+
 /** Silence, for the probe of a session whose first frame is not known yet. */
 object SilenceSource : FrameSource {
     override fun read(cursor: Long, out: ShortArray, maxFrames: Int, timeoutMs: Int): Int {
@@ -169,7 +182,11 @@ object KitchenStreams {
         val connectionId = session.nextConnectionId()
         val armed = session.armed
         val startFrame = session.startRingFrame
-        val source: FrameSource = if (startFrame >= 0) RingFrameSource(session.epoch) else SilenceSource
+        val source: FrameSource = when {
+            startFrame < 0 -> SilenceSource
+            armed -> RingFrameSource(session.epoch)
+            else -> ProbeSource(RingFrameSource(session.epoch))
+        }
         val map = KitchenMap(maxOf(0L, startFrame))
         val builder = StreamBuilder(source, map, session.channels)
         val probeClock = if (armed) null else SessionClock(System.nanoTime() + PROBE_START_NANOS)

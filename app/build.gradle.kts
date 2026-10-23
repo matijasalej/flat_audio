@@ -71,6 +71,9 @@ android {
 }
 
 dependencies {
+    // The Sonos local websocket API (wss, self-signed certificate).
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
     // The sync math is plain Kotlin and is tested on the JVM; org.json is only here because the
     // Android one is a stub in unit tests.
     testImplementation("junit:junit:4.13.2")

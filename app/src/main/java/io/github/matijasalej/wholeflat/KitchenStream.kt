@@ -65,6 +65,28 @@ class KitchenSession(
     var stream: ActiveStream? = null
         private set
 
+    private val sockets = HashSet<Socket>()
+
+    fun addSocket(socket: Socket) {
+        synchronized(sockets) { sockets.add(socket) }
+    }
+
+    fun removeSocket(socket: Socket) {
+        synchronized(sockets) { sockets.remove(socket) }
+    }
+
+    /** Closes the connections of this session: a stream thread blocked in a write to a stalled Sonos ends. */
+    fun closeSockets() {
+        val open = synchronized(sockets) { sockets.toList() }
+        for (socket in open) {
+            try {
+                socket.close()
+            } catch (e: Exception) {
+                // closed already
+            }
+        }
+    }
+
     val bytesSent = AtomicLong()
     val blocksSent = AtomicLong()
     private val connections = AtomicInteger()
@@ -175,7 +197,12 @@ object KitchenStreams {
         } catch (e: Exception) {
             // socket options are a nicety
         }
-        stream(kitchen, session, remote, userAgent, out)
+        session.addSocket(client)
+        try {
+            stream(kitchen, session, remote, userAgent, out)
+        } finally {
+            session.removeSocket(client)
+        }
     }
 
     private fun stream(kitchen: Kitchen, session: KitchenSession, remote: String, userAgent: String, out: OutputStream) {

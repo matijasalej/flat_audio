@@ -556,6 +556,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             state = baseState()
         }
         if (commands) quietSpeaker()
+        // after the mute: this only ends a stream thread that is stuck writing to a speaker that stopped reading
+        s.closeSockets()
     }
 
     private fun quietSpeaker() {

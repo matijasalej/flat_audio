@@ -307,8 +307,9 @@ class SettingsModel {
             if (t in TV_RENDERS && t != tvRender) { tvRender = t; changed.add(TV_RENDER) }
         }
         if (json.has(TV_VIDEO)) {
-            // anything that is not understood (see TvVideoSpec) is ignored; what is understood is stored in its canonical form
-            val v = TvVideoSpec.parse(json.get(TV_VIDEO).toString())?.text()
+            // anything that is not understood (see TvVideoSpec) is ignored; what is understood is stored in its canonical form. Only a constant
+            // bitrate is taken: with "720p30 vbr 6000 gop2" the latency of the TV moved by +2.08 s against the model (its preroll seems to count video bytes)
+            val v = TvVideoSpec.parse(json.get(TV_VIDEO).toString())?.takeIf { it.mode == TvVideoSpec.Mode.CBR }?.text()
             if (v != null && v != tvVideo) { tvVideo = v; changed.add(TV_VIDEO) }
         }
         if (json.has(LYRICS_OFFSET_MS)) {

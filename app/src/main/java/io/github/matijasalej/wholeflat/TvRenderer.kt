@@ -438,7 +438,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         if (wantTs) {
             val p = TvTsPipeline(
                 context, feed, (hold * 1_000_000.0).toLong(), scenes, { Display.of(Settings.values.display) == Display.SCREEN },
-                { Settings.values.let { v -> TvTsPipeline.Params(v.tvBurstMs, v.tvPcrLeadMs, v.tvRender, TvVideoSpec.parse(v.tvVideo) ?: TvVideoSpec.DEFAULT) } },
+                { Settings.values.let { v -> TvTsPipeline.Params(v.tvBurstMs, v.tvPcrLeadMs, v.tvRender, (TvVideoSpec.parse(v.tvVideo) ?: TvVideoSpec.DEFAULT).cbr()) } },
                 audioOnly = audioOnlyWanted(),
             )
             val err = p.start()

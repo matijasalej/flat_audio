@@ -500,16 +500,19 @@ class SettingsModelTest {
     }
 
     @Test
-    fun theVideoSettingTakesWhatTheSpecUnderstandsInItsCanonicalFormAndIgnoresTheRest() {
+    fun theVideoSettingTakesWhatTheSpecUnderstandsAtAConstantBitrateInItsCanonicalFormAndIgnoresTheRest() {
         val m = SettingsModel()
-        assertEquals(setOf("tv_video"), m.applyJson(JSONObject().put("tv_video", "720p30 VBR 8000")))
-        assertEquals("720p30 vbr 8000 gop1", m.tvVideo)
-        assertEquals("720p30 vbr 8000 gop1", m.toJson().getString("tv_video"))
+        assertEquals(setOf("tv_video"), m.applyJson(JSONObject().put("tv_video", "720p30 CBR 3000 gop2")))
+        assertEquals("720p30 cbr 3000 gop2", m.tvVideo)
+        assertEquals("720p30 cbr 3000 gop2", m.toJson().getString("tv_video"))
         // the same again, and nonsense: nothing changes
-        assertTrue(m.applyJson(JSONObject().put("tv_video", "vbr 8000 720p30")).isEmpty())
+        assertTrue(m.applyJson(JSONObject().put("tv_video", "cbr 3000 gop2 720p30")).isEmpty())
         assertTrue(m.applyJson(JSONObject().put("tv_video", "480p30")).isEmpty())
         assertTrue(m.applyJson(JSONObject().put("tv_video", "")).isEmpty())
-        assertEquals("720p30 vbr 8000 gop1", m.tvVideo)
-        assertEquals("720p30 vbr 8000 gop1", m.values().tvVideo)
+        // a variable bitrate moved the TV's latency by +2.08 s: it is not taken
+        assertTrue(m.applyJson(JSONObject().put("tv_video", "720p30 vbr 6000 gop2")).isEmpty())
+        assertTrue(m.applyJson(JSONObject().put("tv_video", "720p30 cq 6000")).isEmpty())
+        assertEquals("720p30 cbr 3000 gop2", m.tvVideo)
+        assertEquals("720p30 cbr 3000 gop2", m.values().tvVideo)
     }
 }

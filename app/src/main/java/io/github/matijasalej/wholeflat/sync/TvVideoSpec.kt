@@ -42,6 +42,9 @@ class TvVideoSpec(
      */
     val muxRate: Int get() = if (muxKbps > 0) muxKbps * 1000 else maxOf(9_000_000, Math.round(bitrate * 1.5).toInt())
 
+    /** The same video at a constant bitrate: the only mode the TV's timing is known for (a variable bitrate moved its latency by +2.08 s). */
+    fun cbr(): TvVideoSpec = if (mode == Mode.CBR) this else TvVideoSpec(height, fps, Mode.CBR, kbps, gopS, muxKbps)
+
     /** The setting's text. */
     fun text(): String = "${height}p$fps ${mode.key} $kbps gop$gopS" + (if (muxKbps > 0) " mux$muxKbps" else "")
 

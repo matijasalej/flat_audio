@@ -86,4 +86,12 @@ class TvVideoSpecTest {
         assertNull(TvVideoSpec.parse("mux12"))
         assertNotNull(TvVideoSpec.parse("720p30 vbr 2000 mux2400"))
     }
+
+    @Test
+    fun theVideoOfTheStreamIsAlwaysAtAConstantBitrate() {
+        assertEquals("720p30 cbr 6000 gop2", TvVideoSpec.parse("720p30 vbr 6000 gop2")!!.cbr().text())
+        assertEquals("1080p25 cbr 3000 gop1 mux3500", TvVideoSpec.parse("1080p25 cq 3000 mux3500")!!.cbr().text())
+        val c = TvVideoSpec.parse("720p30 cbr 3000")!!
+        assertEquals(c, c.cbr())
+    }
 }

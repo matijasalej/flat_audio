@@ -45,6 +45,18 @@ class CaptureFeed(val rate: Int = RATE) : PcmSink {
     /** RMS level over about the last second (dBFS). */
     fun levelDb(): Double = rolling.rmsDb()
 
+    /**
+     * The frame being captured at [nanos], counted from the last chunk that was read: the number of frames
+     * written plus the time since that read. It does not depend on the clock's anchors, which is what a
+     * start needs (a start must not be placed in the future or the past by a wrong anchor).
+     */
+    fun frameAtReadClock(nanos: Long): Long {
+        val last = lastChunkNanos
+        val written = buffer.writeIndex
+        if (last == 0L) return written
+        return written + maxOf(0L, nanos - last) * rate / 1_000_000_000L
+    }
+
     /** A new capture begins. */
     fun newGeneration(generation: Long) {
         this.generation = generation

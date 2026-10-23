@@ -1,5 +1,7 @@
 package io.github.matijasalej.wholeflat
 
+import io.github.matijasalej.wholeflat.capture.CaptureFeed
+import io.github.matijasalej.wholeflat.capture.CaptureFrames
 import io.github.matijasalej.wholeflat.sync.Flac
 import io.github.matijasalej.wholeflat.sync.FrameSource
 import io.github.matijasalej.wholeflat.sync.KitchenMap
@@ -16,7 +18,9 @@ class ActiveStream(val connectionId: Int, val map: KitchenMap, val builder: Stre
 
 /**
  * One stream for the Sonos: the FLAC of the ring from [startRingFrame] on, behind a URL of its own.
- * A session belongs to one epoch of the ring; a new epoch, a re-join or a pause ends it.
+ * A session belongs to one epoch of the ring; a new epoch, a re-join or a pause ends it. A session of the
+ * capture mode ([capture] is set) streams the captured audio of another app instead of the ring, at the
+ * capture's 48 kHz, from a frame of one capture attempt ([captureGeneration]).
  *
  * The Sonos asks for the URL before it is told to play (a HEAD and a short probe GET, which are
  * answered with real or silent frames and then closed), and again when Play arrives; only the stream
@@ -28,8 +32,15 @@ class KitchenSession(
     val kind: Int,
     startRingFrame: Long,
     val channels: StreamBuilder.ChannelMode,
+    val capture: CaptureFeed? = null,
+    val captureGeneration: Long = 0L,
 ) {
-    /** First ring frame of the stream; negative while it is not known yet (a hot-join picks it at Play time). */
+    val isCapture: Boolean get() = capture != null
+
+    /** The sample rate of the stream: the ring's 44.1 kHz, or the capture's 48 kHz. */
+    val rate: Int get() = capture?.rate ?: RING_RATE
+
+    /** First ring frame of the stream (a captured frame in capture mode); negative while it is not known yet (a hot-join picks it at Play time). */
     @Volatile
     var startRingFrame: Long = startRingFrame
 
@@ -98,7 +109,7 @@ class KitchenSession(
 
     /** Play is about to be sent: the Sonos should play stream frame 0 at [predictedStartNanos]. */
     fun arm(predictedStartNanos: Long) {
-        clock = SessionClock(predictedStartNanos)
+        clock = SessionClock(predictedStartNanos, rate)
         armed = true
     }
 
@@ -107,6 +118,11 @@ class KitchenSession(
     }
 
     fun isCurrent(connectionId: Int): Boolean = stream?.connectionId == connectionId
+
+    companion object {
+        /** The ring plays 44.1 kHz. */
+        const val RING_RATE = 44_100
+    }
 }
 
 /** The ring as the kitchen's source of frames (read by absolute index, the living room is not affected). */
@@ -209,19 +225,30 @@ object KitchenStreams {
         val connectionId = session.nextConnectionId()
         val armed = session.armed
         val startFrame = session.startRingFrame
+        val capture = session.capture
+        val rate = session.rate
+        val frames: FrameSource? = when {
+            startFrame < 0 -> null
+            capture != null -> CaptureFrames(capture.buffer, session.captureGeneration)
+            else -> RingFrameSource(session.epoch)
+        }
         val source: FrameSource = when {
-            startFrame < 0 -> SilenceSource
-            armed -> RingFrameSource(session.epoch)
-            else -> ProbeSource(RingFrameSource(session.epoch))
+            frames == null -> SilenceSource
+            armed -> frames
+            else -> ProbeSource(frames)
         }
         val map = KitchenMap(maxOf(0L, startFrame))
-        val builder = StreamBuilder(source, map, session.channels)
-        val probeClock = if (armed) null else SessionClock(System.nanoTime() + PROBE_START_NANOS)
+        // a trim is at most one frame per 10 ms
+        val builder = StreamBuilder(source, map, session.channels, trimSpacing = rate / 100)
+        val probeClock = if (armed) null else SessionClock(System.nanoTime() + PROBE_START_NANOS, rate)
+        // A captured stream is not paced: its frames exist only as they are captured, so the reads wait for them.
+        val paced = !(armed && capture != null)
         if (armed) session.attach(ActiveStream(connectionId, map, builder))
         AppLog.add(
             TAG,
-            "$remote GET session ${session.token} conn $connectionId from ring frame $startFrame, " +
-                (if (armed) "the stream" else "a probe before Play") + " [$userAgent]",
+            "$remote GET session ${session.token} conn $connectionId from ${if (capture != null) "captured" else "ring"} frame " +
+                "$startFrame, " + (if (armed) "the stream" else "a probe before Play") +
+                (if (capture != null) ", $rate Hz" + (if (paced) "" else ", not paced") else "") + " [$userAgent]",
         )
         var reason = "peer closed"
         var lost = false
@@ -229,7 +256,7 @@ object KitchenStreams {
         val began = System.nanoTime()
         fun stopped(): Boolean = session.cancelled || (armed && !session.isCurrent(connectionId)) || (!armed && session.armed)
         try {
-            out.write(Flac.streamHeader())
+            out.write(Flac.streamHeader(rate))
             out.flush()
             while (true) {
                 if (session.cancelled) {
@@ -260,12 +287,13 @@ object KitchenStreams {
                 }
                 if (n <= 0) continue
                 val clock = if (armed) session.clock else probeClock
-                if (clock != null) {
-                    val due = clock.timeOfFrame(((blockNo + 1) * Flac.BLOCK - LEAD_FRAMES).toDouble())
+                if (clock != null && paced) {
+                    val lead = LEAD_FRAMES * rate / KitchenSession.RING_RATE
+                    val due = clock.timeOfFrame(((blockNo + 1) * Flac.BLOCK - lead).toDouble())
                     sleepUntil(due) { stopped() }
                     if (stopped()) continue
                 }
-                val frame = Flac.frame(blockNo, builder.block)
+                val frame = Flac.frame(blockNo, builder.block, rate)
                 out.write(frame)
                 out.flush()
                 blockNo++

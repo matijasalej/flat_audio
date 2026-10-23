@@ -2,6 +2,10 @@ package io.github.matijasalej.wholeflat
 
 import android.content.Context
 import android.content.SharedPreferences
+import io.github.matijasalej.wholeflat.capture.CaptureFeed
+import io.github.matijasalej.wholeflat.capture.CaptureLag
+import io.github.matijasalej.wholeflat.capture.CaptureStart
+import io.github.matijasalej.wholeflat.capture.SourceArbiter
 import io.github.matijasalej.wholeflat.sync.SonosPolicy
 import io.github.matijasalej.wholeflat.sync.SonosXml
 import io.github.matijasalej.wholeflat.sync.StartPlanner
@@ -31,6 +35,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Everything that changes state runs on one thread ([control]); other threads post work to it.
  * The audio thread talks to it through [StartCoordinator]: it never waits for the network.
+ *
+ * It also runs the capture mode: when the Cast receiver (or the Spotify TV app) plays on this box and
+ * librespot does not, the kitchen follows a copy of that audio (see capture/CaptureSource.kt). The
+ * [arbiter] decides which source feeds the speaker; librespot wins. A capture has no living room to be
+ * in step with, so the lag of the kitchen behind the capture is measured and then held constant.
  */
 class Kitchen(private val context: Context, private val living: LivingRoom) : StartCoordinator, SonosFinder.Listener {
 
@@ -57,7 +66,24 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     private val netPool = Executors.newSingleThreadExecutor(daemonFactory("wf-kitchen-net"))
     private val finder = SonosFinder()
     private val ws = SonosWs()
-    private val controller = SyncController()
+    private val ringController = SyncController()
+
+    /**
+     * The captured stream is at 48 kHz, and its time stamps are looser than the living room's (the reads are 20 ms
+     * apart), so the controller is a little more tolerant: it only has to hold the lag constant.
+     */
+    private val captureController = SyncController(
+        SyncController.Params(
+            rejoinThresholdMs = 60.0,
+            rejoinReadings = 5,
+            deadbandMs = 8.0,
+            maxPendingFrames = 2_400,
+            rate = CaptureFeed.RATE,
+        ),
+    )
+
+    @Volatile
+    private var controller = ringController
     private val prefs: SharedPreferences = context.applicationContext.getSharedPreferences("wholeflat_kitchen", Context.MODE_PRIVATE)
 
     /** Held while the speaker is muted or unmuted, so that a late unmute cannot overtake a mute. */
@@ -101,6 +127,29 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     private var lastVolumeRaw = -1
 
     private var currentEpoch = -1L
+
+    // ---- the capture mode ---------------------------------------------------------------------
+
+    private val arbiter = SourceArbiter()
+    private val lagCapture = CaptureLag()
+
+    /** The audio the capture hands over; set by the service. */
+    @Volatile
+    var captureFeed: CaptureFeed? = null
+
+    /** The music volume of the box (the phone's Cast volume), as a Connect volume 0 to 65535, while capture mode is the source. */
+    @Volatile
+    private var captureVolumeRaw = -1
+
+    @Volatile
+    private var capturePlannedLagMs = Double.NaN
+
+    @Volatile
+    private var captureStarts = 0
+
+    /** Called on the control thread whenever the source that feeds the speaker changes. */
+    @Volatile
+    var onSource: ((SourceArbiter.Source) -> Unit)? = null
 
     // ---- status ------------------------------------------------------------------------------
 
@@ -181,7 +230,13 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     /** The engine was restarted: the ring is a new one, the streams of the old one are void. */
     fun engineReset() {
         advices.clear()
-        post("engine reset") { session?.let { endSession(it, "engine restarted", true) } }
+        post("engine reset") {
+            // a restarted engine plays nothing: a stale "librespot plays" must not keep the capture out
+            val change = arbiter.librespotPlaying(false)
+            session?.takeIf { !it.isCapture }?.let { endSession(it, "engine restarted", true) }
+            noteSource(change)
+            if (arbiter.source == SourceArbiter.Source.CAPTURE) startCaptureSession("the engine restarted", true)
+        }
     }
 
     private fun post(name: String, block: () -> Unit) {
@@ -229,13 +284,21 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     }
 
     override fun playbackStopped() {
-        post("stopped") { session?.let { endSession(it, "playback stopped", true) } }
+        post("stopped") {
+            val change = arbiter.librespotPlaying(false)
+            session?.takeIf { !it.isCapture }?.let { endSession(it, "playback stopped", true) }
+            noteSource(change)
+            // librespot is quiet and the captured player still plays: the capture takes over
+            if (arbiter.source == SourceArbiter.Source.CAPTURE) startCaptureSession("librespot stopped", true)
+        }
     }
 
     // ---- start events --------------------------------------------------------------------------
 
     private fun doBegin(epoch: Long, kind: Int, startFrame: Long) {
         currentEpoch = epoch
+        // librespot wins: a capture session in progress ends here, like any session at a new start event
+        noteSource(arbiter.librespotPlaying(true))
         val old = session
         if (old != null) endSession(old, "new start event", true)
         val dev = device
@@ -358,8 +421,10 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     private fun afterPlay(s: KitchenSession) {
         if (session !== s || s.cancelled) return
         state = State.PLAYING
+        controller = if (s.isCapture) captureController else ringController
         controller.reset()
-        controller.offsetMs = Settings.values.kitchenOffsetMs.toDouble()
+        controller.offsetMs = effectiveOffsetMs()
+        if (s.isCapture) lagCapture.reset()
         notPlayingReadings = 0
         lastSummaryReadings = 0
         badPolls = 0
@@ -466,9 +531,13 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         }
         val clock = s.clock ?: return
         val tMid = (p.sentNanos + p.receivedNanos) / 2
-        val heard = (p.positionMs - controller.deltaMs) / 1000.0 * RATE
+        val heard = (p.positionMs - controller.deltaMs) / 1000.0 * s.rate
         clock.refine(tMid, heard)
         s.playingReadings++
+        if (s.isCapture) {
+            handleCaptureReading(s, stream, clock.startNanos, tMid, p.positionMs, heard)
+            return
+        }
         if (s.playingReadings == LEARN_LK_AT) learnLk(s, clock.startNanos)
         if (onJoinedPending && s.playingReadings >= 2) {
             onJoinedPending = false
@@ -521,10 +590,13 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         rejoins++
         lastRejoinReason = reason
         AppLog.add(TAG, "re-join #$rejoins: $reason")
+        val wasCapture = session?.isCapture == true
         session?.let { endSession(it, "re-join: $reason", true) }
         controller.allowRejoin = false
-        later(REJOIN_QUIET_MS) { controller.allowRejoin = true }
-        if (!doHotJoin("re-join")) {
+        val c = controller
+        later(REJOIN_QUIET_MS) { c.allowRejoin = true }
+        val again = if (wasCapture) startCaptureSession("re-join", true) else doHotJoin("re-join")
+        if (!again) {
             AppLog.add(TAG, "re-join: could not start again now, the poll will try")
         }
     }
@@ -533,6 +605,201 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     fun streamLost(s: KitchenSession, reason: String) {
         post("stream lost") {
             if (session === s && !s.cancelled) rejoin("stream: $reason")
+        }
+    }
+
+    // ---- capture mode ---------------------------------------------------------------------------
+
+    /** Sound began in the captured player (or its media session says it will play): get the speaker ready. */
+    fun captureCandidate() = post("capture candidate") { onCaptureCandidate() }
+
+    /** It was a blip. */
+    fun captureCandidateCancelled() = post("capture candidate cancelled") { onCaptureCancelled() }
+
+    /** The captured player plays (it started, or went on after a pause). */
+    fun captureStarted() = post("capture started") { onCaptureStarted() }
+
+    /** The captured player has been silent for the whole hold. */
+    fun captureIdle() = post("capture idle") { onCaptureIdle() }
+
+    /** The capture is gone (the projection was lost, or the capture was switched off). */
+    fun captureLost(reason: String) = post("capture lost") { onCaptureLost(reason) }
+
+    private fun noteSource(change: SourceArbiter.Change?) {
+        if (change == null) return
+        AppState.source = change.to.label
+        AppLog.add(TAG, "source: ${change.from.label} -> ${change.to.label}")
+        try {
+            onSource?.invoke(change.to)
+        } catch (t: Throwable) {
+            AppLog.error(TAG, "the source hook failed", t)
+        }
+    }
+
+    private fun onCaptureCandidate() {
+        if (arbiter.source == SourceArbiter.Source.LIBRESPOT || session != null) return
+        startCaptureSession("sound began", false)
+    }
+
+    private fun onCaptureCancelled() {
+        val s = session ?: return
+        if (s.isCapture && !s.armed && s.startRingFrame < 0 && arbiter.source != SourceArbiter.Source.CAPTURE) {
+            endSession(s, "it was a blip", true)
+        }
+    }
+
+    private fun onCaptureStarted() {
+        noteSource(arbiter.captureActive(true))
+        if (arbiter.source != SourceArbiter.Source.CAPTURE) return // librespot wins
+        val s = session
+        if (s == null) {
+            startCaptureSession("the player plays", true)
+        } else if (s.isCapture && !s.armed && s.startRingFrame < 0) {
+            playCapture(s)
+        }
+    }
+
+    private fun onCaptureIdle() {
+        val change = arbiter.captureActive(false)
+        session?.takeIf { it.isCapture }?.let { endSession(it, "silent for the whole hold", true) }
+        noteSource(change)
+    }
+
+    private fun onCaptureLost(reason: String) {
+        val change = arbiter.captureLost()
+        session?.takeIf { it.isCapture }?.let { endSession(it, "the capture was lost ($reason)", true) }
+        noteSource(change)
+    }
+
+    /** The speaker is free, the captured player plays and nothing streams: join (a failed start is tried again by the poll). */
+    private fun maybeCaptureJoin(why: String) {
+        if (System.nanoTime() - lastFailureNanos < FAILURE_COOLDOWN_NANOS) return
+        if (state != State.READY || session != null) return
+        if (arbiter.source != SourceArbiter.Source.CAPTURE) return
+        startCaptureSession(why, true)
+    }
+
+    /**
+     * Gets the speaker ready for the captured stream (mute, stop, volume, URL) and, with [play], starts it.
+     * False if the kitchen cannot take it now.
+     */
+    private fun startCaptureSession(why: String, play: Boolean): Boolean {
+        val feed = captureFeed ?: return false
+        val dev = device ?: return false
+        val v = Settings.values
+        if (!v.kitchenEnabled || !reachable || busyElsewhere) return false
+        if (arbiter.source == SourceArbiter.Source.LIBRESPOT) return false
+        var s = session
+        if (s != null) {
+            if (!s.isCapture) return false
+        } else {
+            val host = Net.localAddressFor(dev.ip) ?: return false
+            s = KitchenSession(
+                newToken(), CAPTURE_EPOCH, KIND_CAPTURE, -1L, StreamBuilder.ChannelMode.STEREO, feed, feed.generation,
+            )
+            s.uri = "http://$host:${DebugServer.PORT}/k/${s.token}.flac"
+            sessions[s.token] = s
+            session = s
+            state = State.STARTING
+            AppLog.add(TAG, "capture: getting the kitchen ready ($why), session ${s.token}")
+            if (!prepare(s, soapFor(dev))) return false
+            if (s.cancelled || session !== s) return false
+        }
+        if (play) playCapture(s)
+        return true
+    }
+
+    /** Picks the frame the stream begins at and sends Play shortly. The speaker has been prepared. */
+    private fun playCapture(s: KitchenSession) {
+        val feed = s.capture ?: return
+        if (s.cancelled || s.armed || s.startRingFrame >= 0) return // Play is on its way already
+        if (s.captureGeneration != feed.generation) {
+            endSession(s, "the capture started again", true)
+            return
+        }
+        val v = Settings.values
+        val tCmd = System.nanoTime() + HOT_JOIN_LEAD_NANOS
+        val plan = CaptureStart.plan(
+            nowFrame = feed.frameAtReadClock(tCmd),
+            writeIndex = feed.buffer.writeIndex,
+            validStart = feed.buffer.validStart,
+            rate = feed.rate,
+            leadMs = v.captureLeadMs,
+            offsetMs = v.kitchenOffsetMs,
+            lkMs = lkNanos / 1e6,
+        )
+        s.startRingFrame = plan.startFrame
+        capturePlannedLagMs = plan.plannedLagMs
+        captureStarts++
+        AppLog.add(
+            TAG,
+            "capture: Play in ${(tCmd - System.nanoTime()) / 1_000_000L} ms, the stream begins " +
+                "${plan.aheadFrames * 1000L / feed.rate} ms before now (frame ${plan.startFrame}" +
+                "${if (plan.limited) ", limited by the buffer" else ""}), planned lag ${fmt(plan.plannedLagMs)} ms",
+        )
+        timer.schedule(
+            Runnable { sendPlay(s, tCmd) },
+            maxOf(0L, (tCmd - System.nanoTime()) / 1_000_000L - 3L),
+            TimeUnit.MILLISECONDS,
+        )
+    }
+
+    /**
+     * A reading of the Sonos for a captured stream. There is no second room to compare with: the first
+     * readings measure how long after the capture the kitchen sounds (the speaker's own buffer decides),
+     * and then the controller holds that lag against the drift of the speaker's clock.
+     */
+    private fun handleCaptureReading(
+        s: KitchenSession,
+        stream: ActiveStream,
+        startNanos: Long,
+        tMid: Long,
+        positionMs: Long,
+        heard: Double,
+    ) {
+        val feed = s.capture ?: return
+        if (feed.generation != s.captureGeneration) return // the session is about to end
+        val frame = stream.map.ringOfStream(heard) ?: return
+        val captured = feed.clock.nanosOfFrame(Math.round(frame)) ?: return
+        val lagMs = (tMid - captured) / 1e6
+        val offset = Settings.values.kitchenOffsetMs
+        if (!lagCapture.isLocked) {
+            if (lagCapture.onReading(lagMs, offset)) {
+                controller.reset()
+                controller.offsetMs = lagCapture.controllerOffsetMs(offset)
+                lastSummaryReadings = 0
+                AppLog.add(
+                    TAG,
+                    "capture: the kitchen sounds ${fmt(lagCapture.locked ?: Double.NaN)} ms after the capture " +
+                        "(planned ${fmt(capturePlannedLagMs)} ms, Play to sound ${(startNanos - s.playSentNanos) / 1_000_000L} ms), holding that",
+                )
+            }
+            return
+        }
+        lagCapture.onReading(lagMs, offset)
+        controller.offsetMs = lagCapture.controllerOffsetMs(offset)
+        val base = lagCapture.baseNanos()
+        val view = StreamView(stream.map, { stream.builder.unappliedBudget() }, { f -> feed.clock.nanosOfFrame(f)?.plus(base) })
+        when (val decision = controller.onReading(tMid, positionMs, view)) {
+            is SyncController.Decision.Trim -> {
+                stream.builder.addTrim(decision.frames)
+                AppLog.add(
+                    TAG,
+                    "trim ${decision.frames} frames (median error ${fmt(controller.errorMs)} ms, lag ${fmt(lagCapture.recentMs())} ms)",
+                )
+            }
+            is SyncController.Decision.Rejoin -> rejoin(decision.reason)
+            is SyncController.Decision.Hold -> Unit
+        }
+        val n = controller.readings
+        if (n > 0 && n % SUMMARY_EVERY_READINGS == 0 && n != lastSummaryReadings) {
+            lastSummaryReadings = n
+            AppLog.add(
+                TAG,
+                "sync (capture): lag ${fmt(lagCapture.recentMs())} ms (held at ${fmt(lagCapture.targetMs(offset))}), " +
+                    "error ${fmt(controller.errorMs)} ms, drift ${fmt(controller.driftPpm)} ppm, " +
+                    "trimmed ${controller.trimmedFrames} frames, re-joins $rejoins, round trip ${fmt(lastRttMs)} ms",
+            )
         }
     }
 
@@ -728,7 +995,10 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             quietSpeaker()
         }
         state = baseState()
-        if (state == State.READY) maybeHotJoin("the speaker is free")
+        if (state == State.READY) {
+            maybeHotJoin("the speaker is free")
+            maybeCaptureJoin("the speaker is free")
+        }
     }
 
     private fun checkSession(s: KitchenSession, r: PollResult, kind: SonosPolicy.Availability) {
@@ -802,7 +1072,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
 
     private fun onSettings(changed: Set<String>) {
         val v = Settings.values
-        controller.offsetMs = v.kitchenOffsetMs.toDouble()
+        controller.offsetMs = effectiveOffsetMs()
         if (changed.contains("kitchen_enabled")) {
             if (!v.kitchenEnabled) {
                 session?.let { endSession(it, "the kitchen was switched off", true) }
@@ -817,9 +1087,28 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         if (changed.contains("kitchen_balance")) pushVolume()
     }
 
+    /**
+     * The offset the controller works with. For the ring it is the setting. For a captured stream the offset
+     * only moves the lag that was measured at the start (see CaptureLag).
+     */
+    private fun effectiveOffsetMs(): Double {
+        val offset = Settings.values.kitchenOffsetMs
+        return if (session?.isCapture == true) lagCapture.controllerOffsetMs(offset) else offset.toDouble()
+    }
+
     /** The Connect volume changed (0 to 65535). */
     fun onVolume(raw: Int) {
         lastVolumeRaw = raw
+        schedulePush()
+    }
+
+    /** The music volume of the box changed (what the phone's Cast volume sets), as a Connect volume 0 to 65535. */
+    fun onCaptureVolume(raw: Int) {
+        captureVolumeRaw = raw
+        schedulePush()
+    }
+
+    private fun schedulePush() {
         if (volumeScheduled.compareAndSet(false, true)) {
             later(60L) {
                 volumeScheduled.set(false)
@@ -828,9 +1117,15 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         }
     }
 
+    /** The volume the Sonos should have: that of the Cast volume for a capture session, else the Spotify one. */
     private fun sonosVolume(): Int {
-        val raw = lastVolumeRaw
+        val raw = if (captureIsActive()) captureVolumeRaw else lastVolumeRaw
         return if (raw < 0) -1 else VolumeCurve.sonosVolume(raw, Settings.values.kitchenBalance)
+    }
+
+    private fun captureIsActive(): Boolean {
+        val s = session
+        return if (s != null) s.isCapture else arbiter.source == SourceArbiter.Source.CAPTURE
     }
 
     private fun pushVolume() {
@@ -922,6 +1217,18 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         o.put("readings_discarded_slow", readingsDiscarded)
         o.put("prepare_failures", prepFailures)
         o.put("play_failures", playFailures)
+        o.put("source", arbiter.source.label)
+        val cs = session?.takeIf { it.isCapture }
+        val offset = Settings.values.kitchenOffsetMs
+        val lag = if (cs != null) lagCapture.recentMs() else Double.NaN
+        // how far behind the captured moment the kitchen sounds; it includes the kitchen offset, which moves it
+        o.put("lag_ms", jsonNumber(round1(lag)))
+        o.put("lag_target_ms", jsonNumber(round1(if (cs != null) lagCapture.targetMs(offset) else Double.NaN)))
+        o.put("lag_locked", cs != null && lagCapture.isLocked)
+        // and behind the living room's sound: the same, less the time the living room needs from capture to sound
+        o.put("room_offset_ms", jsonNumber(round1(lag - Settings.values.captureLivingLatencyMs)))
+        o.put("capture_starts", captureStarts)
+        o.put("capture_planned_lag_ms", jsonNumber(round1(capturePlannedLagMs)))
         val read = JSONObject()
         read.put("age_ms", if (lastReadingNanos == 0L) -1L else (System.nanoTime() - lastReadingNanos) / 1_000_000L)
         read.put("position_ms", lastPositionMs)
@@ -942,6 +1249,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             j.put("bytes_sent", s.bytesSent.get())
             j.put("playing_readings", s.playingReadings)
             j.put("trim_budget", s.stream?.builder?.unappliedBudget() ?: 0)
+            j.put("capture", s.isCapture)
+            j.put("rate", s.rate)
             o.put("session", j)
         } else {
             o.put("session", JSONObject.NULL)
@@ -950,13 +1259,25 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         return o
     }
 
+    /** "  lag 430 ms" while a captured stream is measured, else nothing (for the screen). */
+    fun lagText(): String {
+        if (session?.isCapture != true) return ""
+        val lag = lagCapture.recentMs()
+        return if (lag.isNaN()) "" else "  lag " + Math.round(lag) + " ms"
+    }
+
     private fun jsonNumber(v: Double): Any = if (v.isNaN() || v.isInfinite()) JSONObject.NULL else v
+
+    private fun round1(v: Double): Double = if (v.isNaN() || v.isInfinite()) v else Math.round(v * 10.0) / 10.0
 
     companion object {
         private const val TAG = "kitchen"
         private const val TITLE = "Whole Flat"
-        private const val RATE = 44_100
         private const val KIND_CALIBRATION = 3
+
+        /** The kind and the epoch of a session of the capture mode (there is no ring epoch behind it). */
+        private const val KIND_CAPTURE = 100
+        private const val CAPTURE_EPOCH = -1L
         private const val PREF_IP = "sonos_ip"
         private val KITCHEN_WORDS = listOf("kitchen", "küche", "kuche", "kuhinja", "køkken", "kjøkken", "cuisine", "cocina", "keuken")
 

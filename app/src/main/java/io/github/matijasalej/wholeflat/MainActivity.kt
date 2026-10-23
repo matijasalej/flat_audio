@@ -18,11 +18,14 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import org.json.JSONObject
 import kotlin.concurrent.thread
 
 /**
- * Plain Views, built in code: six D-pad focusable buttons on the left, the status on the right,
- * refreshed every second.
+ * Plain Views, built in code: D-pad focusable buttons on the left (scrollable), the status on the
+ * right, refreshed every second. The capture-probe build adds Capture start and Capture stop, the
+ * way to give the screen capture consent from this activity when the HTTP route cannot start the
+ * consent activity from the background.
  */
 class MainActivity : Activity() {
 
@@ -47,7 +50,12 @@ class MainActivity : Activity() {
 
         val left = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(dp(300), LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
+        val leftScroll = ScrollView(this).apply {
+            isFocusable = false
+            isVerticalScrollBarEnabled = false
+            layoutParams = LinearLayout.LayoutParams(dp(300), LinearLayout.LayoutParams.MATCH_PARENT)
+            addView(left)
         }
         left.addView(
             TextView(this).apply {
@@ -71,6 +79,10 @@ class MainActivity : Activity() {
         }
         left.addView(start)
         left.addView(button("Stop service") { stopService(Intent(this, PlaybackService::class.java)) })
+        if (PROBE_MODE) {
+            left.addView(button("Capture start") { captureAction("start") { CaptureProbe.start(this, null, null, 60) } })
+            left.addView(button("Capture stop") { captureAction("stop") { CaptureProbe.stop(this) } })
+        }
         left.addView(button("Sonos discover") {
             sonosAction("discover") { Sonos.discover(this).toString() }
         })
@@ -101,17 +113,31 @@ class MainActivity : Activity() {
             addView(statusView)
         }
 
-        root.addView(left)
+        root.addView(leftScroll)
         root.addView(scroll)
         setContentView(root)
         start.requestFocus()
 
+        val missing = ArrayList<String>()
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+            missing.add(Manifest.permission.POST_NOTIFICATIONS)
         }
+        if (PROBE_MODE && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            // Capture needs it; `adb shell pm grant` does the same without the dialog.
+            missing.add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (missing.isNotEmpty()) requestPermissions(missing.toTypedArray(), 1)
         DebugServer.ensureStarted(this)
+        if (PROBE_MODE) {
+            // The probe has no receiver to set up: opening the app brings up the service (debug server, locks).
+            try {
+                startForegroundService(Intent(this, PlaybackService::class.java))
+            } catch (e: Exception) {
+                AppLog.error("main", "could not start the playback service", e)
+            }
+        }
     }
 
     override fun onResume() {
@@ -141,6 +167,18 @@ class MainActivity : Activity() {
             }
             AppLog.add("sonos", "$name: $result")
             AppState.lastSonos = "$name: " + if (result.length > 160) result.substring(0, 160) + "..." else result
+        }
+    }
+
+    /** Runs a capture probe call off the main thread; the result goes to the log and the Capture line. */
+    private fun captureAction(name: String, action: () -> JSONObject) {
+        thread(name = "wf-capture-ui") {
+            try {
+                val result = action().toString()
+                AppLog.add("capture", "button $name: " + if (result.length > 400) result.substring(0, 400) + "..." else result)
+            } catch (e: Exception) {
+                AppLog.error("capture", "button $name failed", e)
+            }
         }
     }
 

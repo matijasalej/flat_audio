@@ -37,6 +37,10 @@ import kotlin.concurrent.thread
  * - the debug HTTP server.
  *
  * START_STICKY, and BootReceiver starts it at boot.
+ *
+ * In the capture-probe build (PROBE_MODE) the native engine is never started: no Spotify Connect
+ * device is announced, no audio keys are requested, NativeBridge is not even loaded. Everything
+ * else runs (locks, foreground notification, debug server with the capture routes).
  */
 class PlaybackService : Service() {
 
@@ -79,6 +83,7 @@ class PlaybackService : Service() {
             "onCreate, app ${BuildInfo.versionName}, Android ${Build.VERSION.RELEASE} (sdk ${Build.VERSION.SDK_INT}), " +
                 "abis ${Build.SUPPORTED_ABIS.joinToString()}",
         )
+        if (PROBE_MODE) AppLog.add(TAG, "PROBE MODE: the Spotify engine will not be started")
         createChannel()
         // startForegroundService() demands this within a few seconds, so before any real work.
         try {
@@ -100,7 +105,14 @@ class PlaybackService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (!running) {
             running = true
-            bootThread = thread(name = "wf-boot") { bootstrap() }
+            if (PROBE_MODE) {
+                // No network wait, no engine: the debug server is up since onCreate.
+                AppState.service = "probe"
+                AppLog.add(TAG, "probe mode: NativeBridge.start skipped, debug server and locks only")
+                updateNotification()
+            } else {
+                bootThread = thread(name = "wf-boot") { bootstrap() }
+            }
         }
         return START_STICKY
     }
@@ -111,10 +123,18 @@ class PlaybackService : Service() {
         AppLog.add(TAG, "onDestroy")
         running = false
         epoch++
-        try {
-            NativeBridge.stop()
-        } catch (t: Throwable) {
-            AppLog.error(TAG, "NativeBridge.stop failed", t)
+        if (PROBE_MODE) {
+            try {
+                CaptureProbe.shutdown()
+            } catch (t: Throwable) {
+                AppLog.error(TAG, "stopping the capture failed", t)
+            }
+        } else {
+            try {
+                NativeBridge.stop()
+            } catch (t: Throwable) {
+                AppLog.error(TAG, "NativeBridge.stop failed", t)
+            }
         }
         for (t in listOf(bootThread, audioThread, eventThread)) {
             try {
@@ -612,6 +632,7 @@ class PlaybackService : Service() {
                 }
             }
             "error" -> sb.append("error, see the debug page")
+            "probe" -> sb.append("capture probe, no Spotify engine")
             else -> sb.append(AppState.service)
         }
         return sb.toString()

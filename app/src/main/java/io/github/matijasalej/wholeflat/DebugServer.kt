@@ -37,6 +37,13 @@ import kotlin.concurrent.thread
  *   GET /sonos/position    ?ip=..   raw GetTransportInfo + GetPositionInfo
  *   GET /test/tone.wav     the test signal as an endless WAV
  *   GET /test/tone.flac    the test signal as a chunked FLAC stream
+ *
+ * Capture probe (see CaptureProbe), JSON, GET only:
+ *   GET /capture/start         ?uid_pkg=com.spotify.tv.android&match=uid|usage&wait_s=30   consent, projection, AudioRecord
+ *   GET /capture/status        running, rate, levels of the last second, digital silence, exceptions
+ *   GET /capture/volume-test   capture level with STREAM_MUSIC at the original volume and at 0 (restored)
+ *   GET /capture/monitor       ?usage=alarm|accessibility|media&delay_ms=300&seconds=20&music_zero=1
+ *   GET /capture/stop          ends the capture and releases the projection
  */
 object DebugServer {
     const val PORT = 8080
@@ -194,6 +201,8 @@ object DebugServer {
             }
             "/test/tone.wav" -> serveTone(req, client, out, flac = false)
             "/test/tone.flac" -> serveTone(req, client, out, flac = true)
+            "/capture/start", "/capture/status", "/capture/volume-test", "/capture/monitor", "/capture/stop" ->
+                captureRoute(req, context, out, head)
             else -> sendText(out, 404, "not found\n", head)
         }
     }
@@ -201,6 +210,69 @@ object DebugServer {
     private fun sonosIp(req: Request): String? {
         val ip = req.query["ip"] ?: Sonos.lastIp
         return if (ip != null && IP_PATTERN.matches(ip)) ip else null
+    }
+
+    // ---- the capture probe ---------------------------------------------------------------------
+
+    private fun intParam(req: Request, name: String): Int? {
+        val raw = req.query[name] ?: return null
+        return raw.toIntOrNull() ?: throw IllegalArgumentException("$name must be an integer")
+    }
+
+    private fun flagParam(req: Request, name: String): Boolean = when (req.query[name]?.lowercase()) {
+        null, "", "0", "false", "no", "off" -> false
+        "1", "true", "yes", "on" -> true
+        else -> throw IllegalArgumentException("$name must be 0 or 1")
+    }
+
+    /**
+     * The capture routes do things (start a projection, change the volume), so only GET runs them.
+     * Every call and its (shortened) result go to the log; a failure is answered with JSON too.
+     * /capture/start and /capture/monitor hold the connection until they are done.
+     */
+    private fun captureRoute(req: Request, context: Context?, out: OutputStream, head: Boolean) {
+        if (head) return sendText(out, 405, "use GET\n", true)
+        if (context == null) return sendText(out, 500, "no context\n", false)
+        val query = req.query.entries.joinToString("&") { it.key + "=" + it.value }
+        AppLog.add("capture", "${req.remote} GET ${req.path}" + (if (query.isEmpty()) "" else "?$query"))
+        var code = 200
+        val result: JSONObject = try {
+            when (req.path) {
+                "/capture/start" -> CaptureProbe.start(
+                    context,
+                    req.query["uid_pkg"],
+                    req.query["match"],
+                    (intParam(req, "wait_s") ?: 30).coerceIn(1, 300),
+                )
+                "/capture/status" -> CaptureProbe.status(context)
+                "/capture/volume-test" -> CaptureProbe.volumeTest(context)
+                "/capture/monitor" -> CaptureProbe.monitor(
+                    context,
+                    req.query["usage"],
+                    intParam(req, "delay_ms"),
+                    intParam(req, "seconds"),
+                    flagParam(req, "music_zero"),
+                )
+                else -> CaptureProbe.stop(context)
+            }
+        } catch (e: IllegalArgumentException) {
+            code = 400
+            JSONObject().put("ok", false).put("error", e.message ?: e.toString())
+        } catch (t: Throwable) {
+            code = 500
+            AppLog.error("capture", "${req.path} failed", t)
+            JSONObject().put("ok", false).put("error", t.toString())
+        }
+        val line = if (req.path == "/capture/status") {
+            // polled often: one short line instead of the whole report
+            "state=${result.opt("state")} frames=${result.opt("frames_captured")} fps5s=${result.opt("frames_per_s_5s")} " +
+                "rms=${result.opt("rms_dbfs_l")}/${result.opt("rms_dbfs_r")} silence=${result.opt("digital_silence")}"
+        } else {
+            val json = result.toString()
+            if (json.length > 1500) json.substring(0, 1500) + "..." else json
+        }
+        AppLog.add("capture", "${req.path} -> $line")
+        sendJson(out, code, result, false)
     }
 
     // ---- responses -----------------------------------------------------------------------------
@@ -261,7 +333,7 @@ object DebugServer {
             sb.append(escapeHtml(status.opt(key)?.toString() ?: "")).append("</td></tr>")
         }
         sb.append("</table><p>")
-        for (link in listOf("/status.json", "/log", "/sys", "/net/udp319", "/sonos/discover")) {
+        for (link in listOf("/status.json", "/log", "/sys", "/net/udp319", "/sonos/discover", "/capture/status")) {
             sb.append("<a href=\"").append(link).append("\">").append(link).append("</a>")
         }
         sb.append("</p><h2 style=\"font-size:15px\">Log (last 80 lines)</h2><pre>")

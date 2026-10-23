@@ -11,11 +11,23 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Capture probe: RECORD_AUDIO for the AudioRecord of AudioPlaybackCapture (adb pm grant), the
+         mediaProjection service type (Android 14), SYSTEM_ALERT_WINDOW so that the HTTP route may start
+         the consent activity from the background (adb appops set ... SYSTEM_ALERT_WINDOW allow), and
+         QUERY_ALL_PACKAGES to look up the uid of the app to be captured (package visibility, Android 11+). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
     <uses-feature
         android:name="android.software.leanback"
         android:required="false" />
     <uses-feature
         android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.microphone"
         android:required="false" />
 
     <!-- usesCleartextTraffic: the Sonos speakers speak plain HTTP (UPnP on :1400) and the test
@@ -44,6 +56,20 @@
             android:name=".PlaybackService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+
+        <!-- Capture probe. The projection lives in its own foreground service of type mediaProjection,
+             started by the consent result; the translucent activity only carries the consent request. -->
+        <service
+            android:name=".CaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <activity
+            android:name=".CaptureConsentActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <receiver
             android:name=".BootReceiver"

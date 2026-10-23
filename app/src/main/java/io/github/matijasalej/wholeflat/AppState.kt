@@ -11,6 +11,14 @@ import java.util.Locale
 /** Name the device shows up under in the Spotify app. */
 const val DEVICE_NAME = "Whole Flat"
 
+/**
+ * capture-probe build: the native Spotify engine is never started (NativeBridge is not even
+ * touched), so no Spotify Connect device is announced and no audio keys are requested. The service
+ * still holds the locks and the foreground notification and runs the debug server, which carries
+ * the capture routes (see CaptureProbe). Set to false to get the normal receiver back.
+ */
+const val PROBE_MODE = true
+
 /** In-memory log (about 2000 lines) behind the debug page, `/log` and the status screen. */
 object AppLog {
     private const val MAX_LINES = 2000
@@ -80,6 +88,9 @@ object AppState {
     /** Last result of a Sonos action from the buttons. */
     @Volatile var lastSonos: String = ""
 
+    /** One line about the capture probe: idle, awaiting_consent, running with levels, failed. */
+    @Volatile var capture: String = "idle"
+
     fun setPosition(ms: Long) {
         positionMs = ms
         positionAt = SystemClock.elapsedRealtime()
@@ -122,6 +133,8 @@ object AppState {
         o.put("native_restarts", nativeRestarts)
         o.put("uptime_s", (SystemClock.elapsedRealtime() - startedAt) / 1000)
         o.put("last_sonos", lastSonos)
+        o.put("probe_mode", PROBE_MODE)
+        o.put("capture", capture)
         return o
     }
 
@@ -155,6 +168,7 @@ object AppState {
         sb.append("\n")
         lastError?.let { sb.append("Last error: ").append(it).append("\n") }
         if (lastSonos.isNotEmpty()) sb.append("Sonos     : ").append(lastSonos).append("\n")
+        if (PROBE_MODE) sb.append("Capture   : ").append(capture).append("\n")
         sb.append("Debug page: http://").append(Net.primaryIp() ?: "<tv-ip>").append(":").append(DebugServer.PORT)
         return sb.toString()
     }

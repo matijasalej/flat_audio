@@ -331,7 +331,21 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
 
     // ---- the grab --------------------------------------------------------------------------------
 
+    /** A grab that fails for a reason nobody foresaw is a failed grab (the encoders of its stream do not run on). */
     private fun doGrab(reason: String) {
+        try {
+            doGrabSteps(reason)
+        } catch (t: Throwable) {
+            AppLog.error(TAG, "the grab failed unexpectedly", t)
+            if (session == null) {
+                pipeline?.stop()
+                pipeline = null
+            }
+            if (state == State.STARTING) fail("unexpected: $t")
+        }
+    }
+
+    private fun doGrabSteps(reason: String) {
         if (state == State.STARTING || state == State.PLAYING) return
         val now = nowMs()
         if (now < notBeforeMs) return

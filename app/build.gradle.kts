@@ -69,3 +69,10 @@ android {
         abortOnError = false
     }
 }
+
+dependencies {
+    // The sync math is plain Kotlin and is tested on the JVM; org.json is only here because the
+    // Android one is a stub in unit tests.
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20231013")
+}

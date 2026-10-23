@@ -26,10 +26,11 @@ import urllib.request
 
 BOX = "http://192.168.0.165:8080"
 TV = "http://192.168.0.69:1925/6"
-POLL_S = 1 / 3
+POLL_S = 0.5  # 2 a second: the sync session is chasing freezes of the TV's player, so the load is kept low
+WINDOWS = []  # (start, end, what) of every stretch that talks to the TV, printed at the end for the freeze hunt
 
 ZONES = [("left", i) for i in range(4)] + [("top", i) for i in range(8)] + [("right", i) for i in range(4)]
-SYNCED_STYLES = ["FOLLOW_VIDEO/GAME", "FOLLOW_VIDEO/STANDARD", "FOLLOW_VIDEO/NATURAL", "FOLLOW_AUDIO/ENERGY_ADAPTIVE_BRIGHTNESS"]
+SYNCED_STYLES = ["FOLLOW_VIDEO/GAME", "FOLLOW_VIDEO/STANDARD", "FOLLOW_AUDIO/ENERGY_ADAPTIVE_BRIGHTNESS"]
 AUDIO_ALGORITHMS = ["ENERGY_ADAPTIVE_BRIGHTNESS", "ENERGY_ADAPTIVE_COLORS", "VU_METER", "SPECTRUM_ANALYZER",
                     "KNIGHT_RIDER_CLOCKWISE", "KNIGHT_RIDER_ALTERNATING", "RANDOM_PIXEL_FLASH", "STROBE", "PARTY"]
 
@@ -149,7 +150,8 @@ def results_dir(step):
 def record(seconds, log, label):
     """Polls the TV's lights for [seconds]; returns [(t, colours)] and writes them to [log]."""
     out = []
-    t_end = time.time() + seconds
+    t_start = time.time()
+    t_end = t_start + seconds
     while time.time() < t_end:
         t0 = time.time()
         c = processed()
@@ -157,6 +159,7 @@ def record(seconds, log, label):
             out.append((t0, c))
             log.write(json.dumps({"label": label, "t": round(t0, 3), "zones": c}) + "\n")
         time.sleep(max(0.0, POLL_S - (time.time() - t0)))
+    WINDOWS.append((t_start, time.time(), f"GET processed at {1 / POLL_S:.0f}/s: {label}"))
     return out
 
 
@@ -186,6 +189,8 @@ def s1(args):
                 box("/lights/set", lights_synced_style=style)
                 time.sleep(2.5)
                 widths = [5] if display == "ambilight" else [3, 5, 10]
+                if display == "screen" and not style.startswith(("FOLLOW_VIDEO/GAME", "FOLLOW_AUDIO")):
+                    continue  # the band is tried with the fastest FOLLOW_VIDEO and with Lumina only
                 for w in widths:
                     if display == "screen":
                         box("/lights/set", lights_band_pct=w)
@@ -219,7 +224,11 @@ def one_s1(display, style, width, log):
         b = [statistics.mean(max(c) for c in r[1]) for r in rec]
         hi, lo = max(b), min(b)
         depth = round((hi - lo) / hi, 2) if hi > 0 else 0.0
-    # black and white every 500 ms: the delay from the picture's moment to the lights (from the steps the 3 Hz polls catch)
+    if display == "screen":
+        box("/lights/test", pattern="off")
+        return {"display": display, "style": style, "band_pct": width, "zones_dE": zone_de, "zones_in_order": order_ok,
+                "pulse_depth_left": depth, "lag_after_sound_ms": None, "tv_delay_s": delay}
+    # black and white every 500 ms: the delay from the picture's moment to the lights (from the steps the polls catch)
     t0 = time.time()
     box("/lights/test", pattern="steps", seconds=24, color="ffffff", step_ms=500)
     rec = record(delay + 22, log, label + "|steps")
@@ -286,10 +295,12 @@ def s2(args):
     try:
         check_playing()
         for name, cfg in configs:
+            tp = time.time()
             try:
                 status, secs = post(TV + "/ambilight/currentconfiguration", cfg)
             except Exception as e:
                 status, secs = str(e), None
+            WINDOWS.append((tp, time.time(), f"POST currentconfiguration {name}"))
             time.sleep(1.5)
             back, _ = get(TV + "/ambilight/currentconfiguration")
             rec = record(8, log, name)
@@ -404,9 +415,15 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("step", choices=["s1", "s2", "s3", "all"])
     args = p.parse_args()
-    steps = {"s1": [s1], "s2": [s2], "s3": [s3], "all": [s1, s2, s3]}[args.step]
-    for st in steps:
-        st(args)
+    steps = {"s1": [s1], "s2": [s2], "s3": [s3], "all": [s1, s2]}[args.step]  # s3 (many style calls) only when asked for
+    try:
+        for st in steps:
+            st(args)
+    finally:
+        if WINDOWS:
+            print("\nTV traffic (local time):")
+            for a, b, what in WINDOWS:
+                print(f"  {time.strftime('%H:%M:%S', time.localtime(a))}-{time.strftime('%H:%M:%S', time.localtime(b))}  {what}")
 
 
 if __name__ == "__main__":

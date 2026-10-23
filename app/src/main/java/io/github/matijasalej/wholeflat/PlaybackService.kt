@@ -112,6 +112,7 @@ class PlaybackService : Service() {
         registerNetworkCallback()
         livingRoom.start()
         kitchen.start()
+        tv.start()
         DebugServer.ensureStarted(this)
     }
 

@@ -34,6 +34,8 @@ class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var statusView: TextView
     private lateinit var bannerView: TextView
+    private lateinit var startButton: Button
+    private lateinit var tvLabel: TextView
     private lateinit var kitchenToggle: Button
     private lateinit var fixedVolumeToggle: Button
     private lateinit var screenOffToggle: Button
@@ -90,6 +92,10 @@ class MainActivity : Activity() {
             },
         )
 
+        // The first control is harmless: a press on OK on a fresh start must not switch a setting.
+        startButton = button("Start service") { startReceiver() }
+        left.addView(startButton)
+
         kitchenToggle = toggle("kitchen_enabled", "Kitchen")
         fixedVolumeToggle = toggle("living_fixed_volume", "Living room fixed volume")
         screenOffToggle = toggle("tv_screen_off", "TV screen off")
@@ -117,14 +123,15 @@ class MainActivity : Activity() {
         left.addView(balanceLabel)
         left.addView(balanceBar)
 
-        left.addView(label("TV address (empty: find it automatically)"))
+        tvLabel = label("")
+        left.addView(tvLabel)
         tvField = EditText(this).apply {
             setSingleLine(true)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             imeOptions = EditorInfo.IME_ACTION_DONE
             setTextColor(Color.WHITE)
             setHintTextColor(MUTED)
-            hint = "192.168.0.69"
+            hint = "automatic"
             textSize = 17f
             isFocusable = true
             setPadding(dp(14), 0, dp(14), 0)
@@ -147,7 +154,6 @@ class MainActivity : Activity() {
 
         testButton = button("Test: clicks in both rooms (20 s)") { toggleTest() }
         left.addView(testButton)
-        left.addView(button("Start service") { startForegroundService(Intent(this, PlaybackService::class.java)) })
         left.addView(button("Stop service") { stopService(Intent(this, PlaybackService::class.java)) })
 
         val leftScroll = ScrollView(this).apply {
@@ -192,8 +198,9 @@ class MainActivity : Activity() {
         root.addView(leftScroll)
         root.addView(right)
         setContentView(root)
-        kitchenToggle.requestFocus()
+        startButton.requestFocus()
         syncControls(force = true)
+        startReceiver()
 
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -278,10 +285,25 @@ class MainActivity : Activity() {
         }
         balanceLabel.text = balanceText(v.kitchenBalance)
         if (!tvField.hasFocus() && tvField.text.toString() != v.tvIp) tvField.setText(v.tvIp)
+        tvLabel.text = if (v.tvIp.isNotEmpty()) {
+            "TV address: ${v.tvIp} (typed in)"
+        } else {
+            "TV address: " + (AppState.tv?.currentIp()?.let { "$it (found automatically)" } ?: "looking for it ...") +
+                "  Type one here to override."
+        }
         testButton.text = if (testRunning) "Stop the test" else "Test: clicks in both rooms (20 s)"
     }
 
     private fun onOff(on: Boolean): String = if (on) "ON" else "OFF"
+
+    /** The receiver runs in a foreground service; opening the app starts it (a press on the button does too). */
+    private fun startReceiver() {
+        try {
+            startForegroundService(Intent(this, PlaybackService::class.java))
+        } catch (e: Exception) {
+            AppLog.error("ui", "cannot start the service", e)
+        }
+    }
 
     private fun toggleTest() {
         val starting = !testRunning

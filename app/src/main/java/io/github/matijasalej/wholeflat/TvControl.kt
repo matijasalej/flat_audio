@@ -19,6 +19,7 @@ import java.net.SocketTimeoutException
 import java.net.URL
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
 
@@ -37,7 +38,8 @@ import java.util.concurrent.TimeUnit
  */
 class TvControl(private val context: Context) {
 
-    private val exec = Executors.newSingleThreadExecutor(
+    private val exec = ScheduledThreadPoolExecutor(
+        1,
         ThreadFactory { r ->
             val t = Thread(r, "wf-tv")
             t.isDaemon = true
@@ -82,8 +84,59 @@ class TvControl(private val context: Context) {
     @Volatile
     private var lastError: String? = null
 
+    /** Looks for the TV soon after the service started, so that the address is known before the first music. */
+    fun start() {
+        if (Settings.values.tvIp.isEmpty()) scheduleFind(INITIAL_FIND_DELAY_S, 0)
+    }
+
     fun stop() {
-        exec.shutdown()
+        exec.shutdownNow()
+    }
+
+    /** The address in use: the one typed on the settings screen, else the one found. */
+    fun currentIp(): String? = Settings.values.tvIp.ifEmpty { detectedIp }
+
+    /**
+     * Finds the TV in the background: after [delaySeconds], then again with growing pauses (30 s, 2 min, 10 min)
+     * for as long as no TV answers. A TV that is in standby may not answer yet when the box boots.
+     */
+    private fun scheduleFind(delaySeconds: Long, attempt: Int) {
+        try {
+            exec.schedule(
+                Runnable {
+                    try {
+                        if (Settings.values.tvIp.isNotEmpty()) return@Runnable
+                        val known = detectedIp
+                        if (known != null && isJointSpace(known, 1_500)) {
+                            note("the TV at $known answers")
+                            return@Runnable
+                        }
+                        detectedIp = null
+                        val found = detect()
+                        if (found != null) {
+                            detectedIp = found
+                            prefs.edit().putString(PREF_IP, found).apply()
+                            note("found the TV at $found")
+                        } else {
+                            note("no TV answered on port 1925 (attempt ${attempt + 1})")
+                            val next = when (attempt) {
+                                0 -> 30L
+                                1 -> 120L
+                                else -> 600L
+                            }
+                            scheduleFind(next, attempt + 1)
+                        }
+                    } catch (t: Throwable) {
+                        AppLog.error(TAG, "finding the TV failed", t)
+                        lastError = "find: $t"
+                    }
+                },
+                delaySeconds,
+                TimeUnit.SECONDS,
+            )
+        } catch (e: Exception) {
+            // shut down
+        }
     }
 
     /** A start event: the music starts or restarts. Called on the audio thread, returns at once. */
@@ -107,11 +160,8 @@ class TvControl(private val context: Context) {
     }
 
     fun detectNow() {
-        post("detect") {
-            detectedIp = null
-            lastDetectMs = 0L
-            effectiveIp()
-        }
+        detectedIp = null
+        scheduleFind(0, 0)
     }
 
     private fun post(name: String, block: () -> Unit) {
@@ -297,13 +347,25 @@ class TvControl(private val context: Context) {
         } catch (e: Exception) {
             AppLog.error(TAG, "SSDP search for the TV failed", e)
         }
-        if (candidates.isEmpty()) return null
-        val pool = Executors.newFixedThreadPool(minOf(8, candidates.size))
+        if (candidates.isNotEmpty()) {
+            val viaSsdp = firstJointSpace(candidates.toList(), 800, 4)
+            if (viaSsdp != null) return viaSsdp
+        }
+        // The TV may not announce itself (or SSDP does not get through): ask every address of the subnet.
+        val subnet = own?.substringBeforeLast('.', "") ?: ""
+        if (subnet.isEmpty()) return null
+        val hosts = (1..254).map { "$subnet.$it" }.filter { it != own }
+        return firstJointSpace(hosts, 350, 32)
+    }
+
+    /** The first of [hosts] that answers like a JointSpace TV, asked in parallel. */
+    private fun firstJointSpace(hosts: List<String>, timeoutMs: Int, threads: Int): String? {
+        val pool = Executors.newFixedThreadPool(minOf(threads, hosts.size).coerceAtLeast(1))
         try {
-            val futures = candidates.map { ip -> pool.submit(Callable<String?> { if (isJointSpace(ip)) ip else null }) }
+            val futures = hosts.map { ip -> pool.submit(Callable<String?> { if (isJointSpace(ip, timeoutMs)) ip else null }) }
             for (f in futures) {
                 val ip = try {
-                    f.get(4, TimeUnit.SECONDS)
+                    f.get(10, TimeUnit.SECONDS)
                 } catch (e: Exception) {
                     null
                 }
@@ -315,9 +377,9 @@ class TvControl(private val context: Context) {
         return null
     }
 
-    private fun isJointSpace(ip: String): Boolean {
+    private fun isJointSpace(ip: String, timeoutMs: Int = 800): Boolean {
         val text = try {
-            httpText("GET", "http://$ip:$PORT/6/system", null, 800) ?: return false
+            httpText("GET", "http://$ip:$PORT/6/system", null, timeoutMs, quiet = true) ?: return false
         } catch (e: Exception) {
             return false
         }
@@ -342,7 +404,7 @@ class TvControl(private val context: Context) {
         httpText("POST", "http://$ip:$PORT/6/$path", body, 2500) != null
 
     /** The body of the answer, or null if the TV did not answer with a success. */
-    private fun httpText(method: String, url: String, body: String?, timeoutMs: Int): String? {
+    private fun httpText(method: String, url: String, body: String?, timeoutMs: Int, quiet: Boolean = false): String? {
         val conn = URL(url).openConnection() as HttpURLConnection
         return try {
             conn.requestMethod = method
@@ -362,7 +424,7 @@ class TvControl(private val context: Context) {
                 conn.inputStream.use { String(it.readBytes(), Charsets.UTF_8) }
             }
         } catch (e: Exception) {
-            lastError = "$method $url: $e"
+            if (!quiet) lastError = "$method $url: $e"
             null
         } finally {
             conn.disconnect()
@@ -406,5 +468,6 @@ class TvControl(private val context: Context) {
         private const val WAKE_WAIT_S = 12
         private const val LOOKBACK_MS = 12L * 3600_000L
         private const val DETECT_EVERY_MS = 10L * 60_000L
+        private const val INITIAL_FIND_DELAY_S = 6L
     }
 }

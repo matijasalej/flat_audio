@@ -164,6 +164,10 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
     @Volatile
     private var captureAheadMs = Double.NaN
 
+    /** How old the newest captured frame was when Play was sent for the current captured stream (ms): the capture's own part of the lag. */
+    @Volatile
+    private var captureAgeAtPlayMs = Double.NaN
+
     @Volatile
     private var captureStarts = 0
 
@@ -470,6 +474,8 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         val api = soapFor(dev)
         val tSent = System.nanoTime()
         s.playSentNanos = tSent
+        // a captured stream is placed now, at the moment of Play: its lead is counted back from the newest frame of this very instant
+        if (s.isCapture && !replanCapture(s, tSent)) return
         s.record?.playSent(tSent)
         s.arm(tSent + lkNanos)
         var result = api.play()
@@ -819,6 +825,20 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         return true
     }
 
+    /** The plan for a captured stream that Play is sent for at [tNanos]: where it begins and how far behind the capture it is expected to sound. */
+    private fun capturePlan(feed: CaptureFeed, tNanos: Long): CaptureStart.Plan {
+        val v = Settings.values
+        return CaptureStart.plan(
+            nowFrame = feed.frameAtReadClock(tNanos),
+            writeIndex = feed.buffer.writeIndex,
+            validStart = feed.buffer.validStart,
+            rate = feed.rate,
+            leadMs = captureLead.effectiveMs(v.captureLeadMs),
+            offsetMs = v.kitchenOffsetMs,
+            lkMs = lkNanos / 1e6,
+        )
+    }
+
     /** Picks the frame the stream begins at and sends Play shortly. The speaker has been prepared. */
     private fun playCapture(s: KitchenSession) {
         val feed = s.capture ?: return
@@ -827,32 +847,45 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
             endSession(s, "the capture started again", true)
             return
         }
-        val v = Settings.values
-        val tCmd = System.nanoTime() + HOT_JOIN_LEAD_NANOS
-        val plan = CaptureStart.plan(
-            nowFrame = feed.frameAtReadClock(tCmd),
-            writeIndex = feed.buffer.writeIndex,
-            validStart = feed.buffer.validStart,
-            rate = feed.rate,
-            leadMs = captureLead.effectiveMs(v.captureLeadMs),
-            offsetMs = v.kitchenOffsetMs,
-            lkMs = lkNanos / 1e6,
-        )
+        val tCmd = System.nanoTime() + CAPTURE_PLAY_LEAD_NANOS
+        // the plan is made again at the moment Play is sent (see [replanCapture]); this one marks the session as started
+        val plan = capturePlan(feed, tCmd)
         s.startRingFrame = plan.startFrame
         capturePlannedLagMs = plan.plannedLagMs
         captureAheadMs = plan.aheadFrames * 1000.0 / feed.rate
         captureStarts++
-        AppLog.add(
-            TAG,
-            "capture: Play in ${(tCmd - System.nanoTime()) / 1_000_000L} ms, the stream begins " +
-                "${plan.aheadFrames * 1000L / feed.rate} ms before now (frame ${plan.startFrame}" +
-                "${if (plan.limited) ", limited by the buffer" else ""}), planned lag ${fmt(plan.plannedLagMs)} ms",
-        )
+        AppLog.add(TAG, "capture: Play in ${(tCmd - System.nanoTime()) / 1_000_000L} ms, planned lag ${fmt(plan.plannedLagMs)} ms")
         timer.schedule(
             Runnable { sendPlay(s, tCmd) },
             maxOf(0L, (tCmd - System.nanoTime()) / 1_000_000L - 3L),
             TimeUnit.MILLISECONDS,
         )
+    }
+
+    /**
+     * On the timer thread, as Play goes out: places the captured stream again with the clock of this instant, so that the
+     * lead is exactly the lead (counted back from the newest frame now, not from a guess made a few ms earlier), and notes
+     * how old that newest frame is (the capture's own delay). False if the capture was restarted meanwhile: no Play then.
+     */
+    private fun replanCapture(s: KitchenSession, tSent: Long): Boolean {
+        val feed = s.capture ?: return false
+        if (feed.generation != s.captureGeneration) {
+            post("capture changed") { if (session === s) endSession(s, "the capture started again", true) }
+            return false
+        }
+        val plan = capturePlan(feed, tSent)
+        s.startRingFrame = plan.startFrame
+        capturePlannedLagMs = plan.plannedLagMs
+        captureAheadMs = plan.aheadFrames * 1000.0 / feed.rate
+        val age = feed.markPlay(tSent)
+        captureAgeAtPlayMs = age
+        AppLog.add(
+            TAG,
+            "capture: Play sent, the stream begins ${plan.aheadFrames * 1000L / feed.rate} ms before the newest frame " +
+                "(frame ${plan.startFrame}${if (plan.limited) ", limited" else ""}), planned lag ${fmt(plan.plannedLagMs)} ms, " +
+                "the newest frame is ${fmt(age)} ms old (${feed.clockSource} clock)",
+        )
+        return true
     }
 
     /**
@@ -1457,6 +1490,7 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         o.put("lag_locked", cs != null && lagCapture.isLocked)
         // and behind the living room's sound: the same, less the time the living room needs from capture to sound
         o.put("room_offset_ms", jsonNumber(round1(lag - Settings.values.captureLivingLatencyMs)))
+        o.put("capture_age_at_play_ms", jsonNumber(round1(captureAgeAtPlayMs)))
         o.put("capture_starts", captureStarts)
         o.put("capture_planned_lag_ms", jsonNumber(round1(capturePlannedLagMs)))
         o.put("capture_lead_ms", captureLead.effectiveMs(Settings.values.captureLeadMs))
@@ -1530,6 +1564,9 @@ class Kitchen(private val context: Context, private val living: LivingRoom) : St
         private const val LEARN_LK_AT = 4
         private const val UNMUTE_LEAD_NANOS = 30_000_000L
         private const val HOT_JOIN_LEAD_NANOS = 30_000_000L
+
+        /** A captured stream is placed at the moment Play goes out, so the time ahead only has to cover the timer. */
+        private const val CAPTURE_PLAY_LEAD_NANOS = 10_000_000L
         private const val JOIN_MARGIN_FRAMES = 2_205L
 
         private const val MAX_RTT_NANOS = 60_000_000L

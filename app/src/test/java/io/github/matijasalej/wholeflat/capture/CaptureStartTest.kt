@@ -29,17 +29,41 @@ class CaptureStartTest {
 
     @Test
     fun theLeadIsNeverLessThanTheMinimum() {
-        val p = CaptureStart.plan(480_000, 480_000, 94_000, rate, leadMs = 100, offsetMs = -90, lkMs = 290.0)
-        assertEquals(480_000L - 1_920L, p.startFrame)
+        assertEquals(10, CaptureStart.MIN_LEAD_MS)
+        // a lead of 5 ms (100 less 95 of offset) is raised to the minimum of 10 ms
+        val p = CaptureStart.plan(480_000, 480_000, 94_000, rate, leadMs = 100, offsetMs = -95, lkMs = 290.0)
+        assertEquals(480_000L - 480L, p.startFrame)
+        assertEquals(480L, p.aheadFrames)
         assertTrue(p.limited)
         assertEquals(290.0 + CaptureStart.MIN_LEAD_MS, p.plannedLagMs, 0.001)
     }
 
     @Test
-    fun theStartIsNeverPastTheNewestFrames() {
-        // the clock thinks it is further on than what has been written
+    fun aLeadOfTenMillisecondsIsTenMilliseconds() {
+        val p = CaptureStart.plan(480_000, 480_000, 94_000, rate, leadMs = 10, offsetMs = 0, lkMs = 190.0)
+        assertEquals(480L, p.aheadFrames)
+        assertFalse(p.limited)
+        assertEquals(200.0, p.plannedLagMs, 0.001)
+    }
+
+    @Test
+    fun theLeadIsCountedBackFromTheNewestFrameAtPlayNotFromWhatWasWrittenBefore() {
+        // the last read was 20 ms ago: the clock is 20 ms past the written frames, and the stream still starts only the lead before it
+        // (a minimum lead measured from the written frames made a lead of 40 ms come out as 84 to 89)
+        val written = 480_000L
+        val p = CaptureStart.plan(nowFrame = written + 960, writeIndex = written, validStart = 94_000, rate = rate, leadMs = 10, offsetMs = 0, lkMs = 190.0)
+        assertEquals(480L, p.aheadFrames)
+        assertEquals(written + 960 - 480, p.startFrame)
+        assertFalse(p.limited)
+    }
+
+    @Test
+    fun aClockThatRunsOnWithoutFramesIsNotBelievedBeyondAReadOrTwo() {
+        // the capture stalled: the clock thinks it is 20000 frames further on than what has been written
         val p = CaptureStart.plan(nowFrame = 500_000, writeIndex = 480_000, validStart = 96_000, rate = rate, leadMs = 20, offsetMs = 0, lkMs = 290.0)
-        assertEquals(480_000L - 1_920L, p.startFrame)
+        val latest = 480_000L + CaptureStart.MAX_RUN_ON_MS * 48L
+        assertEquals(latest - 960L, p.startFrame)
+        assertEquals(960L, p.aheadFrames)
         assertTrue(p.limited)
     }
 

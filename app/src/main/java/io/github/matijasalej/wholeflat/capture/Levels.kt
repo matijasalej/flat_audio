@@ -35,8 +35,8 @@ object Levels {
         if (frames <= 0) FLOOR_DB else toDb(sqrt(sumSquares / (2.0 * frames)) / 32768.0)
 }
 
-/** The RMS level over the last [windowChunks] chunks (about a second). */
-class RollingLevel(private val windowChunks: Int = 50) {
+/** The RMS level over the last [windowChunks] chunks (about a second of the 10 ms chunks of the capture). */
+class RollingLevel(private val windowChunks: Int = 100) {
     private val sums = DoubleArray(windowChunks)
     private val frames = LongArray(windowChunks)
     private var pos = 0

@@ -41,7 +41,7 @@ import kotlin.concurrent.thread
  *                               bytes, blocks, who closed it and why) and the transport state and status seen meanwhile
  *   GET  /capture               the capture of the Cast receiver: state, grants, level, activity, media session
  *   GET  /capture/start         an attempt now, also without the adb grants (the consent dialog then shows on the TV)
- *   GET  /capture/restart       ends the capture in progress; it starts again by itself
+ *   GET  /capture/restart       ends the capture in progress; it starts again by itself (`?buffer=1` makes the AudioRecord buffer the smallest)
  *   GET  /tv                    the TV's status
  *   GET  /tv/run                runs the wake and screen-off sequence now
  *   GET  /tv/detect             looks for the TV again
@@ -238,6 +238,8 @@ object DebugServer {
             }
             "/capture/restart" -> {
                 AppLog.add(TAG, "${req.remote} capture/restart")
+                // ?buffer=1|2|4|8: the AudioRecord buffer as a multiple of the smallest the device allows, for the latency measurements
+                req.query["buffer"]?.toIntOrNull()?.let { AppState.capture?.setBufferFactor(it) }
                 AppState.capture?.restart("asked for on the debug page")
                 sendJson(out, 200, JSONObject().put("ok", AppState.capture != null), head)
             }

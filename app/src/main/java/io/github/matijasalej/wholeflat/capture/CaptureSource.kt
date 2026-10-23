@@ -107,6 +107,21 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
     var uids: Map<String, Int> = emptyMap()
         private set
 
+    /** What the AudioRecord of the last attempt was built with: its buffer, the device's minimum and the multiple of it. */
+    @Volatile
+    private var recordBufferFrames = 0
+
+    @Volatile
+    private var recordMinBufferFrames = 0
+
+    @Volatile
+    private var recordBufferFactor = 0
+
+    /** The buffer of the next AudioRecord as a multiple of the device's minimum (1, 2, 4 or 8). */
+    @Volatile
+    var bufferFactor = DEFAULT_BUFFER_FACTOR
+        private set
+
     @Volatile
     private var mediaPlaying = false
 
@@ -372,7 +387,12 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
             setState("starting_capture", null)
             val record = buildRecord(projection)
             a.record = record
-            note(a, "AudioRecord built: ${record.sampleRate} Hz, ${record.channelCount} ch, buffer ${record.bufferSizeInFrames} frames")
+            note(
+                a,
+                "AudioRecord built: ${record.sampleRate} Hz, ${record.channelCount} ch, buffer ${record.bufferSizeInFrames} frames " +
+                    "(${record.bufferSizeInFrames * 1000L / feed.rate} ms; ${recordBufferFactor} times the device's minimum of $recordMinBufferFrames frames), " +
+                    "reads of ${CHUNK_MS} ms",
+            )
             if (record.state != AudioRecord.STATE_INITIALIZED) {
                 throw IllegalStateException("AudioRecord is not initialized after the build (state ${record.state})")
             }
@@ -452,6 +472,12 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
         return projection
     }
 
+    /** Sets the buffer of the next AudioRecord to [factor] times the smallest one (1, 2, 4 or 8; anything else is rounded to those). */
+    fun setBufferFactor(factor: Int) {
+        bufferFactor = BUFFER_FACTORS.firstOrNull { it >= factor } ?: BUFFER_FACTORS.last()
+        AppLog.add(TAG, "the AudioRecord buffer will be $bufferFactor times the smallest the device allows")
+    }
+
     private fun buildRecord(projection: MediaProjection): AudioRecord {
         val builder = AudioPlaybackCaptureConfiguration.Builder(projection)
         for (uid in uids.values) builder.addMatchingUid(uid)
@@ -462,12 +488,35 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
             .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
             .build()
         val minBytes = AudioRecord.getMinBufferSize(feed.rate, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
-        val bufferBytes = maxOf(if (minBytes > 0) minBytes * 4 else 0, feed.rate * 4 / 2) // at least half a second
-        return AudioRecord.Builder()
-            .setAudioFormat(format)
-            .setBufferSizeInBytes(bufferBytes)
-            .setAudioPlaybackCaptureConfig(config)
-            .build()
+        // the smallest buffer that works: the wanted multiple of the device's minimum, then bigger ones if it refuses that
+        val tries = if (minBytes > 0) BUFFER_FACTORS.filter { it >= bufferFactor }.map { it to minBytes * it } else listOf(0 to feed.rate * 4 / 2)
+        var failure: Throwable? = null
+        for ((factor, bytes) in tries) {
+            var record: AudioRecord? = null
+            try {
+                record = AudioRecord.Builder()
+                    .setAudioFormat(format)
+                    .setBufferSizeInBytes(bytes)
+                    .setAudioPlaybackCaptureConfig(config)
+                    .build()
+                if (record.state == AudioRecord.STATE_INITIALIZED) {
+                    recordBufferFactor = factor
+                    recordMinBufferFrames = if (minBytes > 0) minBytes / 4 else 0
+                    recordBufferFrames = record.bufferSizeInFrames
+                    return record
+                }
+                failure = IllegalStateException("AudioRecord is not initialized with a buffer of $bytes bytes (state ${record.state})")
+            } catch (t: Throwable) {
+                failure = t
+            }
+            try {
+                record?.release()
+            } catch (e: Exception) {
+                // gone already
+            }
+            AppLog.add(TAG, "an AudioRecord buffer of $bytes bytes did not work (${why(failure!!)}), trying a bigger one")
+        }
+        throw failure ?: IllegalStateException("no AudioRecord buffer size to try")
     }
 
     private fun captureLoop(a: Attempt, record: AudioRecord) {
@@ -747,6 +796,17 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
         o.put("generation", feed.generation)
         o.put("clock", feed.clockSource)
         o.put("longest_gap_ms", feed.maxGapMs)
+        // the pipeline from the capture point to this app: how old the newest frame is when it has been read (from the timestamps of
+        // AudioRecord), and how old it was when Play was sent (the part of the kitchen's lag that the capture itself takes)
+        o.put("chunk_ms", CHUNK_MS)
+        o.put("pipeline_ms", num(feed.pipelineMs()))
+        o.put("pipeline_max_ms", num(feed.pipelineMaxMs))
+        o.put("age_at_play_ms", num(feed.agePlayMs))
+        o.put("age_at_play_clock", feed.agePlaySource)
+        o.put("record_buffer_frames", recordBufferFrames)
+        o.put("record_buffer_ms", if (recordBufferFrames > 0) recordBufferFrames * 1000L / feed.rate else JSONObject.NULL)
+        o.put("record_min_buffer_frames", recordMinBufferFrames)
+        o.put("record_buffer_factor", recordBufferFactor)
         // true when Android silences the recording (a background restriction): the capture then reads zeros
         o.put(
             "client_silenced",
@@ -783,8 +843,19 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
         /** The Cast receiver of the Chromecast (it plays what a phone casts) and the Spotify TV app. */
         val PACKAGES = listOf("com.google.android.apps.mediashell", "com.spotify.tv.android")
 
-        /** A read is 20 ms of audio. */
-        private const val CHUNK_MS = 20
+        /**
+         * A read is 10 ms of audio: the audio reaches the stream to the Sonos at most one chunk after it was read, and a
+         * chunk of a WAV stream is the same 10 ms, so nothing waits for a block to fill.
+         */
+        private const val CHUNK_MS = 10
+
+        /**
+         * The AudioRecord buffer in multiples of the smallest one the device allows (getMinBufferSize). A reader that keeps
+         * up with 10 ms reads gets each chunk as soon as it exists whatever the size of the buffer; the buffer only has to
+         * hold what piles up while the reader is delayed, and a bigger one is tried when the device refuses this one.
+         */
+        const val DEFAULT_BUFFER_FACTOR = 2
+        private val BUFFER_FACTORS = intArrayOf(1, 2, 4, 8)
         private const val ACTIVITY_WAIT_MS = 8_000L
         private const val CONSENT_WAIT_MS = 15_000L
         private const val SERVICE_WAIT_MS = 8_000L

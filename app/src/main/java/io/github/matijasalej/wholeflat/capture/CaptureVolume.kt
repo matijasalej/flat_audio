@@ -110,9 +110,12 @@ class CaptureVolume(context: Context, private val onVolume: (Int) -> Unit) {
                 index = i
                 max = m
                 mirror.seed(i, m)
-                if (m > 0) {
-                    AppLog.add(TAG, "capture volume: the box is at $i of $m")
-                    onVolume(VolumeMirror.raw(i, m))
+                val initial = VolumeMirror.initialRaw(i, m, Settings.values.livingFixedVolume)
+                if (initial != null) {
+                    AppLog.add(TAG, "capture volume: the box is at $i of $m, the Sonos follows it")
+                    onVolume(initial)
+                } else {
+                    AppLog.add(TAG, "capture volume: the box is at $i of $m (fixed living room volume), the Sonos keeps its volume until the Cast volume is changed")
                 }
             }
         } else {

@@ -72,6 +72,16 @@ class VolumeMirror(
     }
 
     companion object {
+        /**
+         * The Sonos volume to set when capture mode begins, or null to leave the speaker as it is. With the fixed
+         * living room volume the box is parked at its maximum on purpose, so its index says nothing about how loud
+         * the kitchen should be (it would blast at full volume at the start of every stream); only a change that
+         * the user makes sets the volume. Without it, the box's volume is what the user hears in the living room
+         * and the Sonos follows it from the first note.
+         */
+        fun initialRaw(index: Int, max: Int, fixedVolume: Boolean): Int? =
+            if (fixedVolume || max <= 0) null else raw(index, max)
+
         /** The index 0..max as the Connect scale 0..65535 (what the Sonos volume mapping starts from). */
         fun raw(index: Int, max: Int): Int =
             if (max <= 0) 0 else (index.coerceIn(0, max) * 65_535L / max).toInt()

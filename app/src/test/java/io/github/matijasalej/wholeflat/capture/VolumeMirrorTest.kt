@@ -92,6 +92,17 @@ class VolumeMirrorTest {
     }
 
     @Test
+    fun theSonosKeepsItsVolumeAtTheStartWhenTheBoxIsParkedAtMaximumOnPurpose() {
+        // fixed living room volume: the box's index says nothing about the kitchen
+        assertEquals(null, VolumeMirror.initialRaw(15, 15, fixedVolume = true))
+        assertEquals(null, VolumeMirror.initialRaw(6, 15, fixedVolume = true))
+        // otherwise the Sonos follows from the first note
+        assertEquals(VolumeMirror.raw(6, 15), VolumeMirror.initialRaw(6, 15, fixedVolume = false))
+        assertEquals(65_535, VolumeMirror.initialRaw(15, 15, fixedVolume = false))
+        assertEquals(null, VolumeMirror.initialRaw(3, 0, fixedVolume = false))
+    }
+
+    @Test
     fun clearForgetsAChangeThatWasNotActedOn() {
         val m = VolumeMirror(debounceMs = 250)
         m.seed(10, 15)

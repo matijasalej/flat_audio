@@ -39,7 +39,7 @@ adb connect <tv-ip>:<port>
 adb install -r WholeFlatAudio.apk
 ```
 
-Wireless debugging switches itself off when the Google TV reboots; turn it on again with the remote.
+**Wireless debugging switches itself off after every reboot** of the Google TV. Switch it on again in Settings, System, Developer options, Wireless debugging (with the remote), then look up the new port from the Mac: `adb mdns services` lists `_adb-tls-connect._tcp` with the address and port, and `adb connect <tv-ip>:<port>` connects (the port changes each time; an already paired Mac does not need the pairing code again).
 
 ## First-time setup
 
@@ -47,7 +47,7 @@ Wireless debugging switches itself off when the Google TV reboots; turn it on ag
 2. In the Spotify app on your phone, open the device list and pick **Whole Flat** once. No typing: the phone hands over the login through zeroconf, and the app keeps it for later boots.
 3. **Sonos:** make sure UPnP is on for the speaker, and that its battery saver or auto-sleep does not take it off the network too early. If it does go to sleep, the kitchen joins again by itself when it wakes up.
 4. **Philips TV:** turn off the TV's switch-off timer, or it will turn itself off while music plays. JointSpace (port 1925) may only open after the TV has been unplugged from the mains for a minute once. The app finds the TV by itself; if it does not, type its address on the settings screen.
-5. **Google TV:** set the energy saver (Settings, System, Power & energy) to Never, and switch off "turn off the device with the TV" in the HDMI-CEC settings. A sleeping Google TV freezes the audio output; the app notices and rebuilds it, but it cannot play while the box sleeps.
+5. **Google TV:** the energy saver (Settings, System, Power & energy) **must be Never**. A Google TV that goes to sleep freezes the audio output (the app notices and rebuilds it, but it cannot play while the box sleeps). Also switch off "turn off the device with the TV" in the HDMI-CEC settings.
 6. **Grants over adb**, once (they survive updates and reboots):
 
    ```sh
@@ -56,6 +56,35 @@ Wireless debugging switches itself off when the Google TV reboots; turn it on ag
 
    This lets the app see which app is in front, so that the TV's screen is not switched off under a video. Without it the screen is left on.
 7. **Calibrate** the two rooms (below) once, and again if the speakers or the TV's audio delay change.
+
+## One player per Spotify account
+
+Only one librespot-based player should run per Spotify account at a time. This app is one; the Spotify app on a computer with librespot, Raspberry Pi players, spotifyd and similar are others. Every player asks Spotify for an audio key for every track it loads, and a few players on one account mean a few times the requests, which is how an account ends up with its keys refused (see below). Switch the others off while this one is in use.
+
+## If Spotify refuses playback
+
+Some accounts get the audio keys of their tracks refused by Spotify for a while (librespot issue #1649). It is a refusal on Spotify's side that is tied to the account, not a fault of the app: a stock librespot on a computer gets the same. The usual librespot answer, skipping to the next track, makes it worse, because each skipped track asks for a key again.
+
+This app does not skip. When a key is refused, it:
+
+- **pauses** (the Spotify app on the phone shows the device as paused) and **keeps the same track**,
+- **tries that track again by itself** after 3 s, 10 s, 30 s, 2 min, 5 min and then every 15 min,
+- never sends two key requests less than 3 s apart after an error,
+- **gives up after about 30 minutes** of refusals and waits for you.
+
+Your own commands are respected: **play** in the Spotify app tries again at once (but not sooner than 3 s after the last refusal) and starts the back-off over, **pause** stops the tries until you press play, and loading another track or position starts over from the beginning.
+
+What you see meanwhile:
+
+- on the TV, the first lines of the status say *Spotify is refusing playback for this account right now, retrying in 12 s*, or, after the 30 minutes, that it kept refusing and that you should press play on the phone;
+- in `/status.json`: `"spotify_state": "key_refused"` (or `"key_gave_up"`, `"ok"`), `"retry_in_s"` and `"count"` (the refusals of this episode), and the object `spotify_key` with the phase (`waiting`, `retrying`, `user_paused`, `gave_up`) and the total since the app started;
+- in the log (`/log`): lines tagged `spotify` and `native` for every refusal, try and recovery.
+
+If it does not clear up, wait. The refusals have gone away by themselves after some hours; do not keep pressing play (the app already spaces its requests, and every press starts the back-off over).
+
+## Free storage
+
+The Google TV has little storage, and the Spotify app's own cache has filled it to 97% once, which made the installation of this app fail. This app keeps its own use small (no audio cache, only the login and a few settings on disk, the log is in memory and bounded), and shows the free space of `/data` in `/status.json` (`storage`) and on the status screen of the app. **Below 300 MB it warns** (the screen says LOW, and the log gets a line). If it does, clear the cache of the Spotify app and other apps in Settings, Apps.
 
 ## Settings on the TV
 
@@ -104,7 +133,11 @@ The test signal is one 5 ms click per second (Hann-windowed sine, half of full s
 | `/tv/run`, `/tv/detect` | run the TV sequence now, look for the TV |
 | `/sys` | device facts |
 
-What to watch in `/status.json`: `living_room.underruns`, `stalls` and `recoveries` (the audio output), `kitchen.error_ms` (the median error of the last readings, the number that should stay within ±10), `kitchen.drift_ppm` (the Sonos plays slower by about 22 ppm), `kitchen.trimmed_frames`, `kitchen.rejoins` with `last_rejoin_reason`, `kitchen.websocket.open`, and `tv.last_action`.
+What to watch in `/status.json`: `spotify_state` (`ok`, `key_refused`, `key_gave_up`) with `retry_in_s` and `count`, `storage.data_free_mb` (warning below 300), `source`, `living_room.underruns`, `stalls` and `recoveries` (the audio output), `kitchen.error_ms` (the median error of the last readings, the number that should stay within ±10), `kitchen.drift_ppm` (the Sonos plays slower by about 22 ppm), `kitchen.trimmed_frames`, `kitchen.rejoins` with `last_rejoin_reason`, `kitchen.websocket.open`, and `tv.last_action`.
+
+## Sources of music
+
+Where the music comes from is a small interface (`app/.../source/AudioSource.kt` and `native/src/source.rs`): a source delivers PCM frames with their sample rate and reports start, pause, resume and flush (a seek or a skip), the track and the volume. librespot is the one source today and feeds the ring from inside the native core. A second source on the Kotlin side (the capture of another app's audio, say) gets the app's `SourceBridge` as its sink and listener (`PlaybackService.sourceBridge`) and goes through the same ring, start events and sync as librespot. The ring plays 44.1 kHz, so a source with another rate has to convert first. No second source exists yet.
 
 ## How the sync works
 
@@ -129,9 +162,9 @@ The repository needs three secrets:
 
 The keystore lives at `~/.config/flat_audio/release.p12`. **Back it up**: a build signed with another key cannot be installed over this one, you would have to uninstall first and lose the cached login. Without the secrets the release is signed with the debug key so that test builds still work.
 
-Layout: `native/` is the Rust core (librespot behind JNI, built by `cargo-ndk`; `ring.rs` is the frame ring with the epochs, `calib.rs` the test signal), `app/` the Kotlin app (`sync/` is the plain-Kotlin math that the JVM tests cover; `LivingRoom` the audio output; `Kitchen`, `SonosSoap`, `SonosWs`, `SonosFinder` and `KitchenStream` the kitchen; `TvControl` the TV). `spikes/` holds the measurement tooling that the design is based on. The app targets SDK 34 on purpose: from SDK 35 on Android no longer lets a `BOOT_COMPLETED` receiver start a media playback foreground service.
+Layout: `native/` is the Rust core (librespot behind JNI, built by `cargo-ndk`; `ring.rs` is the frame ring with the epochs, `calib.rs` the test signal, `keyguard.rs` the back-off for refused audio keys, `source.rs` the way in for other sources), `app/` the Kotlin app (`sync/` is the plain-Kotlin math that the JVM tests cover; `LivingRoom` the audio output; `Kitchen`, `SonosSoap`, `SonosWs`, `SonosFinder` and `KitchenStream` the kitchen; `TvControl` the TV). `spikes/` holds the measurement tooling that the design is based on. The app targets SDK 34 on purpose: from SDK 35 on Android no longer lets a `BOOT_COMPLETED` receiver start a media playback foreground service.
 
-librespot is used at a pinned git revision (the crates.io 0.8.0 release does not build). `native/vendor/librespot-core` is a copy of its core crate with three small changes (client token, user agent and claimed version present the desktop identity): the receiver pins the desktop client id, which desktop Spotify controllers need, and upstream would still announce Android.
+librespot is used at a pinned git revision (the crates.io 0.8.0 release does not build). Two crates are vendored in `native/vendor/`, each header of `Cargo.toml` lists the changes. `librespot-core` has three small changes (client token, user agent and claimed version present the desktop identity: the receiver pins the desktop client id, which desktop Spotify controllers need, and upstream would still announce Android), plus the spacing of audio key requests after an error and a tap on the commands the Spotify app sends. `librespot-playback` is librespot PR #1799 (a refused audio key no longer makes Spirc skip through the queue) with one change of ours: the player stays in its loading state, so that the same track can be loaded again later.
 
 ## Credits
 

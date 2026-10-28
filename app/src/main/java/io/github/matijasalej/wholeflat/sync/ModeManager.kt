@@ -128,6 +128,12 @@ class ModeManager(
     private var modeSinceMs = 0L
     private var ownSetMode: Mode? = null
 
+    /** When the user last asked for Synced (a setting on the phone page), elapsedRealtime in ms; the silence of rule 3 counts from it too. */
+    private var userAskedAtMs = Long.MIN_VALUE / 2
+
+    /** When the last Grab was asked for: grabs are at least [MIN_GRAB_GAP_MS] apart, whatever two rules may want. */
+    private var lastGrabAtMs = Long.MIN_VALUE / 2
+
     /** Why the last decision was taken, for the status. */
     @Volatile
     var lastWhy = ""
@@ -145,6 +151,7 @@ class ModeManager(
             seenMode = mode
             // a mode that this manager set itself (a reset after silence, a fall back) is not the user asking for the TV
             modeSinceMs = if (mode == ownSetMode) i.nowMs - 2 * JUST_ASKED_MS else i.nowMs
+            if (mode != ownSetMode && mode == Mode.SYNCED) userAskedAtMs = i.nowMs
             ownSetMode = null
             if (mode == Mode.LYRICS) videoSuppressed = false
         }
@@ -196,25 +203,30 @@ class ModeManager(
             }
             actions.add(Action.Release(reason))
         }
-        // 3. a long silence: the TV is given back (before the box sleeps and its CEC Standby switches the TV off with our stream in it)
+        // 3. a long silence: the TV is given back (before the box sleeps and its CEC Standby switches the TV off with our stream in it). Only a
+        // TV that plays, never a start under way, and the silence counts from the user's request too: on 28.10. a tap after a silence longer
+        // than the hold had rule 4 take the TV and this rule give it back about 100 times in 10 s, and the TV's player hung.
         val keepMs = silenceKeepMs()
-        if (holding && wantTv && i.silentForMs >= keepMs && actions.none { it is Action.Release }) {
+        val quietMs = minOf(i.silentForMs, i.nowMs - userAskedAtMs)
+        if (i.tv == Tv.PLAYING && wantTv && quietMs >= keepMs && actions.none { it is Action.Release }) {
             actions.add(Action.Release("${keepMs / 60_000} minutes of silence"))
         }
 
-        // 4. grab: with sound (or when the user has just asked for Synced), or the re-grab after a Cast session
+        // 4. grab: with sound (or when the user has just asked for Synced), or the re-grab after a Cast session; never two within MIN_GRAB_GAP_MS
         val releasing = actions.any { it is Action.Release }
         val idleTv = i.tv == Tv.IDLE || i.tv == Tv.FAILED || i.tv == Tv.LEFT
         val justAsked = i.nowMs - modeSinceMs < JUST_ASKED_MS && seenMode == Mode.SYNCED
-        if (wantTv && idleTv && !releasing && i.backoffRemainingMs <= 0L) {
+        if (wantTv && idleTv && !releasing && i.backoffRemainingMs <= 0L && i.nowMs - lastGrabAtMs >= MIN_GRAB_GAP_MS) {
             val rePending = regrabAtMs != 0L
             val soundNow = i.heardSound && i.silentForMs < GRAB_WITHIN_SOUND_MS
             if (rePending && i.nowMs >= regrabAtMs) {
                 regrabAtMs = 0L
                 lastRegrabMs = i.nowMs
+                lastGrabAtMs = i.nowMs
                 actions.add(Action.Grab)
                 why("grabbing the TV again after the Cast session")
             } else if (!rePending && (soundNow || justAsked || i.retryingTv)) {
+                lastGrabAtMs = i.nowMs
                 actions.add(Action.Grab)
                 why("grabbing the TV: sound, mode synced")
             }
@@ -267,5 +279,8 @@ class ModeManager(
 
         /** After the user asked for Synced the TV is grabbed even if nothing plays (ms). */
         private const val JUST_ASKED_MS = 10_000L
+
+        /** Grabs are at least this far apart (ms): two rules that undo each other can no longer hammer the TV. */
+        const val MIN_GRAB_GAP_MS = 3_000L
     }
 }

@@ -357,6 +357,36 @@ class ModeManagerTest {
         assertEquals(1, m.decide(inputs(71_000L, mode = Mode.SYNCED, silent = never, stuck = false)).grabs())
     }
 
+    // ---- a tap after a long silence (28.10.: the grab and the silence release undid each other ~100 times in 10 s) ----
+
+    @Test
+    fun aTapAfterALongSilenceTakesTheTvOnceAndItIsNotGivenBackWhileItStartsOrSoonAfter() {
+        val m = ModeManager(silenceKeepMs = { 60_000L })
+        // Lyrics with music (a long silence here would have the manager set Synced itself, which is not the user asking)
+        m.decide(inputs(0L, mode = Mode.LYRICS, silent = 0L))
+        // the user picks a setting after half an hour of silence
+        val a = m.decide(inputs(30 * minute, mode = Mode.SYNCED, silent = 30 * minute))
+        assertEquals(1, a.grabs())
+        // the start is under way: no release for the silence, and no second grab
+        for (k in 1..20) {
+            val b = m.decide(inputs(30 * minute + k * 100L, mode = Mode.SYNCED, silent = 30 * minute, tv = Tv.STARTING))
+            assertTrue(b.toString(), b.releases().isEmpty() && b.grabs() == 0)
+        }
+        // it plays: the silence counts from the tap, so it is kept for the hold
+        assertTrue(m.decide(inputs(30 * minute + 30_000L, mode = Mode.SYNCED, silent = 30 * minute, tv = Tv.PLAYING)).releases().isEmpty())
+        assertEquals("1 minutes of silence", m.decide(inputs(30 * minute + 61_000L, mode = Mode.SYNCED, silent = 31 * minute, tv = Tv.PLAYING)).releases().single().why)
+    }
+
+    @Test
+    fun grabsAreAtLeastThreeSecondsApart() {
+        val m = settled()
+        assertEquals(1, m.decide(inputs(60_000L, silent = 0L)).grabs())
+        // the start ended at once (cancelled, failed): with sound the TV is wanted again, but not before 3 s
+        assertEquals(0, m.decide(inputs(61_000L, silent = 0L, tv = Tv.IDLE)).grabs())
+        assertEquals(0, m.decide(inputs(62_999L, silent = 0L, tv = Tv.IDLE)).grabs())
+        assertEquals(1, m.decide(inputs(63_000L, silent = 0L, tv = Tv.IDLE)).grabs())
+    }
+
     // ---- giving the TV back after a silence ------------------------------------------------------------
 
     @Test

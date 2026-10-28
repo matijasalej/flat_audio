@@ -44,6 +44,7 @@ class SettingsModelTest {
         assertEquals(100, o.getInt("tv_pause_ms"))
         assertEquals(8, o.getInt("tv_hold_silence_min"))
         assertEquals(5000, o.getInt("tv_ready_ms"))
+        assertEquals(true, o.getBoolean("tv_clear_item"))
         assertEquals(false, o.getBoolean("tv_quiet"))
         assertEquals(false, o.getBoolean("tv_audio_only"))
         assertEquals("C0:D2:F3:87:BF:F4", o.getString("tv_mac"))
@@ -104,6 +105,8 @@ class SettingsModelTest {
         assertEquals(30000, m.values().tvReadyMs)
         assertEquals(setOf("tv_ready_ms"), m.applyJson(JSONObject("""{"tv_ready_ms": -5}""")))
         assertEquals(0, m.values().tvReadyMs)
+        assertEquals(setOf("tv_clear_item"), m.applyJson(JSONObject("""{"tv_clear_item": "off"}""")))
+        assertEquals(false, m.values().tvClearItem)
         assertEquals(setOf("tv_quiet", "tv_audio_only", "tv_position_probe"), m.applyJson(JSONObject("""{"tv_quiet": true, "tv_audio_only": "on", "tv_position_probe": 0}""")))
         assertEquals(true, m.values().tvQuiet)
         assertEquals(true, m.values().tvAudioOnly)
@@ -128,7 +131,7 @@ class SettingsModelTest {
                 "mode", "tv_latency_ms", "tv_format", "tv_burst_ms", "tv_extra_ms", "tv_preroll_ms", "tv_pcr_lead_ms", "tv_reanchor_min", "tv_render", "tv_video", "lyrics_offset_ms", "display", "background_cleanup",
                 "ambilight_style", "ambilight_menu", "tv_pause_ms", "tv_quiet", "tv_audio_only", "tv_mac", "tv_position_probe",
                 "ambilight_dark_style", "ambilight_dark_algorithm", "ambilight_dark_menu", "tv_auto_reanchor", "tv_reanchor_running", "tv_scroll",
-                "tv_hold_silence_min", "tv_ready_ms",
+                "tv_hold_silence_min", "tv_ready_ms", "tv_clear_item",
             ),
             keys,
         )

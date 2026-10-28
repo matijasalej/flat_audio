@@ -764,7 +764,8 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         val r = api.stop()
         val after = settleAfterStop(api, cancellable = false)
         note("the start is given back ($why): Stop ${r.describe()}, the transport ${after.ifEmpty { "not answering" }}")
-        session?.let { endSession(it, why, stopFirst = true) }
+        val cleared = clearItem(api)
+        session?.let { endSession(it, why, stopFirst = true, cleared = cleared) }
         session = null
         returnToHdmi()
     }
@@ -814,6 +815,27 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             if (nowMs() - from >= READY_MAX_MS) return "the TV's player was not ready ${READY_MAX_MS / 1000} s after the TV came on"
             sleepQuietly(1_000L)
         }
+    }
+
+    /**
+     * After the Stop of a hand-back our item is taken out of the TV's player (SetAVTransportURI with no address), so that the next start
+     * finds it empty. On 28.10. the start that hung came a minute after a hand-back, with the TV back on HDMI and our old item still in its
+     * player (STOPPED); the starts that played had an empty player (NO_MEDIA_PRESENT, after the plug) or came at once after our own Stop.
+     * A 701 or 705 is tried again twice. What happened, for the log and the journal; null when `tv_clear_item` is off.
+     */
+    private fun clearItem(api: SonosSoap): String? {
+        if (!Settings.values.tvClearItem) return null
+        var r = api.setUri("", "")
+        var tries = 1
+        while (!r.ok && (r.upnpError == 701 || r.upnpError == 705) && tries < CLEAR_TRIES) {
+            sleepQuietly(SET_RETRY_MS)
+            r = api.setUri("", "")
+            tries++
+        }
+        val after = transportNow(api)
+        val text = r.describe() + (if (tries > 1) " after $tries tries" else "") + ", the transport ${after.ifEmpty { "not answering" }}"
+        AppLog.add(TAG, "our item is taken out of the TV's player: $text")
+        return text
     }
 
     /** The player is hung from now on: said in the log, kept across restarts, written to the journal. */
@@ -1148,18 +1170,20 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         val s = session
         val api = soap
         val wasOn = state == State.PLAYING || state == State.STARTING
+        var cleared: String? = null
         if (api != null && wasOn) {
             // Stop first, and our stream ends only when the TV has stopped (or 1.5 s later): a stream that ended under a TV that still played
-            // was answered with a pause, a standby about 10 s later, or a player that hung
+            // was answered with a pause, a standby about 10 s later, or a player that hung. Then our item is taken out of its player.
             if (sendStop) {
                 val r = api.stop()
                 val after = settleAfterStop(api, cancellable = false)
                 note("release: $reason; Stop ${r.describe()}, the transport ${after.ifEmpty { "not answering" }}")
+                cleared = clearItem(api)
             } else {
                 note("release: $reason; no Stop (the new item goes to the transport that is running)")
             }
         }
-        if (s != null) endSession(s, reason, stopFirst = api != null && wasOn && sendStop)
+        if (s != null) endSession(s, reason, stopFirst = api != null && wasOn && sendStop, cleared = cleared)
         session = null
         if (api != null && wasOn && waitHdmi) returnToHdmi()
         live = false
@@ -1223,14 +1247,14 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     }
 
     /** [stopFirst]: the TV was stopped before the stream ended (true), it was not (false), or it does not apply (null: it left by itself). */
-    private fun endSession(s: KitchenSession, why: String, stopFirst: Boolean? = null) {
+    private fun endSession(s: KitchenSession, why: String, stopFirst: Boolean? = null, cleared: String? = null) {
         if (!s.cancelled) {
             s.cancelled = true
             s.endReason = why
             sessions.remove(s.token)
             s.record?.ended(System.nanoTime(), why)
             AppLog.add(TAG, "TV stream ${s.token} ended: $why")
-            journalEnd(s, why, stopFirst)
+            journalEnd(s, why, stopFirst, cleared)
         }
         s.closeSockets()
         if (session === s) {
@@ -1241,11 +1265,15 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     }
 
     /** The end of a stream goes to the journal, and some seconds later what the TV shows then (did it go to standby, to HDMI, to its tuner?). */
-    private fun journalEnd(s: KitchenSession, why: String, stopFirst: Boolean?) {
+    private fun journalEnd(s: KitchenSession, why: String, stopFirst: Boolean?, cleared: String?) {
         val j = journal ?: return
         val endedAt = nowMs()
         val age = if (streamStartedNanos == 0L) JSONObject.NULL else (System.nanoTime() - streamStartedNanos) / 1_000_000_000L
-        j.add("end", JSONObject().put("token", s.token).put("why", why).put("stop_first", stopFirst ?: JSONObject.NULL).put("age_s", age).put("connections", s.connectionCount))
+        j.add(
+            "end",
+            JSONObject().put("token", s.token).put("why", why).put("stop_first", stopFirst ?: JSONObject.NULL).put("cleared", cleared ?: JSONObject.NULL)
+                .put("age_s", age).put("connections", s.connectionCount),
+        )
         try {
             exec.schedule(Runnable { post("after the end") { journalAfter(s.token, endedAt) } }, AFTER_END_MS, TimeUnit.MILLISECONDS)
         } catch (e: Exception) {
@@ -1404,6 +1432,9 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
          */
         private const val SET_TRIES = 13
         private const val SET_TRIES_AFTER_STOP = 5
+
+        /** Tries of taking our item out of the player after a Stop (701 and 705 are tried again). */
+        private const val CLEAR_TRIES = 3
 
         /** The position of the item is read this often (ms): 5 s and a random part of up to 5 s more, once the TV has played for 8 s. */
         private const val PROBE_MIN_MS = 5_000L

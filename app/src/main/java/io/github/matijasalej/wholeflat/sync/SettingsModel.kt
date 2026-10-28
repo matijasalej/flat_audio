@@ -100,6 +100,8 @@ class SettingsValues(
     val tvHoldSilenceMin: Int,
     /** How long a TV that has just come on is given before its player gets anything (ms, counted from the first time it is read On). */
     val tvReadyMs: Int,
+    /** After the Stop of a hand-back, our item is taken out of the TV's player, so that the next start finds it empty. */
+    val tvClearItem: Boolean,
 )
 
 class SettingsModel {
@@ -147,6 +149,7 @@ class SettingsModel {
     var tvScroll = TV_SCROLL_SMOOTH
     var tvHoldSilenceMin = DEFAULT_TV_HOLD_SILENCE_MIN
     var tvReadyMs = DEFAULT_TV_READY_MS
+    var tvClearItem = true
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
@@ -154,7 +157,7 @@ class SettingsModel {
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
         captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPrerollMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
         backgroundCleanup, ambilightStyle, ambilightMenu, tvPauseMs, tvQuiet, tvAudioOnly, tvMac, tvPositionProbe,
-        ambilightDarkStyle, ambilightDarkAlgorithm, ambilightDarkMenu, tvAutoReanchor, tvReanchorRunning, tvScroll, tvHoldSilenceMin, tvReadyMs,
+        ambilightDarkStyle, ambilightDarkAlgorithm, ambilightDarkMenu, tvAutoReanchor, tvReanchorRunning, tvScroll, tvHoldSilenceMin, tvReadyMs, tvClearItem,
     )
 
     fun toJson(): JSONObject {
@@ -203,6 +206,7 @@ class SettingsModel {
         o.put(TV_SCROLL, tvScroll)
         o.put(TV_HOLD_SILENCE_MIN, tvHoldSilenceMin)
         o.put(TV_READY_MS, tvReadyMs)
+        o.put(TV_CLEAR_ITEM, tvClearItem)
         return o
     }
 
@@ -360,6 +364,10 @@ class SettingsModel {
             val v = number(json.get(TV_READY_MS))?.coerceIn(0, MAX_TV_READY_MS)
             if (v != null && v != tvReadyMs) { tvReadyMs = v; changed.add(TV_READY_MS) }
         }
+        if (json.has(TV_CLEAR_ITEM)) {
+            val v = bool(json.get(TV_CLEAR_ITEM))
+            if (v != null && v != tvClearItem) { tvClearItem = v; changed.add(TV_CLEAR_ITEM) }
+        }
         if (json.has(TV_QUIET)) {
             val v = bool(json.get(TV_QUIET))
             if (v != null && v != tvQuiet) { tvQuiet = v; changed.add(TV_QUIET) }
@@ -476,6 +484,7 @@ class SettingsModel {
         const val TV_POSITION_PROBE = "tv_position_probe"
         const val TV_HOLD_SILENCE_MIN = "tv_hold_silence_min"
         const val TV_READY_MS = "tv_ready_ms"
+        const val TV_CLEAR_ITEM = "tv_clear_item"
 
         /** A write to the TV that blocks 100 ms after the burst is a pause of its player (seen: 134 and 150 ms with a freeze each time). */
         const val DEFAULT_TV_PAUSE_MS = 100

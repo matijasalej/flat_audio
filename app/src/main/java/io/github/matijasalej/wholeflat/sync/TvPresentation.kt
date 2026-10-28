@@ -6,8 +6,9 @@ package io.github.matijasalej.wholeflat.sync
  * - **Synced**, the TV playing our stream, by the display: **Listening** the screen is off and so are the lights (the stream goes on, the
  *   sound is all); **Ambilight** the screen is off and the lights follow the audio; **Screen + Ambilight** the lyrics video is on the screen
  *   and the lights follow the audio.
- * - **Lyrics** (the Spotify app is on the screen over HDMI, with its lyrics, which the user left the TV's player for): the Ambilight
- *   follows the audio while the music plays, since lyrics are visible.
+ * - **Lyrics** (the Spotify app is on the screen over HDMI, with its lyrics, which the user left the TV's player for): the lights are
+ *   the display's too, while the music plays: on for **Ambilight** and **Screen + Ambilight**, off for **Listening** (they used to come
+ *   on with every song in Lyrics mode, which the user did not ask for).
  * - Otherwise the screen is left as it is, and the lights are off.
  *
  * What the lights were before is put back when they are not wanted any more. A screen that this app switched off is switched on again as
@@ -33,7 +34,7 @@ object TvPresentation {
         if (mode == Mode.SYNCED && tvPlaying) {
             return Want(if (display.screenOn) restore else Screen.OFF, display.lights)
         }
-        val lyricsOnTheScreen = mode == Mode.LYRICS && source == "capture"
-        return Want(restore, lyricsOnTheScreen)
+        val lyricsLights = mode == Mode.LYRICS && source == "capture" && display.lights
+        return Want(restore, lyricsLights)
     }
 }

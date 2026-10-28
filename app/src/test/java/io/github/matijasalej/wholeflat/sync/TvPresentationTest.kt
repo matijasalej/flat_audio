@@ -45,16 +45,19 @@ class TvPresentationTest {
     }
 
     @Test
-    fun inLyricsModeTheLightsFollowTheAudioWhileTheMusicPlaysAndTheScreenComesBack() {
+    fun inLyricsModeTheLightsComeOnlyWhenTheDisplayAsksForThemAndTheScreenComesBack() {
         val w = TvPresentation.want(Mode.LYRICS, tvPlaying = false, display = Display.LISTEN, source = "capture", screenOffByUs = true)
         assertEquals(Screen.ON, w.screen)
-        assertTrue(w.lights)
-        // whatever the display says: lyrics are visible, so the lights are on
+        // Listening: the music alone does not light the Ambilight (it came on with every song in Lyrics mode)
+        assertFalse(w.lights)
+        assertFalse(TvPresentation.want(Mode.LYRICS, false, Display.LISTEN, "capture", false).lights)
+        // the user picked the lights: on while the music plays
         assertTrue(TvPresentation.want(Mode.LYRICS, false, Display.AMBILIGHT, "capture", false).lights)
+        assertTrue(TvPresentation.want(Mode.LYRICS, false, Display.SCREEN, "capture", false).lights)
         // nothing plays: no lights (what they were before is put back)
-        assertFalse(TvPresentation.want(Mode.LYRICS, false, Display.LISTEN, "idle", false).lights)
+        assertFalse(TvPresentation.want(Mode.LYRICS, false, Display.AMBILIGHT, "idle", false).lights)
         // Whole Flat plays: Spotify's own playback has no lyrics on the TV
-        assertFalse(TvPresentation.want(Mode.LYRICS, false, Display.LISTEN, "librespot", false).lights)
+        assertFalse(TvPresentation.want(Mode.LYRICS, false, Display.AMBILIGHT, "librespot", false).lights)
         assertEquals(Screen.LEAVE, TvPresentation.want(Mode.LYRICS, false, Display.LISTEN, "capture", false).screen)
     }
 

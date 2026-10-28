@@ -3,7 +3,8 @@ package io.github.matijasalej.wholeflat.sync
 /**
  * What the TV shows while it plays the music of Synced mode (the lyrics video and the kitchen are the same in all three); the setting
  * `display`, chosen on the phone page or with the button of the TV app, kept until it is changed (and put back to Listening after ten
- * minutes without music). Changing it is only the screen and the Ambilight of the TV: the stream is not restarted.
+ * minutes without music). Changing it is only the screen and the Ambilight of the TV: the stream is not restarted. Its lights hold in
+ * Lyrics mode too: the Ambilight is on only when the display asks for it.
  */
 enum class Display(val key: String, val label: String) {
     /** The screen is off, the Ambilight is off. */

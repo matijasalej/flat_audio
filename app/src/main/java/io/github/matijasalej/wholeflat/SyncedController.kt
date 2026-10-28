@@ -33,8 +33,8 @@ import java.util.concurrent.TimeUnit
  * **The TV.** In Synced mode what the TV shows is the setting `display` (see [Display]): the screen off with the lights off (Listening),
  * the screen off with the Ambilight on, or the lyrics video on the screen with the Ambilight on; a change of it is only the screen and
  * the lights, the stream is not restarted, and it goes back to Listening after ten minutes without music. The Ambilight follows the audio
- * whenever lyrics are visible on the TV (also in Lyrics mode, with the Spotify app on the screen), and what it was before is put back
- * afterwards. A screen that this app switched off is switched on again when the TV stops playing our stream. Both
+ * only when the display asks for it (Ambilight, Screen + Ambilight), in Lyrics mode too while the music plays, and what it was before is
+ * put back afterwards. A screen that this app switched off is switched on again when the TV stops playing our stream. Both
  * the remembered state of the lights and the fact that the screen was switched off are kept in the preferences, so that an app that
  * crashed does not leave the TV dark or lit for ever.
  */

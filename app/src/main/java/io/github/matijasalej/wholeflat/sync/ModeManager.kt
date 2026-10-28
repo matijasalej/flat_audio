@@ -52,6 +52,8 @@ object ForegroundPolicy {
  *   again within a minute of that the mode becomes Lyrics (no fighting over the TV). With a video app in front the TV is released
  *   and not grabbed while the app is there. A TV that does not answer is given up until it does.
  * - **Lyrics** goes back to Synced after more than 10 minutes of silence, unless the TV was given up (below).
+ * - A **hung player** of the TV (see [StuckTv]) makes the mode Lyrics with what to do (unplug the TV), and it stays Lyrics until the user picks a
+ *   setting on the phone page, which says the player is free.
  * - Three starts of the TV in a row that fail make the mode Lyrics, with the reason. It stays Lyrics until the user asks for Synced (a
  *   display on the phone page, which also has the failed starts forgotten) or the app starts again: the reset after a long silence and
  *   this rule undid each other on every step, hundreds of times a second. A Synced that the user has just asked for is not turned back
@@ -106,6 +108,8 @@ class ModeManager(
          * and a TV that shows something else is taken.
          */
         val heardSound: Boolean = true,
+        /** The TV's player is hung (see [StuckTv]): it is not asked for a stream until the user says it is free (a setting on the phone page). */
+        val tvStuck: Boolean = false,
     )
 
     sealed class Action {
@@ -179,7 +183,7 @@ class ModeManager(
         if (videoSuppressed && i.foreground != Foreground.VIDEO_APP && i.foreground != Foreground.UNKNOWN) videoSuppressed = false
 
         // 2. the TV is not wanted: release it
-        val wantTv = mode == Mode.SYNCED && i.captureAlive && i.source != "librespot" && i.tvKnown && !videoSuppressed
+        val wantTv = mode == Mode.SYNCED && i.captureAlive && i.source != "librespot" && i.tvKnown && !videoSuppressed && !i.tvStuck
         val holding = i.tv == Tv.STARTING || i.tv == Tv.PLAYING
         if (holding && !wantTv && actions.none { it is Action.Release }) {
             val reason = when {
@@ -187,6 +191,7 @@ class ModeManager(
                 i.source == "librespot" -> "Spotify's own playback plays (Whole Flat)"
                 !i.captureAlive -> "the capture is gone"
                 videoSuppressed -> "a video app is in front"
+                i.tvStuck -> "the TV's player is stuck"
                 else -> "no TV"
             }
             actions.add(Action.Release(reason))
@@ -216,14 +221,18 @@ class ModeManager(
         }
         if (!wantTv) regrabAtMs = 0L
 
-        // 5. starts that keep failing (not those from before the user asked for Synced: they are being forgotten)
-        if (mode == Mode.SYNCED && i.failedGrabs >= giveUpAfter && !justAsked) {
+        // 5. a hung player (not while the user has just asked for Synced: they say it is free, and the flag is being cleared), and starts that
+        // keep failing (not those from before the user asked for Synced: they are being forgotten)
+        if (mode == Mode.SYNCED && i.tvStuck && !justAsked) {
+            mode = Mode.LYRICS
+            actions.add(Action.SetMode(Mode.LYRICS, StuckTv.ADVICE.replaceFirstChar { it.lowercase() }))
+        } else if (mode == Mode.SYNCED && i.failedGrabs >= giveUpAfter && !justAsked) {
             mode = Mode.LYRICS
             actions.add(Action.SetMode(Mode.LYRICS, "the TV could not be taken ${i.failedGrabs} times in a row"))
         }
 
-        // 6. Lyrics goes back to Synced after a long silence, but not while the TV is given up (rule 5 would turn it back at once)
-        val givenUp = i.failedGrabs >= giveUpAfter
+        // 6. Lyrics goes back to Synced after a long silence, but not while the TV is given up or its player hung (rule 5 would turn it back at once)
+        val givenUp = i.failedGrabs >= giveUpAfter || i.tvStuck
         if (mode == Mode.LYRICS && i.mode == Mode.LYRICS && i.idleForMs >= resetAfterMs && !givenUp && actions.none { it is Action.SetMode }) {
             actions.add(Action.SetMode(Mode.SYNCED, "more than ${resetAfterMs / 60_000} minutes of silence"))
         }

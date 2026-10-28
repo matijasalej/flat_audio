@@ -118,7 +118,14 @@
   function render(s) {
     online = true;
     var lyrics = s.mode === 'lyrics';
-    notice.hidden = !lyrics;
+    if (s.warning) {
+      // the TV's player is stuck: that is said first, in the notice, whatever the mode
+      notice.textContent = s.warning;
+      notice.hidden = false;
+    } else {
+      notice.textContent = 'The TV is showing the Spotify app. Pick a setting to take it back.';
+      notice.hidden = !lyrics;
+    }
     document.querySelectorAll('.choice').forEach(function (b) {
       b.setAttribute('aria-pressed', String(!lyrics && b.dataset.display === s.display));
     });

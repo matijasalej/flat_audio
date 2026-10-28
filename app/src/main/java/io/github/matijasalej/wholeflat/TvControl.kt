@@ -611,6 +611,16 @@ class TvControl(private val context: Context) {
 
     private var readPower = ""
 
+    /**
+     * The box woke (its screen came on): it is likely switching the TV on over CEC right now, so the next time the TV is read On counts as
+     * the TV coming on (the readings before may be hours old, with a standby between them that nobody saw).
+     */
+    @Synchronized
+    fun forgetPower() {
+        readPower = ""
+        onSinceMs = 0L
+    }
+
     @Synchronized
     private fun notePower(power: String?) {
         val now = power ?: "unreachable"

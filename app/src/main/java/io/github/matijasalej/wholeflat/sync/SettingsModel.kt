@@ -95,6 +95,8 @@ class SettingsValues(
      * timeout runs from about a minute after the music), whose CEC Standby would otherwise switch the TV off with our stream in its player.
      */
     val tvHoldSilenceMin: Int,
+    /** How long a TV that has just come on is given before its player gets anything (ms, counted from the first time it is read On). */
+    val tvReadyMs: Int,
 )
 
 class SettingsModel {
@@ -141,6 +143,7 @@ class SettingsModel {
     var tvReanchorRunning = false
     var tvScroll = TV_SCROLL_SMOOTH
     var tvHoldSilenceMin = DEFAULT_TV_HOLD_SILENCE_MIN
+    var tvReadyMs = DEFAULT_TV_READY_MS
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
@@ -148,7 +151,7 @@ class SettingsModel {
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
         captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPrerollMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
         backgroundCleanup, ambilightStyle, ambilightMenu, tvPauseMs, tvQuiet, tvAudioOnly, tvMac, tvPositionProbe,
-        ambilightDarkStyle, ambilightDarkAlgorithm, ambilightDarkMenu, tvAutoReanchor, tvReanchorRunning, tvScroll, tvHoldSilenceMin,
+        ambilightDarkStyle, ambilightDarkAlgorithm, ambilightDarkMenu, tvAutoReanchor, tvReanchorRunning, tvScroll, tvHoldSilenceMin, tvReadyMs,
     )
 
     fun toJson(): JSONObject {
@@ -196,6 +199,7 @@ class SettingsModel {
         o.put(TV_REANCHOR_RUNNING, tvReanchorRunning)
         o.put(TV_SCROLL, tvScroll)
         o.put(TV_HOLD_SILENCE_MIN, tvHoldSilenceMin)
+        o.put(TV_READY_MS, tvReadyMs)
         return o
     }
 
@@ -349,6 +353,10 @@ class SettingsModel {
             val v = number(json.get(TV_HOLD_SILENCE_MIN))?.coerceIn(1, MAX_TV_HOLD_SILENCE_MIN)
             if (v != null && v != tvHoldSilenceMin) { tvHoldSilenceMin = v; changed.add(TV_HOLD_SILENCE_MIN) }
         }
+        if (json.has(TV_READY_MS)) {
+            val v = number(json.get(TV_READY_MS))?.coerceIn(0, MAX_TV_READY_MS)
+            if (v != null && v != tvReadyMs) { tvReadyMs = v; changed.add(TV_READY_MS) }
+        }
         if (json.has(TV_QUIET)) {
             val v = bool(json.get(TV_QUIET))
             if (v != null && v != tvQuiet) { tvQuiet = v; changed.add(TV_QUIET) }
@@ -464,6 +472,7 @@ class SettingsModel {
         const val TV_MAC = "tv_mac"
         const val TV_POSITION_PROBE = "tv_position_probe"
         const val TV_HOLD_SILENCE_MIN = "tv_hold_silence_min"
+        const val TV_READY_MS = "tv_ready_ms"
 
         /** A write to the TV that blocks 100 ms after the burst is a pause of its player (seen: 134 and 150 ms with a freeze each time). */
         const val DEFAULT_TV_PAUSE_MS = 100
@@ -472,6 +481,10 @@ class SettingsModel {
         /** The TV is given back after 8 minutes of silence: before the box sleeps (about 11 minutes after the music) and its CEC Standby finds the TV in its player. */
         const val DEFAULT_TV_HOLD_SILENCE_MIN = 8
         const val MAX_TV_HOLD_SILENCE_MIN = 30
+
+        /** A TV that has just come on is given 5 s before its player gets anything (on 28.10. its player answered 1 s after JointSpace said On). */
+        const val DEFAULT_TV_READY_MS = 5_000
+        const val MAX_TV_READY_MS = 30_000
 
         /** The wifi0 address of the Philips TV (JointSpace `/6/network/devices`, `wake-on-lan: Enabled`). */
         const val DEFAULT_TV_MAC = "C0:D2:F3:87:BF:F4"

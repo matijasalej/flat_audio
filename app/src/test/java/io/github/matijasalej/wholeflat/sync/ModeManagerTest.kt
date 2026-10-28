@@ -28,7 +28,8 @@ class ModeManagerTest {
         failed: Int = 0,
         retrying: Boolean = false,
         heard: Boolean = true,
-    ) = ModeManager.Inputs(now, mode, source, alive, silent, known, tv, leftCount, leftKind, foreground, backoff, failed, idle, retrying, heard)
+        stuck: Boolean = false,
+    ) = ModeManager.Inputs(now, mode, source, alive, silent, known, tv, leftCount, leftKind, foreground, backoff, failed, idle, retrying, heard, stuck)
 
     private fun List<Action>.grabs() = count { it is Action.Grab }
     private fun List<Action>.releases() = filterIsInstance<Action.Release>()
@@ -318,6 +319,42 @@ class ModeManagerTest {
         m.decide(inputs(1L, tv = Tv.LEFT, leftCount = 1, foreground = Foreground.LAUNCHER))
         assertFalse("handled", m.wantsForeground(Tv.LEFT, 1))
         assertNotNull(m.lastWhy)
+    }
+
+    // ---- a TV whose player is hung -----------------------------------------------------------------------
+
+    @Test
+    fun aHungPlayerIsNotAskedForAStreamAndSyncedFallsBackToLyricsWithTheAdvice() {
+        val m = settled()
+        val a = m.decide(inputs(60_000L, silent = 0L, stuck = true))
+        assertEquals(0, a.grabs())
+        assertEquals(Mode.LYRICS, a.modes().single().mode)
+        assertTrue(a.modes()[0].why, a.modes()[0].why.contains("unplug the TV for a minute"))
+        // asked again while it stays hung, with sound: still no grab
+        assertEquals(0, m.decide(inputs(62_000L, mode = Mode.LYRICS, silent = 0L, stuck = true)).grabs())
+    }
+
+    @Test
+    fun aHungPlayerKeepsLyricsThroughALongSilence() {
+        val m = settled()
+        m.decide(inputs(60_000L, silent = 0L, stuck = true))
+        for (k in 0 until 5) {
+            val a = m.decide(inputs(60 * minute + k, mode = Mode.LYRICS, silent = 30 * minute, stuck = true))
+            assertTrue(a.toString(), a.modes().isEmpty())
+        }
+    }
+
+    @Test
+    fun theUsersSyncedIsNotBouncedWhileTheHungFlagIsBeingClearedAndThenTheTvIsTaken() {
+        val m = settled()
+        m.decide(inputs(60_000L, silent = 0L, stuck = true))
+        m.decide(inputs(61_000L, mode = Mode.LYRICS, silent = 0L, stuck = true))
+        // the user picks a setting: the mode is Synced, the renderer has not cleared the flag yet
+        val a = m.decide(inputs(70_000L, mode = Mode.SYNCED, silent = never, stuck = true))
+        assertTrue(a.toString(), a.modes().isEmpty())
+        assertEquals(0, a.grabs())
+        // cleared a moment later: the TV is taken, with no sound (the user asked)
+        assertEquals(1, m.decide(inputs(71_000L, mode = Mode.SYNCED, silent = never, stuck = false)).grabs())
     }
 
     // ---- giving the TV back after a silence ------------------------------------------------------------

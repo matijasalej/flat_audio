@@ -561,6 +561,7 @@ object DebugServer {
         o.put("our_cpu_percent_of_the_box", Math.round(cpu / cores * 10.0) / 10.0)
         o.put("cleanup", AppState.synced?.cleanupJson() ?: JSONObject.NULL)
         o.put("swap", AppState.synced?.swapJson() ?: JSONObject.NULL)
+        o.put("tv_player", AppState.tvRenderer?.let { r -> JSONObject().put("stuck", r.stuck).put("advice", if (r.stuck) io.github.matijasalej.wholeflat.sync.StuckTv.ADVICE else JSONObject.NULL) } ?: JSONObject.NULL)
         o.put("third_party_apps", AppState.synced?.appsJson() ?: JSONObject.NULL)
         return o
     }

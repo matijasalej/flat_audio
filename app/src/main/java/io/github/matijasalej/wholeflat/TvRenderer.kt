@@ -16,6 +16,8 @@ import io.github.matijasalej.wholeflat.sync.SonosXml
 import io.github.matijasalej.wholeflat.sync.StartBackoff
 import io.github.matijasalej.wholeflat.sync.StreamBuilder
 import io.github.matijasalej.wholeflat.sync.StreamFormat
+import io.github.matijasalej.wholeflat.sync.StuckTv
+import io.github.matijasalej.wholeflat.sync.SwitchPreflight
 import io.github.matijasalej.wholeflat.sync.SyncedTiming
 import io.github.matijasalej.wholeflat.sync.TvVideoSpec
 import io.github.matijasalej.wholeflat.sync.TvDidl
@@ -237,6 +239,17 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     @Volatile
     private var startTookItem = false
 
+    /** A hung player of the TV (see [StuckTv]): it is given nothing until the user says it is free; kept across restarts of the app. */
+    private val stuckTv = StuckTv()
+    private val playerPrefs = context.getSharedPreferences("wholeflat_tv_player", Context.MODE_PRIVATE)
+
+    /** The TV's player is hung: it is not asked for a stream until the user picks a setting on the phone page (after the plug). */
+    val stuck: Boolean get() = stuckTv.stuck
+
+    private fun persistStuck(hung: Boolean) {
+        playerPrefs.edit().putBoolean(PREF_HUNG, hung).apply()
+    }
+
     /** The journal's record of the start under way (written when the start is over, see [doGrab]), and the outcome of the last one written. */
     private var rec: JSONObject? = null
     private var lastRecOutcome = ""
@@ -291,6 +304,10 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     // ---- life cycle ------------------------------------------------------------------------------
 
     fun start() {
+        if (playerPrefs.getBoolean(PREF_HUNG, false)) {
+            stuckTv.restore(nowMs())
+            AppLog.add(TAG, "the TV's player was hung when the app stopped: ${StuckTv.ADVICE}")
+        }
         StreamRouter.add(this)
         exec.scheduleWithFixedDelay({ post("poll") { poll() } }, POLL_PERIOD_MS, POLL_PERIOD_MS, TimeUnit.MILLISECONDS)
         exec.scheduleWithFixedDelay({ post("warm-up") { warmupTick() } }, WARMUP_TICK_MS, WARMUP_TICK_MS, TimeUnit.MILLISECONDS)
@@ -389,6 +406,12 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     fun resetFailures(why: String) = post("reset failures") { forgetFailures(why) }
 
     private fun forgetFailures(why: String) {
+        if (stuckTv.stuck) {
+            stuckTv.clear()
+            persistStuck(false)
+            AppLog.add(TAG, "the TV's player is taken to be free again ($why): the next start is on probation, one more hang and it is stuck again")
+            journal?.add("player", JSONObject().put("hung", false).put("why", why))
+        }
         if (backoff.failures == 0 && lastFailureMs == 0L && state != State.FAILED) return
         AppLog.add(TAG, "the ${backoff.failures} failed starts are forgotten ($why)")
         backoff.onHealthy()
@@ -436,6 +459,10 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     private fun doGrabSteps(reason: String, keepRunning: Boolean = false) {
         if (state == State.STARTING || state == State.PLAYING) return
         startTookItem = false
+        if (stuckTv.stuck) {
+            lastError = StuckTv.ADVICE
+            return
+        }
         val now = nowMs()
         if (now < notBeforeMs) return
         if (!backoff.allowed(now)) {
@@ -474,6 +501,17 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             return
         }
         if (cancelRequested) return cancelled()
+        val notReady = awaitReady(ip)
+        if (cancelRequested) return cancelled()
+        if (notReady != null) {
+            // like a TV that is not on: no failed start, asked again a little later
+            notBeforeMs = nowMs() + NOT_ON_WAIT_MS
+            lastError = notReady
+            AppLog.add(TAG, "$notReady, trying again in ${NOT_ON_WAIT_MS / 1000} s at the earliest")
+            rec("outcome", OUTCOME_NOT_READY)
+            setState(State.IDLE)
+            return
+        }
         val api = connect(ip)
         // the stream: the lyrics video unless the setting says audio only; its timing is that of its format
         val wantTs = Settings.values.tvFormat == SettingsModel.TV_FORMAT_TS
@@ -555,17 +593,33 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         // still busy stopping and says 705 (the transport is locked) to the item until it has settled: its transport is waited for, and a 701
         // or 705 is tried again for a few seconds instead of failing the grab (which makes the next start wait 10 s).
         if (!keepRunning) {
-            // a transport that holds nothing (a TV that has not played since it came on, or one that a release or a restart has just stopped)
-            // is not stopped again: a Stop right behind another is what the TV answers with 705 for seconds
-            val before = transportNow(api)
-            rec("transport_before", before.ifEmpty { "not answering" })
-            rec("stop_first", !(before == "STOPPED" || before == "NO_MEDIA_PRESENT"))
-            if (before == "STOPPED" || before == "NO_MEDIA_PRESENT") {
-                AppLog.add(TAG, "the TV's transport is $before: no Stop before the item")
-            } else {
-                api.stop()
-                settleAfterStop(api)
+            // look before the item (see SwitchPreflight): a transport that holds nothing (a TV that has not played since it came on, or one that
+            // a release or a restart has just stopped) gets no Stop, which right behind another the TV answers with 705 for seconds; one that
+            // holds something gets one Stop; one that stays TRANSITIONING through a Stop is a hung player, and it is given nothing
+            val pf = SwitchPreflight()
+            preflight@ while (true) {
+                if (cancelRequested) return cancelled()
+                val t = transportNow(api)
+                when (pf.next(nowMs(), t)) {
+                    SwitchPreflight.Step.SET -> break@preflight
+                    SwitchPreflight.Step.STOP -> {
+                        AppLog.add(TAG, "the TV's transport is $t: Stop before the item")
+                        api.stop()
+                        sleepQuietly(TV_STEP_MS)
+                    }
+                    SwitchPreflight.Step.WAIT -> sleepQuietly(PREFLIGHT_STEP_MS)
+                    SwitchPreflight.Step.HUNG -> {
+                        rec("transport_before", pf.first)
+                        rec("stop_first", true)
+                        if (stuckTv.onHungBeforeSet(nowMs())) markHung("its transport stayed TRANSITIONING through a Stop before anything was set")
+                        fail("the TV's player is hung: its transport stays TRANSITIONING through a Stop", hung = true)
+                        return
+                    }
+                }
             }
+            rec("transport_before", (pf.first ?: "").ifEmpty { "not answering" })
+            rec("stop_first", pf.stopped)
+            if (!pf.stopped) AppLog.add(TAG, "the TV's transport is ${(pf.first ?: "").ifEmpty { "not answering" }}: no Stop before the item")
         } else {
             AppLog.add(TAG, "the new stream goes to the transport that is running (no Stop)")
         }
@@ -630,7 +684,10 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         val playSent = nowMs()
         if (!waitFor(GET_WAIT_MS) { s.connectionCount > 0 }) {
             if (cancelRequested) return cancelled()
-            fail("the TV did not ask for the stream within ${GET_WAIT_MS / 1000} s (transport ${transportNow(api)})")
+            val transport = transportNow(api)
+            val noGet = transport == "TRANSITIONING"
+            if (noGet && stuckTv.onNoGet(nowMs())) markHung("it took the item and stayed TRANSITIONING without asking for the stream (${stuckTv.noGetsInARow} times in a row)")
+            fail("the TV did not ask for the stream within ${GET_WAIT_MS / 1000} s (transport ${transport.ifEmpty { "not answering" }})", hung = noGet)
             return
         }
         val getAfter = nowMs() - playSent
@@ -646,6 +703,8 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         closedPolls = 0
         AppLog.add(TAG, "the TV plays: its first GET came ${getAfter} ms after Play, PLAYING ${nowMs() - playSent} ms after Play (context ${tv.context() ?: "?"})")
         rec("playing_ms", nowMs() - playSent)
+        rec("probation", stuckTv.probation)
+        stuckTv.onPlaying()
         rec("token", s.token)
         rec("outcome", "playing")
         // the audio-only stream has no warm-up; the video stream is warming up until the TV has settled
@@ -710,9 +769,11 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         returnToHdmi()
     }
 
-    private fun fail(why: String) {
+    /** [hung]: the failure is the hang of the player (TRANSITIONING without a GET, or through a Stop); any other starts its count again. */
+    private fun fail(why: String, hung: Boolean = false) {
         lastError = why
         rec("outcome", "failed: $why")
+        if (!hung) stuckTv.onOtherFailure()
         if (!cancelRequested) lastFailureMs = nowMs()
         if (startTookItem) giveBackStart("failed: $why")
         session?.let { endSession(it, "failed: $why") }
@@ -727,6 +788,39 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
                 AppLog.error(TAG, "the give-up hook failed", t)
             }
         }
+    }
+
+    /**
+     * The ready gate: a TV that has just come on (read On for the first time since it was not, or since the box woke, see
+     * [TvControl.onSinceMs]) may still be starting its player, and a first item given while it starts is suspected of hanging it. Such a
+     * TV is given `tv_ready_ms` from that moment and its description (`dmr.xml`) must answer; a TV that has been on for a minute is ready
+     * (the pre-flight reads its transport). Null when ready, else why not, after [READY_MAX_MS].
+     */
+    private fun awaitReady(ip: String): String? {
+        val since = tv.onSinceMs
+        if (since > 0L && nowMs() - since >= READY_FRESH_MS) return null
+        val readyMs = Settings.values.tvReadyMs.toLong()
+        val from = nowMs()
+        while (true) {
+            if (cancelRequested || exec.isShutdown) return null
+            val on = tv.onSinceMs
+            val onFor = if (on > 0L) nowMs() - on else -1L
+            if (onFor >= readyMs && fetchDescription(ip) != null) {
+                val waited = nowMs() - from
+                rec("ready_wait_ms", waited)
+                if (waited > 50) AppLog.add(TAG, "the TV came on ${onFor / 1000} s ago: its player was given $waited ms before the item")
+                return null
+            }
+            if (nowMs() - from >= READY_MAX_MS) return "the TV's player was not ready ${READY_MAX_MS / 1000} s after the TV came on"
+            sleepQuietly(1_000L)
+        }
+    }
+
+    /** The player is hung from now on: said in the log, kept across restarts, written to the journal. */
+    private fun markHung(how: String) {
+        persistStuck(true)
+        AppLog.error(TAG, "the TV's player is hung: $how. ${StuckTv.ADVICE}; Synced is not tried again until then, Lyrics mode takes over")
+        journal?.add("player", JSONObject().put("hung", true).put("how", how))
     }
 
     /**
@@ -1269,6 +1363,15 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         val p = pipeline
         o.put("video", p?.statusJson() ?: JSONObject.NULL)
         o.put("quiet", Settings.values.tvQuiet)
+        val pl = JSONObject()
+        pl.put("stuck", stuckTv.stuck)
+        pl.put("probation", stuckTv.probation)
+        pl.put("starts_in_transitioning_in_a_row", stuckTv.noGetsInARow)
+        pl.put("stuck_for_s", if (stuckTv.stuck) (nowMs() - stuckTv.stuckSinceMs) / 1000 else JSONObject.NULL)
+        pl.put("advice", if (stuckTv.stuck) StuckTv.ADVICE else JSONObject.NULL)
+        pl.put("tv_on_for_s", if (tv.onSinceMs > 0L) (nowMs() - tv.onSinceMs) / 1000 else JSONObject.NULL)
+        pl.put("ready_ms", Settings.values.tvReadyMs)
+        o.put("player", pl)
         val pr = JSONObject()
         pr.put("enabled", Settings.values.tvPositionProbe)
         pr.put("readings", probeReadings)
@@ -1324,6 +1427,17 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
 
         /** What the TV shows is looked at this long after a stream of it ended (ms), for the journal. */
         private const val AFTER_END_MS = 15_000L
+
+        /** A TV that has been on this long is past its start (ms): the ready gate lets it through. */
+        private const val READY_FRESH_MS = 60_000L
+
+        /** The ready gate gives up after this long (ms): not a failed start, asked again after NOT_ON_WAIT_MS. */
+        private const val READY_MAX_MS = 30_000L
+
+        /** The pre-flight reads the transport this often while it waits (ms). */
+        private const val PREFLIGHT_STEP_MS = 1_000L
+
+        private const val PREF_HUNG = "hung"
 
         private const val OUTCOME_NOT_ON = "the TV is not on"
         private const val OUTCOME_NOT_READY = "the TV's player is not ready"

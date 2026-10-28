@@ -1,6 +1,7 @@
 package io.github.matijasalej.wholeflat
 
 import io.github.matijasalej.wholeflat.sync.RemoteActions
+import io.github.matijasalej.wholeflat.sync.StuckTv
 import org.json.JSONObject
 
 /**
@@ -22,6 +23,8 @@ object RemoteApi {
         }
         o.put("volume", volume ?: JSONObject.NULL)
         o.put("tv_text", tvText())
+        // the TV's player is hung: the page says what to do, whatever the mode
+        o.put("warning", if (AppState.tvRenderer?.stuck == true) StuckTv.ADVICE else JSONObject.NULL)
         o.put("kitchen_text", kitchenText())
         o.put("source", AppState.source)
         o.put("version", BuildInfo.versionName)
@@ -35,9 +38,9 @@ object RemoteApi {
         return when (r.state) {
             TvRenderer.State.PLAYING -> if (r.live) "TV: playing" else "TV: warming up"
             TvRenderer.State.STARTING -> "TV: starting"
-            TvRenderer.State.FAILED -> "TV: did not start"
+            TvRenderer.State.FAILED -> if (r.stuck) "TV: player stuck" else "TV: did not start"
             TvRenderer.State.LEFT -> "TV: left the player"
-            TvRenderer.State.IDLE -> if (AppState.source == "capture") "TV: waiting" else "TV: idle"
+            TvRenderer.State.IDLE -> if (r.stuck) "TV: player stuck" else if (AppState.source == "capture") "TV: waiting" else "TV: idle"
         }
     }
 

@@ -79,6 +79,7 @@ class PlaybackService : Service() {
             override fun onReceive(context: Context, intent: Intent) {
                 val on = intent.action == Intent.ACTION_SCREEN_ON
                 journal.add("box", org.json.JSONObject().put("screen", if (on) "on" else "off").put("source", AppState.source))
+                if (on) tv.forgetPower()
             }
         }
         val filter = IntentFilter().apply {

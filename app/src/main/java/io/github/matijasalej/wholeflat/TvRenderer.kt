@@ -228,6 +228,10 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     @Volatile
     private var cancelRequested = false
 
+    /** The TV took the item of the start under way (SetAVTransportURI was answered OK): a start that does not go on gives it back. */
+    @Volatile
+    private var startTookItem = false
+
     @Volatile
     private var lastTransport = ""
 
@@ -280,19 +284,26 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         AppLog.add(TAG, "the TV renderer started")
     }
 
-    /** The app stops: the TV is given back (Stop), as far as it answers within a moment. */
+    /**
+     * The app stops: the TV is given back (Stop, then our stream ends), as far as it answers within a moment. The Stop goes out on the
+     * renderer's own thread: this is called on the main thread, where a request to the network is refused, so the TV never had it.
+     */
     fun stop() {
         StreamRouter.remove(this)
-        try {
-            val s = session
-            val api = soap
-            if (s != null && api != null && (state == State.PLAYING || state == State.STARTING)) {
-                cancelRequested = true
-                endSession(s, "the app stopped")
-                api.stop()
+        val s = session
+        val api = soap
+        if (s != null && api != null && (state == State.PLAYING || state == State.STARTING)) {
+            cancelRequested = true
+            try {
+                exec.submit(Runnable {
+                    val r = api.stop()
+                    endSession(s, "the app stopped")
+                    AppLog.add(TAG, "the app stops: the TV is given back (Stop ${r.describe()})")
+                }).get(STOP_ON_EXIT_MS, TimeUnit.MILLISECONDS)
+            } catch (t: Throwable) {
+                AppLog.error(TAG, "giving the TV back failed", t)
             }
-        } catch (t: Throwable) {
-            AppLog.error(TAG, "giving the TV back failed", t)
+            endSession(s, "the app stopped")
         }
         exec.shutdownNow()
     }
@@ -398,6 +409,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
      */
     private fun doGrabSteps(reason: String, keepRunning: Boolean = false) {
         if (state == State.STARTING || state == State.PLAYING) return
+        startTookItem = false
         val now = nowMs()
         if (now < notBeforeMs) return
         if (!backoff.allowed(now)) {
@@ -512,8 +524,15 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         // still busy stopping and says 705 (the transport is locked) to the item until it has settled: its transport is waited for, and a 701
         // or 705 is tried again for a few seconds instead of failing the grab (which makes the next start wait 10 s).
         if (!keepRunning) {
-            api.stop()
-            settleAfterStop(api)
+            // a transport that holds nothing (a TV that has not played since it came on, or one that a release or a restart has just stopped)
+            // is not stopped again: a Stop right behind another is what the TV answers with 705 for seconds
+            val before = transportNow(api)
+            if (before == "STOPPED" || before == "NO_MEDIA_PRESENT") {
+                AppLog.add(TAG, "the TV's transport is $before: no Stop before the item")
+            } else {
+                api.stop()
+                settleAfterStop(api)
+            }
         } else {
             AppLog.add(TAG, "the new stream goes to the transport that is running (no Stop)")
         }
@@ -542,6 +561,8 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             fail("SetAVTransportURI: ${set.describe()}")
             return
         }
+        // from here on the TV holds our item: a start that does not go on gives it back (see giveBackStart)
+        startTookItem = true
         if (pipe != null) {
             // A connection starts at the newest key picture that is at least tv_burst_ms old, or at the oldest one held when the stream is
             // younger than that, and the TV's latency is the age of that picture plus 0.49 s (measured at backlogs of 1.6 and 2.2 s): so Play
@@ -575,7 +596,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             return
         }
         val getAfter = nowMs() - playSent
-        if (!waitFor(PLAYING_WAIT_MS, stepMs = 300) { transportNow(api) == "PLAYING" }) {
+        if (!waitFor(PLAYING_WAIT_MS, stepMs = TV_STEP_MS) { transportNow(api) == "PLAYING" }) {
             if (cancelRequested) return cancelled()
             fail("the TV asked for the stream ${getAfter} ms after Play but did not play (transport $lastTransport)")
             return
@@ -622,15 +643,33 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     }
 
     private fun cancelled() {
-        // a release came while the start was under way
+        // a release came while the start was under way: what the TV took is given back (the release finds nothing running)
+        if (startTookItem) giveBackStart("released during the start")
         session?.let { endSession(it, "released during the start") }
         session = null
         setState(State.IDLE)
     }
 
+    /**
+     * A start whose item the TV took and that does not go on (it failed, or a release came meanwhile) is given back as a release is: Stop,
+     * the transport waited for, then our stream ends, and the TV is helped back to HDMI. Without it a failed start left the TV in its player
+     * with a stream that had ended, or on its tuner.
+     */
+    private fun giveBackStart(why: String) {
+        startTookItem = false
+        val api = soap ?: return
+        val r = api.stop()
+        val after = settleAfterStop(api, cancellable = false)
+        note("the start is given back ($why): Stop ${r.describe()}, the transport ${after.ifEmpty { "not answering" }}")
+        session?.let { endSession(it, why) }
+        session = null
+        returnToHdmi()
+    }
+
     private fun fail(why: String) {
         lastError = why
         if (!cancelRequested) lastFailureMs = nowMs()
+        if (startTookItem) giveBackStart("failed: $why")
         session?.let { endSession(it, "failed: $why") }
         session = null
         val wait = backoff.onFailure(nowMs())
@@ -645,18 +684,26 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         }
     }
 
-    /** After Stop: waits until the TV's transport says it is stopped (or does not answer), for up to [STOP_SETTLE_MS]. */
-    private fun settleAfterStop(api: SonosSoap) {
+    /**
+     * After Stop: waits until the TV's transport says it is stopped (or does not answer), for up to [STOP_SETTLE_MS]. [cancellable] false: a
+     * release waits for it even though the release itself is what cancels a start.
+     */
+    private fun settleAfterStop(api: SonosSoap, cancellable: Boolean = true): String {
         val from = nowMs()
-        waitFor(STOP_SETTLE_MS, stepMs = 150) { transportNow(api).let { it == "STOPPED" || it == "NO_MEDIA_PRESENT" || it.isEmpty() } }
+        var last = ""
+        waitFor(STOP_SETTLE_MS, stepMs = TV_STEP_MS, cancellable = cancellable) {
+            last = transportNow(api)
+            last == "STOPPED" || last == "NO_MEDIA_PRESENT" || last.isEmpty()
+        }
         val took = nowMs() - from
-        if (took > 400) AppLog.add(TAG, "the TV took $took ms to settle after Stop (transport $lastTransport)")
+        if (took > 400) AppLog.add(TAG, "the TV took $took ms to settle after Stop (transport ${last.ifEmpty { "not answering" }})")
+        return last
     }
 
-    private fun waitFor(timeoutMs: Long, stepMs: Long = 100, condition: () -> Boolean): Boolean {
+    private fun waitFor(timeoutMs: Long, stepMs: Long = 100, cancellable: Boolean = true, condition: () -> Boolean): Boolean {
         val end = nowMs() + timeoutMs
         while (nowMs() < end) {
-            if (cancelRequested || exec.isShutdown) return false
+            if ((cancellable && cancelRequested) || exec.isShutdown) return false
             if (condition()) return true
             sleepQuietly(stepMs)
         }
@@ -921,11 +968,13 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     private fun restart(why: String) {
         AppLog.add(TAG, "the TV stream is made again: $why")
         restartingUntilMs = nowMs() + RESTART_WINDOW_MS
-        // the grab sends its own Stop and waits for the TV to settle: a Stop right behind another is what the TV answers with 705
-        doRelease(why, waitHdmi = false, sendStop = false)
+        // Stop first and then our stream ends, as at a release; the grab then finds the transport stopped and sends no Stop of its own (a Stop
+        // right behind another is what the TV answers with 705). tv_reanchor_running: the new item goes to the transport that is running (no
+        // Stop); off by default, the TV once answered that with a time-out and went to standby
+        val running = Settings.values.tvReanchorRunning
+        doRelease(why, waitHdmi = false, sendStop = !running)
         cancelRequested = false
-        // tv_reanchor_running: the new item goes to the transport that is running (no Stop); off by default, the TV once answered that with a time-out and went to standby
-        doGrab(why, keepRunning = Settings.values.tvReanchorRunning)
+        doGrab(why, keepRunning = running)
     }
 
     /**
@@ -959,14 +1008,21 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     private fun doRelease(reason: String, waitHdmi: Boolean = true, sendStop: Boolean = true) {
         val s = session
         val api = soap
-        if (s != null) endSession(s, reason)
-        session = null
         val wasOn = state == State.PLAYING || state == State.STARTING
         if (api != null && wasOn) {
-            val r = if (sendStop) api.stop() else null
-            note("release: $reason; Stop ${r?.describe() ?: "is left to the next start"}")
-            if (waitHdmi) returnToHdmi()
+            // Stop first, and our stream ends only when the TV has stopped (or 1.5 s later): a stream that ended under a TV that still played
+            // was answered with a pause, a standby about 10 s later, or a player that hung
+            if (sendStop) {
+                val r = api.stop()
+                val after = settleAfterStop(api, cancellable = false)
+                note("release: $reason; Stop ${r.describe()}, the transport ${after.ifEmpty { "not answering" }}")
+            } else {
+                note("release: $reason; no Stop (the new item goes to the transport that is running)")
+            }
         }
+        if (s != null) endSession(s, reason)
+        session = null
+        if (api != null && wasOn && waitHdmi) returnToHdmi()
         live = false
         streamStartedNanos = 0L
         setState(State.IDLE)
@@ -991,7 +1047,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             while (nowMs() < end) {
                 if (exec.isShutdown) return false
                 if (onHdmi()) return true
-                sleepQuietly(250)
+                sleepQuietly(TV_STEP_MS)
             }
             return onHdmi()
         }
@@ -1188,6 +1244,12 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
 
         /** After Stop the TV is given this long (ms) to say that its transport is stopped. */
         private const val STOP_SETTLE_MS = 1_500L
+
+        /** The least time between two requests to the TV while it is waited on (ms): its HTTP stalls at 10 a second, 2 or 3 is the most it is asked. */
+        private const val TV_STEP_MS = 500L
+
+        /** How long the app waits at its end for the TV to be given back (ms). */
+        private const val STOP_ON_EXIT_MS = 2_500L
 
         /** A restart of the stream on purpose is expected to be through within this long (ms). */
         private const val RESTART_WINDOW_MS = 40_000L

@@ -361,6 +361,18 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     /** Failed starts in a row. */
     fun failedGrabs(): Int = backoff.failures
 
+    /** The failed starts are forgotten (the user asked for Synced again): the next start is a first one. */
+    fun resetFailures(why: String) = post("reset failures") { forgetFailures(why) }
+
+    private fun forgetFailures(why: String) {
+        if (backoff.failures == 0 && lastFailureMs == 0L && state != State.FAILED) return
+        AppLog.add(TAG, "the ${backoff.failures} failed starts are forgotten ($why)")
+        backoff.onHealthy()
+        lastFailureMs = 0L
+        notBeforeMs = 0L
+        if (state == State.FAILED) setState(State.IDLE)
+    }
+
     /** The settings that the timing is built from changed: the common delay is worked out again. */
     fun settingsChanged() = post("settings") { if (state == State.PLAYING || state == State.STARTING) refreshTiming(force = true) }
 

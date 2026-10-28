@@ -139,6 +139,9 @@ class SyncedController(
         if (changed.any { it in WATCHED }) {
             if (changed.contains("tv_latency_ms") || changed.contains("tv_format") || changed.any { it.startsWith("kitchen_") }) renderer.settingsChanged()
             if (changed.any { it.startsWith("ambilight_") } || changed.contains("display")) post { ambilight.restyle() }
+            // Synced asked for again (the user's display on the phone page; the manager no longer resets a TV that it gave up): the
+            // starts that failed before are not held against it
+            if (changed.contains("mode") && Settings.values.mode == Mode.SYNCED.key) renderer.resetFailures("the mode was set to synced")
             if (changed.contains("tv_audio_only") || changed.contains("display")) {
                 // a stream with or without video is another stream: it is made again now (the switch is the user's own, there is no waiting for a song)
                 post {

@@ -258,6 +258,47 @@ class ModeManagerTest {
     }
 
     @Test
+    fun aGivenUpTvKeepsLyricsThroughALongSilenceInsteadOfTurningTheModeBackAndForth() {
+        val m = settled()
+        assertEquals(Mode.LYRICS, m.decide(inputs(60_000L, tv = Tv.FAILED, failed = 3, backoff = 30_000L)).modes().single().mode)
+        // as the glue does it: every mode set is a settings change and the next step at once (on the box: 868 changes in 2.4 s)
+        var mode = Mode.LYRICS
+        var changes = 0
+        for (t in 1..50) {
+            val a = m.decide(inputs(20 * minute + t * 2L, mode = mode, silent = 11 * minute, tv = Tv.FAILED, failed = 3))
+            a.modes().lastOrNull()?.let {
+                mode = it.mode
+                changes++
+            }
+        }
+        assertEquals(0, changes)
+        assertEquals(Mode.LYRICS, mode)
+    }
+
+    @Test
+    fun theSyncedThatTheUserAsksForIsNotTurnedBackByTheFailuresFromBeforeItAndTheTvIsTriedAgain() {
+        val m = settled()
+        m.decide(inputs(60_000L, tv = Tv.FAILED, failed = 3, backoff = 30_000L))
+        m.decide(inputs(5 * minute, mode = Mode.LYRICS, silent = 2 * minute, tv = Tv.FAILED, failed = 3))
+        // a display on the phone page: Synced, and the renderer has not forgotten the three failures yet
+        assertTrue(m.decide(inputs(5 * minute + 1_000L, mode = Mode.SYNCED, silent = 2 * minute, tv = Tv.FAILED, failed = 3, backoff = 20_000L)).modes().isEmpty())
+        // forgotten a moment later: the TV is taken, with nothing playing (the user has just asked)
+        val a = m.decide(inputs(5 * minute + 1_200L, mode = Mode.SYNCED, silent = 2 * minute, tv = Tv.IDLE, failed = 0))
+        assertEquals(1, a.grabs())
+        assertTrue(a.modes().isEmpty())
+    }
+
+    @Test
+    fun failuresThatAreNotForgottenStillMakeTheModeLyricsOnceTheMomentOfAskingIsOver() {
+        val m = settled()
+        m.decide(inputs(60_000L, tv = Tv.FAILED, failed = 3, backoff = 30_000L))
+        m.decide(inputs(5 * minute, mode = Mode.LYRICS, silent = 2 * minute, tv = Tv.FAILED, failed = 3))
+        assertTrue(m.decide(inputs(5 * minute + 1_000L, mode = Mode.SYNCED, silent = 2 * minute, tv = Tv.FAILED, failed = 3, backoff = 20_000L)).modes().isEmpty())
+        val a = m.decide(inputs(5 * minute + 12_000L, mode = Mode.SYNCED, silent = 2 * minute, tv = Tv.FAILED, failed = 3, backoff = 8_000L))
+        assertEquals(Mode.LYRICS, a.modes().single().mode)
+    }
+
+    @Test
     fun whatIsInFrontIsAskedOnlyWhenItMatters() {
         val m = settled()
         assertFalse(m.wantsForeground(Tv.PLAYING, 0))

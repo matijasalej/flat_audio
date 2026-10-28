@@ -49,8 +49,11 @@ object ForegroundPolicy {
  *   Cast receiver in front a Cast session took the screen: the TV is grabbed again once the session has settled, and if it leaves
  *   again within a minute of that the mode becomes Lyrics (no fighting over the TV). With a video app in front the TV is released
  *   and not grabbed while the app is there. A TV that does not answer is given up until it does.
- * - **Lyrics** goes back to Synced after more than 10 minutes of silence.
- * - Three starts of the TV in a row that fail make the mode Lyrics, with the reason.
+ * - **Lyrics** goes back to Synced after more than 10 minutes of silence, unless the TV was given up (below).
+ * - Three starts of the TV in a row that fail make the mode Lyrics, with the reason. It stays Lyrics until the user asks for Synced (a
+ *   display on the phone page, which also has the failed starts forgotten) or the app starts again: the reset after a long silence and
+ *   this rule undid each other on every step, hundreds of times a second. A Synced that the user has just asked for is not turned back
+ *   by the failures from before it.
  */
 class ModeManager(
     private val silenceKeepMs: Long = SILENCE_KEEP_MS,
@@ -187,10 +190,10 @@ class ModeManager(
         // 4. grab: with sound (or when the user has just asked for Synced), or the re-grab after a Cast session
         val releasing = actions.any { it is Action.Release }
         val idleTv = i.tv == Tv.IDLE || i.tv == Tv.FAILED || i.tv == Tv.LEFT
+        val justAsked = i.nowMs - modeSinceMs < JUST_ASKED_MS && seenMode == Mode.SYNCED
         if (wantTv && idleTv && !releasing && i.backoffRemainingMs <= 0L) {
             val rePending = regrabAtMs != 0L
             val soundNow = i.silentForMs < GRAB_WITHIN_SOUND_MS
-            val justAsked = i.nowMs - modeSinceMs < JUST_ASKED_MS && seenMode == Mode.SYNCED
             if (rePending && i.nowMs >= regrabAtMs) {
                 regrabAtMs = 0L
                 lastRegrabMs = i.nowMs
@@ -203,14 +206,15 @@ class ModeManager(
         }
         if (!wantTv) regrabAtMs = 0L
 
-        // 5. starts that keep failing
-        if (mode == Mode.SYNCED && i.failedGrabs >= giveUpAfter) {
+        // 5. starts that keep failing (not those from before the user asked for Synced: they are being forgotten)
+        if (mode == Mode.SYNCED && i.failedGrabs >= giveUpAfter && !justAsked) {
             mode = Mode.LYRICS
             actions.add(Action.SetMode(Mode.LYRICS, "the TV could not be taken ${i.failedGrabs} times in a row"))
         }
 
-        // 6. Lyrics goes back to Synced after a long silence
-        if (mode == Mode.LYRICS && i.mode == Mode.LYRICS && i.idleForMs >= resetAfterMs && actions.none { it is Action.SetMode }) {
+        // 6. Lyrics goes back to Synced after a long silence, but not while the TV is given up (rule 5 would turn it back at once)
+        val givenUp = i.failedGrabs >= giveUpAfter
+        if (mode == Mode.LYRICS && i.mode == Mode.LYRICS && i.idleForMs >= resetAfterMs && !givenUp && actions.none { it is Action.SetMode }) {
             actions.add(Action.SetMode(Mode.SYNCED, "more than ${resetAfterMs / 60_000} minutes of silence"))
         }
         actions.filterIsInstance<Action.SetMode>().lastOrNull()?.let { ownSetMode = it.mode }

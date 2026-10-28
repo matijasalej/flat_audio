@@ -118,7 +118,8 @@ class ModeManagerTest {
 
     @Test
     fun theTvKeepsPlayingThroughPausesAndSkipsAndGoesBackAfterEightMinutesOfSilence() {
-        val m = settled()
+        val m = ModeManager(silenceKeepMs = { 8 * minute })
+        m.decide(inputs(0L, silent = never))
         // the capture says idle after a minute of silence, but the TV stays
         assertTrue(m.decide(inputs(5 * minute, source = "idle", silent = 4 * minute, tv = Tv.PLAYING)).isEmpty())
         assertTrue(m.decide(inputs(8 * minute, source = "idle", silent = 7 * minute, tv = Tv.PLAYING)).isEmpty())
@@ -391,11 +392,20 @@ class ModeManagerTest {
 
     @Test
     fun aPlayingTvIsGivenBackAfterEightMinutesOfSilenceBeforeTheBoxSleeps() {
-        val m = settled()
+        val m = ModeManager(silenceKeepMs = { 8 * 60_000L })
+        m.decide(inputs(0L, silent = never))
         assertTrue(m.decide(inputs(60_000L, tv = Tv.PLAYING, silent = 8 * 60_000L - 1)).releases().isEmpty())
         val r = m.decide(inputs(62_000L, tv = Tv.PLAYING, silent = 8 * 60_000L)).releases()
         assertEquals(1, r.size)
         assertEquals("8 minutes of silence", r[0].why)
+    }
+
+    @Test
+    fun withTheDefaultHoldTheTvIsNeverGivenBackForASilence() {
+        val m = settled()
+        for (minutes in listOf(1L, 8L, 30L, 300L)) {
+            assertTrue("$minutes min", m.decide(inputs(minutes * 60_000L, tv = Tv.PLAYING, silent = minutes * 60_000L)).releases().isEmpty())
+        }
     }
 
     @Test

@@ -42,7 +42,9 @@ class SettingsModelTest {
         assertEquals("FOLLOW_AUDIO", o.getString("ambilight_style"))
         assertEquals("ENERGY_ADAPTIVE_BRIGHTNESS", o.getString("ambilight_menu"))
         assertEquals(100, o.getInt("tv_pause_ms"))
-        assertEquals(8, o.getInt("tv_hold_silence_min"))
+        assertEquals(0, o.getInt("tv_hold_silence_min"))
+        assertEquals(180, o.getInt("tv_boot_wait_s"))
+        assertEquals(300, o.getInt("tv_close_wait_s"))
         assertEquals(5000, o.getInt("tv_ready_ms"))
         assertEquals(true, o.getBoolean("tv_clear_item"))
         assertEquals(false, o.getBoolean("tv_quiet"))
@@ -97,10 +99,13 @@ class SettingsModelTest {
         assertEquals(2000, m.tvPauseMs)
         assertEquals(setOf("tv_pause_ms"), m.applyJson(JSONObject("""{"tv_pause_ms": 0}""")))
         assertEquals(0, m.values().tvPauseMs)
-        assertEquals(setOf("tv_hold_silence_min"), m.applyJson(JSONObject("""{"tv_hold_silence_min": 0}""")))
-        assertEquals(1, m.values().tvHoldSilenceMin)
         assertEquals(setOf("tv_hold_silence_min"), m.applyJson(JSONObject("""{"tv_hold_silence_min": 600}""")))
         assertEquals(30, m.values().tvHoldSilenceMin)
+        assertEquals(setOf("tv_hold_silence_min"), m.applyJson(JSONObject("""{"tv_hold_silence_min": -5}""")))
+        assertEquals(0, m.values().tvHoldSilenceMin)
+        assertEquals(setOf("tv_boot_wait_s", "tv_close_wait_s"), m.applyJson(JSONObject("""{"tv_boot_wait_s": 99999, "tv_close_wait_s": -1}""")))
+        assertEquals(1800, m.values().tvBootWaitS)
+        assertEquals(0, m.values().tvCloseWaitS)
         assertEquals(setOf("tv_ready_ms"), m.applyJson(JSONObject("""{"tv_ready_ms": 99999}""")))
         assertEquals(30000, m.values().tvReadyMs)
         assertEquals(setOf("tv_ready_ms"), m.applyJson(JSONObject("""{"tv_ready_ms": -5}""")))
@@ -131,7 +136,7 @@ class SettingsModelTest {
                 "mode", "tv_latency_ms", "tv_format", "tv_burst_ms", "tv_extra_ms", "tv_preroll_ms", "tv_pcr_lead_ms", "tv_reanchor_min", "tv_render", "tv_video", "lyrics_offset_ms", "display", "background_cleanup",
                 "ambilight_style", "ambilight_menu", "tv_pause_ms", "tv_quiet", "tv_audio_only", "tv_mac", "tv_position_probe",
                 "ambilight_dark_style", "ambilight_dark_algorithm", "ambilight_dark_menu", "tv_auto_reanchor", "tv_reanchor_running", "tv_scroll",
-                "tv_hold_silence_min", "tv_ready_ms", "tv_clear_item",
+                "tv_hold_silence_min", "tv_ready_ms", "tv_clear_item", "tv_boot_wait_s", "tv_close_wait_s",
             ),
             keys,
         )

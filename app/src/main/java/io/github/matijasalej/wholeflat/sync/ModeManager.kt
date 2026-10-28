@@ -43,9 +43,9 @@ object ForegroundPolicy {
  *
  * - **Synced** (the setting `mode`, the default): while the capture lives and Spotify's own playback (Whole Flat) does not play, the TV's
  *   DLNA player gets the capture, from the first sound on. It keeps playing through pauses and skips (the capture streams silence
- *   between tracks, so none of them pays the 2 s of a start) for `tv_hold_silence_min` minutes of silence (8), then the TV is given
- *   back: before the box sleeps (its 10-minute timeout runs from about a minute after the music), because the CEC Standby of its sleep
- *   switches the TV off, and a TV switched off with our stream in its player is the likeliest way that player hangs.
+ *   between tracks, so none of them pays the 2 s of a start) and is not given back for a silence (`tv_hold_silence_min` 0): the box's
+ *   sleep switches the TV off about 11 minutes after the music. A start after the TV's player was closed hung it on 28.10., so the player
+ *   stays open for the whole TV session; a hold above 0 gives the TV back after that many minutes of silence.
  * - The TV **leaves its player** (its transport stops, it closes the stream): with the launcher, Spotify or this app in front, the user
  *   meant it (Home, the input key): the mode becomes **Lyrics** (the Spotify app stays on the screen, the kitchen follows). With the
  *   Cast receiver in front a Cast session took the screen: the TV is grabbed again once the session has settled, and if it leaves
@@ -208,7 +208,7 @@ class ModeManager(
         // than the hold had rule 4 take the TV and this rule give it back about 100 times in 10 s, and the TV's player hung.
         val keepMs = silenceKeepMs()
         val quietMs = minOf(i.silentForMs, i.nowMs - userAskedAtMs)
-        if (i.tv == Tv.PLAYING && wantTv && quietMs >= keepMs && actions.none { it is Action.Release }) {
+        if (keepMs > 0L && i.tv == Tv.PLAYING && wantTv && quietMs >= keepMs && actions.none { it is Action.Release }) {
             actions.add(Action.Release("${keepMs / 60_000} minutes of silence"))
         }
 
@@ -261,7 +261,7 @@ class ModeManager(
     }
 
     companion object {
-        /** The TV keeps playing silence for this long after the last sound, then it is given back (the default of `tv_hold_silence_min`). */
+        /** The TV keeps playing silence for this long after the last sound, then it is given back (the default of `tv_hold_silence_min`; 0: never). */
         const val SILENCE_KEEP_MS = SettingsModel.DEFAULT_TV_HOLD_SILENCE_MIN * 60_000L
 
         /** Lyrics mode goes back to Synced after this much silence. */

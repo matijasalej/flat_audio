@@ -17,6 +17,7 @@ import io.github.matijasalej.wholeflat.sync.StartBackoff
 import io.github.matijasalej.wholeflat.sync.StreamBuilder
 import io.github.matijasalej.wholeflat.sync.StreamFormat
 import io.github.matijasalej.wholeflat.sync.StuckTv
+import io.github.matijasalej.wholeflat.sync.SwitchGates
 import io.github.matijasalej.wholeflat.sync.SwitchPreflight
 import io.github.matijasalej.wholeflat.sync.SyncedTiming
 import io.github.matijasalej.wholeflat.sync.TvVideoSpec
@@ -250,6 +251,25 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         playerPrefs.edit().putBoolean(PREF_HUNG, hung).apply()
     }
 
+    /** When the TV's player was last closed (wall clock, ms; 0: not since the app knows), kept across restarts: a fresh start waits after it. */
+    @Volatile
+    private var lastCloseWallMs = playerPrefs.getLong(PREF_CLOSED_AT, 0L)
+
+    /** The player was closed now (our hand-back or give-back, the TV leaving it, the app stopping); a restart is not a close. */
+    private fun markClosed(how: String) {
+        lastCloseWallMs = System.currentTimeMillis()
+        playerPrefs.edit().putLong(PREF_CLOSED_AT, lastCloseWallMs).apply()
+        AppLog.add(TAG, "the TV's player is closed ($how): a fresh start waits ${Settings.values.tvCloseWaitS} s from now")
+    }
+
+    /** Why the next start is held back by a wait (see SwitchGates), null if it is not. */
+    @Volatile
+    var waitWhy: String? = null
+        private set
+
+    /** How long the switch still waits (ms), 0 if it does not. */
+    fun switchWaitMs(): Long = if (waitWhy == null) 0L else maxOf(notBeforeMs - nowMs(), 0L)
+
     /** The journal's record of the start under way (written when the start is over, see [doGrab]), and the outcome of the last one written. */
     private var rec: JSONObject? = null
     private var lastRecOutcome = ""
@@ -328,6 +348,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
                 exec.submit(Runnable {
                     val r = api.stop()
                     endSession(s, "the app stopped", stopFirst = true)
+                    markClosed("the app stopped")
                     AppLog.add(TAG, "the app stops: the TV is given back (Stop ${r.describe()})")
                 }).get(STOP_ON_EXIT_MS, TimeUnit.MILLISECONDS)
             } catch (t: Throwable) {
@@ -426,9 +447,9 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     // ---- the grab --------------------------------------------------------------------------------
 
     /** A grab that fails for a reason nobody foresaw is a failed grab (the encoders of its stream do not run on). */
-    private fun doGrab(reason: String, keepRunning: Boolean = false) {
+    private fun doGrab(reason: String, keepRunning: Boolean = false, isRestart: Boolean = false) {
         try {
-            doGrabSteps(reason, keepRunning)
+            doGrabSteps(reason, keepRunning, isRestart)
         } catch (t: Throwable) {
             AppLog.error(TAG, "the grab failed unexpectedly", t)
             if (session == null) {
@@ -447,7 +468,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         rec = null
         val outcome = r.optString("outcome", "").ifEmpty { "ended without an outcome" }
         r.put("outcome", outcome)
-        if (outcome == lastRecOutcome && (outcome == OUTCOME_NOT_ON || outcome == OUTCOME_NOT_READY)) return
+        if (outcome == lastRecOutcome && (outcome == OUTCOME_NOT_ON || outcome == OUTCOME_NOT_READY || outcome == OUTCOME_WAITING)) return
         lastRecOutcome = outcome
         journal?.add("grab", r)
     }
@@ -456,7 +477,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
      * [keepRunning]: the stream is made again for a TV that plays one of ours (a re-anchor): the new item goes to the transport that is
      * running, with no Stop first, which the TV answers with 705 for seconds afterwards and which leaves it with no stream.
      */
-    private fun doGrabSteps(reason: String, keepRunning: Boolean = false) {
+    private fun doGrabSteps(reason: String, keepRunning: Boolean = false, isRestart: Boolean = false) {
         if (state == State.STARTING || state == State.PLAYING) return
         startTookItem = false
         if (stuckTv.stuck) {
@@ -496,11 +517,30 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             notBeforeMs = nowMs() + NOT_ON_WAIT_MS
             lastError = "the TV is not on"
             AppLog.add(TAG, "the TV is not on, trying again in ${NOT_ON_WAIT_MS / 1000} s at the earliest")
+            waitWhy = null
             rec("outcome", OUTCOME_NOT_ON)
             setState(State.IDLE)
             return
         }
         if (cancelRequested) return cancelled()
+        // a fresh start waits until the TV has been on and its player closed long enough (SwitchGates); a restart (the player still open) does not
+        if (!isRestart) {
+            val v = Settings.values
+            val w = SwitchGates.wait(nowMs(), tv.onSinceMs, v.tvBootWaitS * 1000L, System.currentTimeMillis(), lastCloseWallMs, v.tvCloseWaitS * 1000L)
+            rec("boot_left_s", w.bootLeftMs / 1000)
+            rec("close_left_s", w.closeLeftMs / 1000)
+            if (w.ms > 0L) {
+                // no failed start, no call to the TV's player: the start is held back until the wait is over (the mode manager sees it in backoffRemainingMs)
+                notBeforeMs = nowMs() + w.ms
+                waitWhy = w.why
+                lastError = "the switch waits ${w.ms / 1000} s: ${w.why}"
+                if (lastRecOutcome != OUTCOME_WAITING) AppLog.add(TAG, "the switch to the TV's player waits ${w.ms / 1000} s: ${w.why}")
+                rec("outcome", OUTCOME_WAITING)
+                setState(State.IDLE)
+                return
+            }
+        }
+        waitWhy = null
         val notReady = awaitReady(ip)
         if (cancelRequested) return cancelled()
         if (notReady != null) {
@@ -766,6 +806,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         note("the start is given back ($why): Stop ${r.describe()}, the transport ${after.ifEmpty { "not answering" }}")
         val cleared = clearItem(api)
         session?.let { endSession(it, why, stopFirst = true, cleared = cleared) }
+        markClosed("a start given back: $why")
         session = null
         returnToHdmi()
     }
@@ -1102,6 +1143,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         leftWhy = why
         leftCount++
         AppLog.add(TAG, "the TV left its player (${kind.label}): $why")
+        markClosed("the TV left it: ${kind.label}")
         s?.let { endSession(it, "the TV left: $why") }
         session = null
         setState(State.LEFT)
@@ -1133,9 +1175,9 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         // right behind another is what the TV answers with 705). tv_reanchor_running: the new item goes to the transport that is running (no
         // Stop); off by default, the TV once answered that with a time-out and went to standby
         val running = Settings.values.tvReanchorRunning
-        doRelease(why, waitHdmi = false, sendStop = !running)
+        doRelease(why, waitHdmi = false, sendStop = !running, closes = false)
         cancelRequested = false
-        doGrab(why, keepRunning = running)
+        doGrab(why, keepRunning = running, isRestart = true)
     }
 
     /**
@@ -1166,7 +1208,8 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     /** How long the stream in force has run (s), -1 if there is none. */
     fun streamAgeSeconds(): Long = if (streamStartedNanos == 0L || session == null) -1L else (System.nanoTime() - streamStartedNanos) / 1_000_000_000L
 
-    private fun doRelease(reason: String, waitHdmi: Boolean = true, sendStop: Boolean = true) {
+    /** [closes]: the player is closed for good (not a restart, which opens it again at once): a fresh start then waits (tv_close_wait_s). */
+    private fun doRelease(reason: String, waitHdmi: Boolean = true, sendStop: Boolean = true, closes: Boolean = true) {
         val s = session
         val api = soap
         val wasOn = state == State.PLAYING || state == State.STARTING
@@ -1185,6 +1228,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         }
         if (s != null) endSession(s, reason, stopFirst = api != null && wasOn && sendStop, cleared = cleared)
         session = null
+        if (wasOn && closes) markClosed("released: $reason")
         if (api != null && wasOn && waitHdmi) returnToHdmi()
         live = false
         streamStartedNanos = 0L
@@ -1399,6 +1443,11 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         pl.put("advice", if (stuckTv.stuck) StuckTv.ADVICE else JSONObject.NULL)
         pl.put("tv_on_for_s", if (tv.onSinceMs > 0L) (nowMs() - tv.onSinceMs) / 1000 else JSONObject.NULL)
         pl.put("ready_ms", Settings.values.tvReadyMs)
+        pl.put("boot_wait_s", Settings.values.tvBootWaitS)
+        pl.put("close_wait_s", Settings.values.tvCloseWaitS)
+        pl.put("closed_s_ago", if (lastCloseWallMs > 0L) (System.currentTimeMillis() - lastCloseWallMs) / 1000 else JSONObject.NULL)
+        pl.put("switch_waits_s", switchWaitMs() / 1000)
+        pl.put("wait_why", waitWhy ?: JSONObject.NULL)
         o.put("player", pl)
         val pr = JSONObject()
         pr.put("enabled", Settings.values.tvPositionProbe)
@@ -1469,9 +1518,11 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         private const val PREFLIGHT_STEP_MS = 1_000L
 
         private const val PREF_HUNG = "hung"
+        private const val PREF_CLOSED_AT = "closed_at"
 
         private const val OUTCOME_NOT_ON = "the TV is not on"
         private const val OUTCOME_NOT_READY = "the TV's player is not ready"
+        private const val OUTCOME_WAITING = "the switch waits"
 
         /** A restart of the stream on purpose is expected to be through within this long (ms). */
         private const val RESTART_WINDOW_MS = 40_000L

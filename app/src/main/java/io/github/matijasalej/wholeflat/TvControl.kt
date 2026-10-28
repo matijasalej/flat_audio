@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Process
 import android.os.SystemClock
 import io.github.matijasalej.wholeflat.sync.AmbilightApi
+import io.github.matijasalej.wholeflat.sync.PowerClock
 import io.github.matijasalej.wholeflat.sync.VideoPolicy
 import org.json.JSONObject
 import java.net.DatagramPacket
@@ -601,13 +602,14 @@ class TvControl(private val context: Context) {
     @Volatile
     var onPower: ((String, String) -> Unit)? = null
 
+    /** Since when the TV has been on (see [PowerClock]: a failed reading does not move it, a minute without an answer does). */
+    private val clock = PowerClock()
+
     /**
-     * When the TV was first read On after it was not (or after the app began), elapsedRealtime in ms; 0 while it is not On. A TV that has
-     * just come on may still be starting its player (see the ready gate of TvRenderer).
+     * When the TV came on, elapsedRealtime in ms, as far as the readings tell; 0 before it was read On. A TV that has just come on may still be
+     * starting its player (see the waits of TvRenderer).
      */
-    @Volatile
-    var onSinceMs = 0L
-        private set
+    val onSinceMs: Long get() = clock.onSinceMs
 
     private var readPower = ""
 
@@ -618,16 +620,16 @@ class TvControl(private val context: Context) {
     @Synchronized
     fun forgetPower() {
         readPower = ""
-        onSinceMs = 0L
+        clock.forget()
     }
 
     @Synchronized
     private fun notePower(power: String?) {
+        clock.read(SystemClock.elapsedRealtime(), power)
         val now = power ?: "unreachable"
         val was = readPower
         if (now == was) return
         readPower = now
-        onSinceMs = if (now == "On") SystemClock.elapsedRealtime() else 0L
         if (was.isEmpty()) return
         try {
             onPower?.invoke(was, now)

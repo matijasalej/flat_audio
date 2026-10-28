@@ -40,7 +40,13 @@ object RemoteApi {
             TvRenderer.State.STARTING -> "TV: starting"
             TvRenderer.State.FAILED -> if (r.stuck) "TV: player stuck" else "TV: did not start"
             TvRenderer.State.LEFT -> "TV: left the player"
-            TvRenderer.State.IDLE -> if (r.stuck) "TV: player stuck" else if (AppState.source == "capture") "TV: waiting" else "TV: idle"
+            TvRenderer.State.IDLE -> when {
+                r.stuck -> "TV: player stuck"
+                // a fresh start waits until the TV has been on and its player closed long enough
+                r.switchWaitMs() > 0L -> "TV: switch in ${(r.switchWaitMs() + 999) / 1000} s"
+                AppState.source == "capture" -> "TV: waiting"
+                else -> "TV: idle"
+            }
         }
     }
 

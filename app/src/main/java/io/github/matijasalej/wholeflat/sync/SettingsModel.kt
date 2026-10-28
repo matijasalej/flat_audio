@@ -94,14 +94,18 @@ class SettingsValues(
     /** How the lyrics move on the screen: "smooth" (a scroll of 0.35 s) or "instant" (the lines stand in their new places at once, the colours fade in 150 ms: far fewer motion bits). */
     val tvScroll: String,
     /**
-     * Minutes of silence after which Synced gives the TV back (Stop, its HDMI input again). Shorter than the sleep of the box (its 10-minute
-     * timeout runs from about a minute after the music), whose CEC Standby would otherwise switch the TV off with our stream in its player.
+     * Minutes of silence after which Synced gives the TV back (Stop, its HDMI input again); 0 (the default): never, the player stays open for
+     * the whole TV session and the box's sleep switches the TV off. On 28.10. the starts after a hand-back hung the TV's player.
      */
     val tvHoldSilenceMin: Int,
     /** How long a TV that has just come on is given before its player gets anything (ms, counted from the first time it is read On). */
     val tvReadyMs: Int,
     /** After the Stop of a hand-back, our item is taken out of the TV's player, so that the next start finds it empty. */
     val tvClearItem: Boolean,
+    /** A fresh start of the TV's player waits until the TV has been on this long (s); 0: no wait (see SwitchGates). */
+    val tvBootWaitS: Int,
+    /** A fresh start waits until the TV's player has been closed this long (s); 0: no wait. A restart (the player still open) does not wait. */
+    val tvCloseWaitS: Int,
 )
 
 class SettingsModel {
@@ -150,6 +154,8 @@ class SettingsModel {
     var tvHoldSilenceMin = DEFAULT_TV_HOLD_SILENCE_MIN
     var tvReadyMs = DEFAULT_TV_READY_MS
     var tvClearItem = true
+    var tvBootWaitS = DEFAULT_TV_BOOT_WAIT_S
+    var tvCloseWaitS = DEFAULT_TV_CLOSE_WAIT_S
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
@@ -157,7 +163,7 @@ class SettingsModel {
         captureEnabled, captureLivingLatencyMs, captureLeadMs, kitchenTargetMs, kitchenFloorMs, kitchenVolume,
         captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPrerollMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
         backgroundCleanup, ambilightStyle, ambilightMenu, tvPauseMs, tvQuiet, tvAudioOnly, tvMac, tvPositionProbe,
-        ambilightDarkStyle, ambilightDarkAlgorithm, ambilightDarkMenu, tvAutoReanchor, tvReanchorRunning, tvScroll, tvHoldSilenceMin, tvReadyMs, tvClearItem,
+        ambilightDarkStyle, ambilightDarkAlgorithm, ambilightDarkMenu, tvAutoReanchor, tvReanchorRunning, tvScroll, tvHoldSilenceMin, tvReadyMs, tvClearItem, tvBootWaitS, tvCloseWaitS,
     )
 
     fun toJson(): JSONObject {
@@ -207,6 +213,8 @@ class SettingsModel {
         o.put(TV_HOLD_SILENCE_MIN, tvHoldSilenceMin)
         o.put(TV_READY_MS, tvReadyMs)
         o.put(TV_CLEAR_ITEM, tvClearItem)
+        o.put(TV_BOOT_WAIT_S, tvBootWaitS)
+        o.put(TV_CLOSE_WAIT_S, tvCloseWaitS)
         return o
     }
 
@@ -357,12 +365,20 @@ class SettingsModel {
             if (v != null && v != tvPauseMs) { tvPauseMs = v; changed.add(TV_PAUSE_MS) }
         }
         if (json.has(TV_HOLD_SILENCE_MIN)) {
-            val v = number(json.get(TV_HOLD_SILENCE_MIN))?.coerceIn(1, MAX_TV_HOLD_SILENCE_MIN)
+            val v = number(json.get(TV_HOLD_SILENCE_MIN))?.coerceIn(0, MAX_TV_HOLD_SILENCE_MIN)
             if (v != null && v != tvHoldSilenceMin) { tvHoldSilenceMin = v; changed.add(TV_HOLD_SILENCE_MIN) }
         }
         if (json.has(TV_READY_MS)) {
             val v = number(json.get(TV_READY_MS))?.coerceIn(0, MAX_TV_READY_MS)
             if (v != null && v != tvReadyMs) { tvReadyMs = v; changed.add(TV_READY_MS) }
+        }
+        if (json.has(TV_BOOT_WAIT_S)) {
+            val v = number(json.get(TV_BOOT_WAIT_S))?.coerceIn(0, MAX_TV_BOOT_WAIT_S)
+            if (v != null && v != tvBootWaitS) { tvBootWaitS = v; changed.add(TV_BOOT_WAIT_S) }
+        }
+        if (json.has(TV_CLOSE_WAIT_S)) {
+            val v = number(json.get(TV_CLOSE_WAIT_S))?.coerceIn(0, MAX_TV_CLOSE_WAIT_S)
+            if (v != null && v != tvCloseWaitS) { tvCloseWaitS = v; changed.add(TV_CLOSE_WAIT_S) }
         }
         if (json.has(TV_CLEAR_ITEM)) {
             val v = bool(json.get(TV_CLEAR_ITEM))
@@ -485,18 +501,28 @@ class SettingsModel {
         const val TV_HOLD_SILENCE_MIN = "tv_hold_silence_min"
         const val TV_READY_MS = "tv_ready_ms"
         const val TV_CLEAR_ITEM = "tv_clear_item"
+        const val TV_BOOT_WAIT_S = "tv_boot_wait_s"
+        const val TV_CLOSE_WAIT_S = "tv_close_wait_s"
 
         /** A write to the TV that blocks 100 ms after the burst is a pause of its player (seen: 134 and 150 ms with a freeze each time). */
         const val DEFAULT_TV_PAUSE_MS = 100
         const val MAX_TV_PAUSE_MS = 2_000
 
-        /** The TV is given back after 8 minutes of silence: before the box sleeps (about 11 minutes after the music) and its CEC Standby finds the TV in its player. */
-        const val DEFAULT_TV_HOLD_SILENCE_MIN = 8
+        /** 0: the TV is not given back for a silence; the box's sleep (about 11 minutes after the music) switches it off. */
+        const val DEFAULT_TV_HOLD_SILENCE_MIN = 0
         const val MAX_TV_HOLD_SILENCE_MIN = 30
 
         /** A TV that has just come on is given 5 s before its player gets anything (on 28.10. its player answered 1 s after JointSpace said On). */
         const val DEFAULT_TV_READY_MS = 5_000
         const val MAX_TV_READY_MS = 30_000
+
+        /** On 28.10. a start 35 s after the TV had its power back hung its player, one some minutes after played: 3 minutes until measured. */
+        const val DEFAULT_TV_BOOT_WAIT_S = 180
+        const val MAX_TV_BOOT_WAIT_S = 1_800
+
+        /** Starts 5 s and 70 s after the player was closed hung it: 5 minutes until measured. */
+        const val DEFAULT_TV_CLOSE_WAIT_S = 300
+        const val MAX_TV_CLOSE_WAIT_S = 3_600
 
         /** The wifi0 address of the Philips TV (JointSpace `/6/network/devices`, `wake-on-lan: Enabled`). */
         const val DEFAULT_TV_MAC = "C0:D2:F3:87:BF:F4"

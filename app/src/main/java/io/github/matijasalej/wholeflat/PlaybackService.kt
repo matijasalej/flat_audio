@@ -65,6 +65,9 @@ class PlaybackService : Service() {
     private var multicastLock: WifiManager.MulticastLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
+
+    /** Held while the music plays, so that the box does not go to sleep under it (see [holdAwake]). */
+    private var musicLock: PowerManager.WakeLock? = null
     private var mediaSession: MediaSession? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
@@ -144,6 +147,7 @@ class PlaybackService : Service() {
         kitchen.onSource = { source ->
             // the Sonos follows the box's music volume while the capture is the source
             captureSource.setVolumeActive(source == SourceArbiter.Source.CAPTURE)
+            holdAwake(source != SourceArbiter.Source.IDLE)
             updateNotification()
             if (::synced.isInitialized) synced.tickSoon()
         }
@@ -237,7 +241,8 @@ class PlaybackService : Service() {
             AppLog.error(TAG, "releasing the media session failed", e)
         }
         mediaSession = null
-        for (lock in listOf<Any?>(multicastLock, wifiLock, wakeLock)) {
+        AppState.boxAwakeSinceMs = 0L
+        for (lock in listOf<Any?>(multicastLock, wifiLock, wakeLock, musicLock)) {
             try {
                 when (lock) {
                     is WifiManager.MulticastLock -> if (lock.isHeld) lock.release()
@@ -446,9 +451,37 @@ class PlaybackService : Service() {
             wake.setReferenceCounted(false)
             wake.acquire()
             wakeLock = wake
+            // made now, held only while the music plays (holdAwake)
+            val music = power.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE, "wholeflat:music")
+            music.setReferenceCounted(false)
+            musicLock = music
             AppLog.add(TAG, "locks held: multicast=${multicastLock != null} wifi=${wifiLock != null} wake=${wakeLock != null}")
         } catch (e: Exception) {
             AppLog.error(TAG, "acquiring locks failed", e)
+        }
+    }
+
+    /**
+     * Keeps the box awake while the music plays ([playing]: the source is not idle; the capture becomes idle a minute after a pause).
+     * The box goes to sleep when its screen timeout runs out (10 min on this box, and with the screensaver off there is no screensaver
+     * first), a Cast session does not keep it awake, and its sleep sends CEC Standby to the TV: the TV and the music went off ten minutes
+     * after the cast began. The release starts the timeout again (ON_AFTER_RELEASE), so the box and the TV still go off that long after
+     * the music. A TV switched off with its own remote still takes the box with it: the box's sleep from CEC does not wait for the lock.
+     */
+    private fun holdAwake(playing: Boolean) {
+        val lock = musicLock ?: return
+        try {
+            if (playing && !lock.isHeld) {
+                lock.acquire()
+                AppState.boxAwakeSinceMs = SystemClock.elapsedRealtime()
+                AppLog.add(TAG, "the box is kept awake while the music plays")
+            } else if (!playing && lock.isHeld) {
+                lock.release()
+                AppState.boxAwakeSinceMs = 0L
+                AppLog.add(TAG, "the music stopped: the box may sleep again when its screen timeout runs out")
+            }
+        } catch (e: Exception) {
+            AppLog.error(TAG, "keeping the box awake failed", e)
         }
     }
 

@@ -62,6 +62,9 @@ object AppState {
      */
     @Volatile var source: String = "idle"
 
+    /** Since when the service keeps the box awake for the music (elapsedRealtime), 0 while it does not. */
+    @Volatile var boxAwakeSinceMs: Long = 0L
+
     /** The capture source's own state: stopped, idle (running, nothing plays), playing, paused; the track of its media session. */
     @Volatile var capturePlayback: String = "stopped"
     @Volatile var captureTitle: String? = null
@@ -202,6 +205,10 @@ object AppState {
         o.put("service", service)
         o.put("device_name", deviceName)
         o.put("source", source)
+        val awake = JSONObject()
+        awake.put("held", boxAwakeSinceMs != 0L)
+        awake.put("since_s", if (boxAwakeSinceMs != 0L) ageSeconds(boxAwakeSinceMs) else JSONObject.NULL)
+        o.put("box_awake", awake)
         o.put("app_version", BuildInfo.versionName)
         o.put("native", nativeVersion)
         o.put("session", session)

@@ -75,8 +75,8 @@ class SettingsValues(
     /** During Synced play no call is made to the TV (the 2 s transport poll, the Ambilight refresh) except at the grab and the release. */
     val tvQuiet: Boolean,
     /**
-     * While the screen is off the TV's stream has no video (a transport stream of the audio only). On by default since 28.10.: nobody sees
-     * the picture then, and the box's video encoder was the load behind the freezes.
+     * While the screen is off the TV's stream has no video (a transport stream of the audio only). Off: on 28.10. the TV played that stream
+     * 4.48 s later than the latency model says (its preroll seems to count the bytes of what it is given), so the kitchen was that far ahead.
      */
     val tvAudioOnly: Boolean,
     /** The TV's MAC address for Wake-on-LAN, as AA:BB:CC:DD:EE:FF; empty: none (the one JointSpace tells is used). */
@@ -136,7 +136,7 @@ class SettingsModel {
     var ambilightMenu = DEFAULT_AMBILIGHT_MENU
     var tvPauseMs = DEFAULT_TV_PAUSE_MS
     var tvQuiet = false
-    var tvAudioOnly = true
+    var tvAudioOnly = false
     var tvMac = DEFAULT_TV_MAC
     var tvPositionProbe = true
     var ambilightDarkStyle = DEFAULT_AMBILIGHT_DARK_STYLE

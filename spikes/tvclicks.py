@@ -2,10 +2,11 @@
 """tvclicks: the offset of the kitchen against the TV in Synced mode, from the app's click track and the Mac's microphone.
 
 Starts /tv/clicks?seconds=N on the box (Synced must be live, and something must play in the Cast player for the kitchen to stream),
-records the microphone with sox `rec` meanwhile, stops the clicks, and finds the TV's clicks (2 kHz) and the kitchen's (3 kHz); the
-markers every tenth second (4 and 6 kHz) are left out, 6 kHz being a harmonic of both. offset = t_kitchen - t_tv for each second, then
-its median and spread: positive means the kitchen is heard later. Run it once with the audio-only stream (Listening, tv_audio_only on)
-and once with the lyrics video (Screen): the medians should agree within about 15 ms, or the audio-only stream needs its own extra.
+records the microphone with sox `rec` meanwhile, stops the clicks, and finds the TV's clicks (2 kHz, every tenth at 4 kHz) and the
+kitchen's (3 kHz, every tenth at 6 kHz). A click counts only in the band where it is the strongest at that moment: the edge of a click
+leaks into the other band, and on 28.10. that leak made the kitchen look 1 ms from the TV when the TV was 4.48 s behind it. The tenth
+clicks are numbered by the capture frame in both rooms, so they give the whole seconds; the clicks between them give the fine part.
+offset = t_kitchen - t_tv: positive means the kitchen is heard later, negative that it is ahead.
 
 usage: python3 spikes/tvclicks.py [--box 192.168.0.165] [--seconds 60] [--out tvclicks.wav]
        python3 spikes/tvclicks.py --analyze tvclicks.wav
@@ -55,17 +56,38 @@ def onsets(env, fs, snr_db=14.0, gap_s=0.5):
     return out
 
 
+def own(bands, f, others, fs):
+    """The clicks of band f: its onsets where f is at least twice as strong as each of the other bands (a leak is weaker than its click)."""
+    env = bands[f]
+    out = []
+    for t in onsets(env, fs):
+        i = min(len(env) - 1, int(t * fs) + int(CLICK_S * fs / 2))
+        if all(env[i] > 2.0 * bands[o][i] for o in others):
+            out.append(t)
+    return out
+
+
 def analyze(x, fs):
-    tv = onsets(envelope(x, fs, TV_HZ), fs)
-    kit = onsets(envelope(x, fs, KITCHEN_HZ), fs)
+    bands = {f: envelope(x, fs, f) for f in (TV_HZ, KITCHEN_HZ, 2 * TV_HZ, 2 * KITCHEN_HZ)}
+    tv = own(bands, TV_HZ, [KITCHEN_HZ], fs)
+    kit = own(bands, KITCHEN_HZ, [TV_HZ], fs)
+    tv_mark = own(bands, 2 * TV_HZ, [2 * KITCHEN_HZ, TV_HZ], fs)
+    kit_mark = own(bands, 2 * KITCHEN_HZ, [2 * TV_HZ, KITCHEN_HZ], fs)
+    res = {"tv_clicks": len(tv), "kitchen_clicks": len(kit), "tv_marks": len(tv_mark), "kitchen_marks": len(kit_mark)}
+    # the whole seconds: a tenth click of the kitchen and the TV's nearest one within 5 s are the same capture frame
+    coarse = [k - min(tv_mark, key=lambda u: abs(u - k)) for k in kit_mark if tv_mark and abs(min(tv_mark, key=lambda u: abs(u - k)) - k) < 5.0]
+    shift = float(np.median(coarse)) if coarse else 0.0
+    if not coarse:
+        res["warning"] = "no tenth clicks heard in both rooms: the offset is known only up to whole seconds"
     pairs = []
     for t in tv:
+        want = t + shift
         if kit:
-            k = min(kit, key=lambda u: abs(u - t))
-            if abs(k - t) <= NEAR_S:
+            k = min(kit, key=lambda u: abs(u - want))
+            if abs(k - want) <= NEAR_S:
                 pairs.append((t, (k - t) * 1000.0))
     off = np.array([p[1] for p in pairs])
-    res = {"tv_clicks": len(tv), "kitchen_clicks": len(kit), "pairs": len(pairs)}
+    res["pairs"] = len(pairs)
     if len(off):
         res.update(median_ms=round(float(np.median(off)), 1), p5_ms=round(float(np.percentile(off, 5)), 1), p95_ms=round(float(np.percentile(off, 95)), 1))
     return res, pairs
@@ -97,17 +119,19 @@ def run(box, seconds, out):
 
 
 def selftest():
-    """Synthetic clicks in noise: the kitchen 46 ms late and a third as loud, then 30 ms early and 20 dB down."""
+    """Synthetic click tracks in noise, with the tenth clicks at twice the pitch: the kitchen 46 ms late, 30 ms early and 20 dB down, and
+    4.48 s ahead of the TV (28.10.: the leak of each click into the other band read that as 1 ms)."""
     fs, rng, ok = RATE, np.random.default_rng(1), True
     t = np.arange(int(CLICK_S * fs)) / fs
-    for lag, kamp in ((0.046, 0.1), (-0.030, 0.03)):
-        x = rng.normal(0, 0.01, fs * 20)
-        for k in range(1, 19):
-            for f, at, amp in ((TV_HZ, k + 0.0, 0.3), (KITCHEN_HZ, k + lag, kamp)):
+    for lag, kamp in ((0.046, 0.1), (-0.030, 0.03), (-4.48, 0.3)):
+        x = rng.normal(0, 0.01, fs * 40)
+        for k in range(0, 40):
+            for f, at, amp in ((TV_HZ, 6.0 + k, 0.3), (KITCHEN_HZ, 6.0 + k + lag, kamp)):
                 i = int(at * fs)
-                x[i:i + len(t)] += amp * np.sin(2 * np.pi * f * t)
+                if 0 <= i < len(x) - len(t):
+                    x[i:i + len(t)] += amp * np.sin(2 * np.pi * (2 * f if k % 10 == 0 else f) * t)
         res, _ = analyze(x, fs)
-        good = res["pairs"] >= 17 and abs(res["median_ms"] - lag * 1000.0) <= 1.0
+        good = res["pairs"] >= 20 and abs(res.get("median_ms", 1e9) - lag * 1000.0) <= 1.0
         ok = ok and good
         print(res, "ok" if good else "FAILED")
     print("selftest", "ok" if ok else "FAILED")

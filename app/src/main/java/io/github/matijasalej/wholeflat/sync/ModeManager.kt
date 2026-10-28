@@ -97,6 +97,12 @@ class ModeManager(
          * moment or not (a pause of the music while a re-anchor retries must not leave the TV without a stream until the music comes back).
          */
         val retryingTv: Boolean = false,
+        /**
+         * Some sound has been heard since the app began. Before it the silence is counted from the app's start, so the first seconds after
+         * a start (a reboot, an update) looked like music and the TV was grabbed for nothing: a TV in standby that answers is woken for it,
+         * and a TV that shows something else is taken.
+         */
+        val heardSound: Boolean = true,
     )
 
     sealed class Action {
@@ -193,7 +199,7 @@ class ModeManager(
         val justAsked = i.nowMs - modeSinceMs < JUST_ASKED_MS && seenMode == Mode.SYNCED
         if (wantTv && idleTv && !releasing && i.backoffRemainingMs <= 0L) {
             val rePending = regrabAtMs != 0L
-            val soundNow = i.silentForMs < GRAB_WITHIN_SOUND_MS
+            val soundNow = i.heardSound && i.silentForMs < GRAB_WITHIN_SOUND_MS
             if (rePending && i.nowMs >= regrabAtMs) {
                 regrabAtMs = 0L
                 lastRegrabMs = i.nowMs

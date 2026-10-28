@@ -27,7 +27,8 @@ class ModeManagerTest {
         backoff: Long = 0L,
         failed: Int = 0,
         retrying: Boolean = false,
-    ) = ModeManager.Inputs(now, mode, source, alive, silent, known, tv, leftCount, leftKind, foreground, backoff, failed, idle, retrying)
+        heard: Boolean = true,
+    ) = ModeManager.Inputs(now, mode, source, alive, silent, known, tv, leftCount, leftKind, foreground, backoff, failed, idle, retrying, heard)
 
     private fun List<Action>.grabs() = count { it is Action.Grab }
     private fun List<Action>.releases() = filterIsInstance<Action.Release>()
@@ -74,6 +75,16 @@ class ModeManagerTest {
         val m = ModeManager()
         assertTrue(m.decide(inputs(1_000L, silent = never)).isEmpty())
         assertTrue(m.decide(inputs(2_000L, silent = never)).isEmpty())
+    }
+
+    @Test
+    fun theFirstSecondsAfterAStartAreNotSoundUntilSomethingIsHeard() {
+        // the capture's silence counts from the app's start until the first sound: 2 s after a start is not music (seen on 28.10.)
+        val m = ModeManager()
+        assertEquals(0, m.decide(inputs(1_000L, silent = 1_000L, idle = 1_000L, heard = false)).grabs())
+        assertEquals(0, m.decide(inputs(2_000L, silent = 2_000L, idle = 2_000L, heard = false)).grabs())
+        // the first real sound: the TV is taken as before
+        assertEquals(1, m.decide(inputs(30_000L, silent = 0L, idle = 0L, heard = true)).grabs())
     }
 
     @Test

@@ -749,6 +749,9 @@ class CaptureSource(context: Context, private val feed: CaptureFeed) : AudioSour
      */
     fun silentForMs(): Long = silence.silentForNanos(System.nanoTime()) / 1_000_000L
 
+    /** Whether the captured player has made any sound since the app began (until then [silentForMs] is only the app's age). */
+    fun heardSound(): Boolean = silence.heardSound
+
     /** The silent time since the last sound (or since the start, if there was none), in seconds. */
     private fun silentSeconds(): Double = silence.silentForNanos(System.nanoTime()) / 1e9
 

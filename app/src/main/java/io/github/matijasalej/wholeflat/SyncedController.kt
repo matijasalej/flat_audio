@@ -234,6 +234,7 @@ class SyncedController(
             nowMs = now, mode = mode, source = source, captureAlive = captureAlive, silentForMs = silent,
             tvKnown = tv.currentIp() != null, tv = tvState, leftCount = renderer.leftCount, leftKind = leftKind,
             foreground = foreground, backoffRemainingMs = renderer.backoffRemainingMs(), failedGrabs = renderer.failedGrabs(), idleForMs = idle, retryingTv = renderer.restarting,
+            heardSound = AppState.capture?.heardSound() == true,
         )
         lastInputs = "mode ${mode.key}, source $source, capture ${if (captureAlive) "alive" else "gone"}, silent ${if (silent > 86_400_000L) "never" else "${silent / 1000} s"}, " +
             "TV ${renderer.state.label}, in front ${foreground.name.lowercase()}"

@@ -19,6 +19,7 @@ import io.github.matijasalej.wholeflat.sync.StreamFormat
 import io.github.matijasalej.wholeflat.sync.SyncedTiming
 import io.github.matijasalej.wholeflat.sync.TvVideoSpec
 import io.github.matijasalej.wholeflat.sync.TvDidl
+import io.github.matijasalej.wholeflat.sync.TvJournal
 import io.github.matijasalej.wholeflat.sync.Warmup
 import org.json.JSONArray
 import org.json.JSONObject
@@ -131,6 +132,10 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     @Volatile
     var onGaveUp: ((String) -> Unit)? = null
 
+    /** Where every start, every end of a stream and what the TV showed afterwards are written (see [TvJournal]); none: nothing is kept. */
+    @Volatile
+    var journal: TvJournal? = null
+
     // ---- state -----------------------------------------------------------------------------------
 
     @Volatile
@@ -232,6 +237,14 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
     @Volatile
     private var startTookItem = false
 
+    /** The journal's record of the start under way (written when the start is over, see [doGrab]), and the outcome of the last one written. */
+    private var rec: JSONObject? = null
+    private var lastRecOutcome = ""
+
+    private fun rec(key: String, value: Any?) {
+        rec?.put(key, value ?: JSONObject.NULL)
+    }
+
     @Volatile
     private var lastTransport = ""
 
@@ -297,7 +310,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             try {
                 exec.submit(Runnable {
                     val r = api.stop()
-                    endSession(s, "the app stopped")
+                    endSession(s, "the app stopped", stopFirst = true)
                     AppLog.add(TAG, "the app stops: the TV is given back (Stop ${r.describe()})")
                 }).get(STOP_ON_EXIT_MS, TimeUnit.MILLISECONDS)
             } catch (t: Throwable) {
@@ -400,7 +413,20 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
                 pipeline = null
             }
             if (state == State.STARTING) fail("unexpected: $t")
+        } finally {
+            writeRec()
         }
+    }
+
+    /** The record of the start goes to the journal; a TV that is still not on (asked every 15 s while the music plays) is written once. */
+    private fun writeRec() {
+        val r = rec ?: return
+        rec = null
+        val outcome = r.optString("outcome", "").ifEmpty { "ended without an outcome" }
+        r.put("outcome", outcome)
+        if (outcome == lastRecOutcome && (outcome == OUTCOME_NOT_ON || outcome == OUTCOME_NOT_READY)) return
+        lastRecOutcome = outcome
+        journal?.add("grab", r)
     }
 
     /**
@@ -431,14 +457,19 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             return
         }
         grabs++
+        rec = JSONObject().put("reason", reason).put("grab", grabs).put("keep_running", keepRunning).put("failed_before", backoff.failures)
         setState(State.STARTING)
         leftKind = null
         note("grab: $reason")
-        if (!tv.ensureOn()) {
+        val on = tv.ensureOn()
+        rec("power", tv.lastKnownPower())
+        rec("tv_on_for_s", if (tv.onSinceMs > 0L) (nowMs() - tv.onSinceMs) / 1000 else null)
+        if (!on) {
             // a TV that is off or asleep is no failure of the stream: wait a little before asking again, and do not count it
             notBeforeMs = nowMs() + NOT_ON_WAIT_MS
             lastError = "the TV is not on"
             AppLog.add(TAG, "the TV is not on, trying again in ${NOT_ON_WAIT_MS / 1000} s at the earliest")
+            rec("outcome", OUTCOME_NOT_ON)
             setState(State.IDLE)
             return
         }
@@ -527,6 +558,8 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             // a transport that holds nothing (a TV that has not played since it came on, or one that a release or a restart has just stopped)
             // is not stopped again: a Stop right behind another is what the TV answers with 705 for seconds
             val before = transportNow(api)
+            rec("transport_before", before.ifEmpty { "not answering" })
+            rec("stop_first", !(before == "STOPPED" || before == "NO_MEDIA_PRESENT"))
             if (before == "STOPPED" || before == "NO_MEDIA_PRESENT") {
                 AppLog.add(TAG, "the TV's transport is $before: no Stop before the item")
             } else {
@@ -557,6 +590,9 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             tries++
         }
         if (tries > 1) AppLog.add(TAG, "SetAVTransportURI took $tries tries: ${set.describe()}")
+        rec("format", if (pipe == null) "l16" else if (pipe.audioOnly) "ts audio" else "ts video")
+        rec("set_tries", tries)
+        if (!set.ok) rec("set_error", set.describe())
         if (!set.ok) {
             fail("SetAVTransportURI: ${set.describe()}")
             return
@@ -585,7 +621,9 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             play = api.play()
             tries++
         }
+        rec("play_tries", tries)
         if (!play.ok) {
+            rec("play_error", play.describe())
             fail("Play: ${play.describe()}")
             return
         }
@@ -596,6 +634,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             return
         }
         val getAfter = nowMs() - playSent
+        rec("get_ms", getAfter)
         if (!waitFor(PLAYING_WAIT_MS, stepMs = TV_STEP_MS) { transportNow(api) == "PLAYING" }) {
             if (cancelRequested) return cancelled()
             fail("the TV asked for the stream ${getAfter} ms after Play but did not play (transport $lastTransport)")
@@ -606,6 +645,9 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         stoppedPolls = 0
         closedPolls = 0
         AppLog.add(TAG, "the TV plays: its first GET came ${getAfter} ms after Play, PLAYING ${nowMs() - playSent} ms after Play (context ${tv.context() ?: "?"})")
+        rec("playing_ms", nowMs() - playSent)
+        rec("token", s.token)
+        rec("outcome", "playing")
         // the audio-only stream has no warm-up; the video stream is warming up until the TV has settled
         live = pipe == null
         setState(State.PLAYING)
@@ -630,6 +672,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         live = true
         warmupMs = warmup.durationMs(System.nanoTime())
         warmupWhy = warmup.reason
+        journal?.add("live", JSONObject().put("token", s.token).put("warmup_ms", warmupMs).put("why", warmup.reason))
         AppLog.add(
             TAG,
             "warm-up over after $warmupMs ms (${warmup.reason}); the stream carries the music from capture frame ${info.firstFrame}, " +
@@ -644,6 +687,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
 
     private fun cancelled() {
         // a release came while the start was under way: what the TV took is given back (the release finds nothing running)
+        rec("outcome", "cancelled")
         if (startTookItem) giveBackStart("released during the start")
         session?.let { endSession(it, "released during the start") }
         session = null
@@ -661,13 +705,14 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         val r = api.stop()
         val after = settleAfterStop(api, cancellable = false)
         note("the start is given back ($why): Stop ${r.describe()}, the transport ${after.ifEmpty { "not answering" }}")
-        session?.let { endSession(it, why) }
+        session?.let { endSession(it, why, stopFirst = true) }
         session = null
         returnToHdmi()
     }
 
     private fun fail(why: String) {
         lastError = why
+        rec("outcome", "failed: $why")
         if (!cancelRequested) lastFailureMs = nowMs()
         if (startTookItem) giveBackStart("failed: $why")
         session?.let { endSession(it, "failed: $why") }
@@ -1020,7 +1065,7 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
                 note("release: $reason; no Stop (the new item goes to the transport that is running)")
             }
         }
-        if (s != null) endSession(s, reason)
+        if (s != null) endSession(s, reason, stopFirst = api != null && wasOn && sendStop)
         session = null
         if (api != null && wasOn && waitHdmi) returnToHdmi()
         live = false
@@ -1083,13 +1128,15 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
         false
     }
 
-    private fun endSession(s: KitchenSession, why: String) {
+    /** [stopFirst]: the TV was stopped before the stream ended (true), it was not (false), or it does not apply (null: it left by itself). */
+    private fun endSession(s: KitchenSession, why: String, stopFirst: Boolean? = null) {
         if (!s.cancelled) {
             s.cancelled = true
             s.endReason = why
             sessions.remove(s.token)
             s.record?.ended(System.nanoTime(), why)
             AppLog.add(TAG, "TV stream ${s.token} ended: $why")
+            journalEnd(s, why, stopFirst)
         }
         s.closeSockets()
         if (session === s) {
@@ -1097,6 +1144,30 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
             pipeline?.stop()
             pipeline = null
         }
+    }
+
+    /** The end of a stream goes to the journal, and some seconds later what the TV shows then (did it go to standby, to HDMI, to its tuner?). */
+    private fun journalEnd(s: KitchenSession, why: String, stopFirst: Boolean?) {
+        val j = journal ?: return
+        val endedAt = nowMs()
+        val age = if (streamStartedNanos == 0L) JSONObject.NULL else (System.nanoTime() - streamStartedNanos) / 1_000_000_000L
+        j.add("end", JSONObject().put("token", s.token).put("why", why).put("stop_first", stopFirst ?: JSONObject.NULL).put("age_s", age).put("connections", s.connectionCount))
+        try {
+            exec.schedule(Runnable { post("after the end") { journalAfter(s.token, endedAt) } }, AFTER_END_MS, TimeUnit.MILLISECONDS)
+        } catch (e: Exception) {
+            // shut down
+        }
+    }
+
+    private fun journalAfter(token: String, endedAt: Long) {
+        val j = journal ?: return
+        val power = tv.powerState()
+        val ctx = if (power == "On") tv.context() else null
+        j.add(
+            "after",
+            JSONObject().put("token", token).put("after_s", (nowMs() - endedAt) / 1000).put("power", power ?: "unreachable")
+                .put("context", ctx ?: JSONObject.NULL).put("state", state.label),
+        )
     }
 
     private fun note(text: String) {
@@ -1250,6 +1321,12 @@ class TvRenderer(private val context: Context, private val tv: TvControl) : Stre
 
         /** How long the app waits at its end for the TV to be given back (ms). */
         private const val STOP_ON_EXIT_MS = 2_500L
+
+        /** What the TV shows is looked at this long after a stream of it ended (ms), for the journal. */
+        private const val AFTER_END_MS = 15_000L
+
+        private const val OUTCOME_NOT_ON = "the TV is not on"
+        private const val OUTCOME_NOT_READY = "the TV's player is not ready"
 
         /** A restart of the stream on purpose is expected to be through within this long (ms). */
         private const val RESTART_WINDOW_MS = 40_000L

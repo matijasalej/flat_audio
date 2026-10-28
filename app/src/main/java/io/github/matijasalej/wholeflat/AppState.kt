@@ -97,6 +97,9 @@ object AppState {
     @Volatile var tvRenderer: TvRenderer? = null
     @Volatile var synced: SyncedController? = null
 
+    /** Every switch of the TV to its player, every end of such a stream, the TV's power and the box's sleeps, on disk (`/tv/journal`). */
+    @Volatile var tvJournal: io.github.matijasalej.wholeflat.sync.TvJournal? = null
+
     /** The lyrics of the track that plays, and its cover: the lyrics picture of the TV and the phone page read them. */
     @Volatile var lyrics: LyricsRepository? = null
     @Volatile var covers: CoverCache? = null

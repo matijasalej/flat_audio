@@ -587,11 +587,42 @@ class TvControl(private val context: Context) {
     }
 
     private fun getPowerState(ip: String): String? {
-        val text = httpText("GET", "http://$ip:$PORT/6/powerstate", null, 1500) ?: return null
-        return try {
+        val text = httpText("GET", "http://$ip:$PORT/6/powerstate", null, 1500)
+        val power = if (text == null) null else try {
             JSONObject(text).optString("powerstate").ifEmpty { null }
         } catch (e: Exception) {
             null
+        }
+        notePower(power)
+        return power
+    }
+
+    /** The TV's power changed, as it was read ("On", "Standby", "unreachable"): from, to. */
+    @Volatile
+    var onPower: ((String, String) -> Unit)? = null
+
+    /**
+     * When the TV was first read On after it was not (or after the app began), elapsedRealtime in ms; 0 while it is not On. A TV that has
+     * just come on may still be starting its player (see the ready gate of TvRenderer).
+     */
+    @Volatile
+    var onSinceMs = 0L
+        private set
+
+    private var readPower = ""
+
+    @Synchronized
+    private fun notePower(power: String?) {
+        val now = power ?: "unreachable"
+        val was = readPower
+        if (now == was) return
+        readPower = now
+        onSinceMs = if (now == "On") SystemClock.elapsedRealtime() else 0L
+        if (was.isEmpty()) return
+        try {
+            onPower?.invoke(was, now)
+        } catch (t: Throwable) {
+            AppLog.error(TAG, "the power hook failed", t)
         }
     }
 

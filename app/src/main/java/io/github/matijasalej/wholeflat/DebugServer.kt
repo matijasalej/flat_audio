@@ -52,6 +52,7 @@ import kotlin.concurrent.thread
  *   GET  /synced                Synced mode: the mode manager, the TV's DLNA player, the screen, the Ambilight
  *   GET  /tv/dlna               the TV's DLNA player alone
  *   GET  /tv/last-sessions      the last 10 streams to the TV: every connection with its statistics
+ *   GET  /tv/journal            every switch of the TV to its player, every end of such a stream, the TV's power and the box's sleeps (on disk)
  *   GET  /tv/grab               has the TV play the capture now (the mode manager may give it back; set mode=lyrics to test alone)
  *   GET  /tv/release            gives the TV back (it returns to HDMI)
  *   GET  /remote                the phone page: the three displays of the TV (Listening, Ambilight, Screen + Ambilight) and the kitchen volume;
@@ -270,6 +271,7 @@ object DebugServer {
             "/synced" -> sendJson(out, 200, AppState.synced?.statusJson() ?: JSONObject().put("state", "not running"), head)
             "/tv/dlna" -> sendJson(out, 200, AppState.tvRenderer?.statusJson() ?: JSONObject().put("state", "not running"), head)
             "/tv/last-sessions" -> sendJson(out, 200, AppState.tvRenderer?.lastSessionsJson() ?: JSONArray(), head)
+            "/tv/journal" -> sendJson(out, 200, AppState.tvJournal?.toJson() ?: JSONArray(), head)
             "/tv/frames" -> sendText(out, 200, "kind,wall_ms,time_us,a,b,c\n" + (AppState.tvRenderer?.framesCsv() ?: ""), head)
             "/tv/grab" -> {
                 AppLog.add(TAG, "${req.remote} tv/grab")
@@ -485,7 +487,7 @@ object DebugServer {
         sb.append("<table>")
         renderRows(sb, status, 0)
         sb.append("</table><p>")
-        for (link in listOf("/status.json", "/settings", "/kitchen", "/kitchen/last-sessions", "/capture", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/capture/restart", "/tv/run", "/synced", "/tv/dlna", "/tv/last-sessions", "/tv/preview.jpg")) {
+        for (link in listOf("/status.json", "/settings", "/kitchen", "/kitchen/last-sessions", "/capture", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/capture/restart", "/tv/run", "/synced", "/tv/dlna", "/tv/last-sessions", "/tv/journal", "/tv/preview.jpg")) {
             sb.append("<a href=\"").append(link).append("\">").append(link).append("</a>")
         }
         sb.append("</p><h2 style=\"font-size:15px\">Log (last 120 lines)</h2><pre>")

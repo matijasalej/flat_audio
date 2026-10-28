@@ -5,8 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.media.MediaMetadata
 import android.media.session.MediaSession
@@ -68,6 +70,28 @@ class PlaybackService : Service() {
 
     /** Held while the music plays, so that the box does not go to sleep under it (see [holdAwake]). */
     private var musicLock: PowerManager.WakeLock? = null
+
+    /** The box's screen going off (its sleep, with the CEC Standby that switches the TV off) and on, for the journal. */
+    private var screenWatch: BroadcastReceiver? = null
+
+    private fun registerScreenWatch(journal: io.github.matijasalej.wholeflat.sync.TvJournal) {
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                val on = intent.action == Intent.ACTION_SCREEN_ON
+                journal.add("box", org.json.JSONObject().put("screen", if (on) "on" else "off").put("source", AppState.source))
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(r, filter, Context.RECEIVER_NOT_EXPORTED) else registerReceiver(r, filter)
+            screenWatch = r
+        } catch (e: Exception) {
+            AppLog.error(TAG, "the screen of the box cannot be watched", e)
+        }
+    }
     private var mediaSession: MediaSession? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
@@ -157,6 +181,12 @@ class PlaybackService : Service() {
         AppState.capture = captureSource
         AppState.tvRenderer = tvRenderer
         AppState.synced = synced
+        // the record of the TV's switches, on disk: what came before a player that hung
+        val journal = io.github.matijasalej.wholeflat.sync.TvJournal(java.io.File(filesDir, "tv_journal.jsonl"))
+        AppState.tvJournal = journal
+        tvRenderer.journal = journal
+        tv.onPower = { from, to -> journal.add("tv_power", org.json.JSONObject().put("from", from).put("to", to)) }
+        registerScreenWatch(journal)
         // the box's own HDMI output is not fed while the TV plays our stream in its DLNA player or sleeps (and nothing of Whole Flat's own plays)
         livingRoom.idleSuspended = {
             AppState.source != "librespot" && AppState.playback != "playing" && AppState.playback != "loading" &&
@@ -232,6 +262,15 @@ class PlaybackService : Service() {
         AppState.capture = null
         AppState.tvRenderer = null
         AppState.synced = null
+        AppState.tvJournal = null
+        screenWatch?.let { r ->
+            try {
+                unregisterReceiver(r)
+            } catch (e: Exception) {
+                // not registered
+            }
+        }
+        screenWatch = null
         AppState.source = "idle"
         Settings.removeListener(settingsListener)
         try {

@@ -116,14 +116,15 @@ class ModeManagerTest {
     // ---- keeping it and giving it back ---------------------------------------------------------------
 
     @Test
-    fun theTvKeepsPlayingThroughPausesAndSkipsAndGoesBackAfterThirtyMinutesOfSilence() {
+    fun theTvKeepsPlayingThroughPausesAndSkipsAndGoesBackAfterEightMinutesOfSilence() {
         val m = settled()
         // the capture says idle after a minute of silence, but the TV stays
         assertTrue(m.decide(inputs(5 * minute, source = "idle", silent = 4 * minute, tv = Tv.PLAYING)).isEmpty())
-        assertTrue(m.decide(inputs(25 * minute, source = "idle", silent = 24 * minute, tv = Tv.PLAYING)).isEmpty())
-        val a = m.decide(inputs(32 * minute, source = "idle", silent = 31 * minute, tv = Tv.PLAYING))
+        assertTrue(m.decide(inputs(8 * minute, source = "idle", silent = 7 * minute, tv = Tv.PLAYING)).isEmpty())
+        // given back before the box sleeps (about 11 minutes after the music)
+        val a = m.decide(inputs(9 * minute, source = "idle", silent = 8 * minute, tv = Tv.PLAYING))
         assertEquals(1, a.releases().size)
-        assertTrue(a.releases()[0].why, a.releases()[0].why.contains("30 minutes"))
+        assertTrue(a.releases()[0].why, a.releases()[0].why.contains("8 minutes"))
         // and it is not taken again by the silence
         assertTrue(m.decide(inputs(33 * minute, source = "idle", silent = 32 * minute, tv = Tv.IDLE)).isEmpty())
     }
@@ -317,6 +318,29 @@ class ModeManagerTest {
         m.decide(inputs(1L, tv = Tv.LEFT, leftCount = 1, foreground = Foreground.LAUNCHER))
         assertFalse("handled", m.wantsForeground(Tv.LEFT, 1))
         assertNotNull(m.lastWhy)
+    }
+
+    // ---- giving the TV back after a silence ------------------------------------------------------------
+
+    @Test
+    fun aPlayingTvIsGivenBackAfterEightMinutesOfSilenceBeforeTheBoxSleeps() {
+        val m = settled()
+        assertTrue(m.decide(inputs(60_000L, tv = Tv.PLAYING, silent = 8 * 60_000L - 1)).releases().isEmpty())
+        val r = m.decide(inputs(62_000L, tv = Tv.PLAYING, silent = 8 * 60_000L)).releases()
+        assertEquals(1, r.size)
+        assertEquals("8 minutes of silence", r[0].why)
+    }
+
+    @Test
+    fun theHoldComesFromTheSetting() {
+        var minutes = 20L
+        val m = ModeManager(silenceKeepMs = { minutes * 60_000L })
+        m.decide(inputs(0L, silent = never))
+        assertTrue(m.decide(inputs(60_000L, tv = Tv.PLAYING, silent = 8 * 60_000L)).releases().isEmpty())
+        assertEquals("20 minutes of silence", m.decide(inputs(62_000L, tv = Tv.PLAYING, silent = 20 * 60_000L)).releases().single().why)
+        // a changed setting counts at the next decision
+        minutes = 5L
+        assertEquals("5 minutes of silence", m.decide(inputs(64_000L, tv = Tv.PLAYING, silent = 5 * 60_000L)).releases().single().why)
     }
 
     // ---- what is in front ----------------------------------------------------------------------------

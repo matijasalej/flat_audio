@@ -49,7 +49,7 @@ class SyncedController(
 
     /** The state of the clean-up of the background and of the screensaver, for `/sys`. */
     fun cleanupJson(): JSONObject = cleaner.statusJson()
-    private val manager = ModeManager()
+    private val manager = ModeManager(silenceKeepMs = { Settings.values.tvHoldSilenceMin * 60_000L })
     private val prefs: SharedPreferences = context.applicationContext.getSharedPreferences("wholeflat_tv", Context.MODE_PRIVATE)
 
     private val ambilight = AmbilightControl(

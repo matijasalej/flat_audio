@@ -100,7 +100,8 @@ class TvControl(private val context: Context) {
 
     /**
      * Finds the TV in the background: after [delaySeconds], then again with growing pauses (30 s, 2 min, 10 min)
-     * for as long as no TV answers. A TV that is in standby may not answer yet when the box boots.
+     * for as long as no TV answers. A TV that is in standby may not answer yet when the box boots: the address it had
+     * is kept meanwhile (its network sleeps in standby, it has not moved), so that it is known the moment it is on again.
      */
     private fun scheduleFind(delaySeconds: Long, attempt: Int) {
         try {
@@ -113,14 +114,14 @@ class TvControl(private val context: Context) {
                             note("the TV at $known answers")
                             return@Runnable
                         }
-                        detectedIp = null
                         val found = detect()
                         if (found != null) {
                             detectedIp = found
                             prefs.edit().putString(PREF_IP, found).apply()
                             note("found the TV at $found")
                         } else {
-                            note("no TV answered on port 1925 (attempt ${attempt + 1})")
+                            // forgetting the address here kept Synced from taking the TV for up to 10 minutes after it came on
+                            note("no TV answered on port 1925 (attempt ${attempt + 1})" + if (known != null) "; its last address $known is kept" else "")
                             val next = when (attempt) {
                                 0 -> 30L
                                 1 -> 120L

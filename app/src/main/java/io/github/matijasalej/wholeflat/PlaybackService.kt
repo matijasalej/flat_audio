@@ -110,6 +110,7 @@ class PlaybackService : Service() {
     private lateinit var synced: SyncedController
     private lateinit var captureFeed: CaptureFeed
     private lateinit var captureSource: CaptureSource
+    private lateinit var livingReplay: LivingReplay
     private var bootThread: Thread? = null
     private var eventThread: Thread? = null
     private val restartTimes = ArrayList<Long>()
@@ -144,6 +145,8 @@ class PlaybackService : Service() {
         kitchen.onJoined = { toast("Kitchen connected") }
         captureFeed = CaptureFeed()
         captureSource = CaptureSource(this, captureFeed)
+        // Synced on HDMI: while the Spotify app's own sound is muted, the living room is the capture played on HDMI (see LivingReplay)
+        livingReplay = LivingReplay(this, captureFeed) { captureSource.state == "running" }
         kitchen.captureFeed = captureFeed
         tvRenderer = TvRenderer(this, tv)
         tvRenderer.captureFeed = captureFeed
@@ -169,6 +172,7 @@ class PlaybackService : Service() {
             { Settings.values.tvScroll == SettingsModel.TV_SCROLL_INSTANT },
         )
         synced = SyncedController(this, kitchen, tvRenderer, tv)
+        synced.livingReplay = livingReplay
         kitchen.onSource = { source ->
             // the Sonos follows the box's music volume while the capture is the source
             captureSource.setVolumeActive(source == SourceArbiter.Source.CAPTURE)
@@ -182,6 +186,8 @@ class PlaybackService : Service() {
         AppState.capture = captureSource
         AppState.tvRenderer = tvRenderer
         AppState.synced = synced
+        AppState.livingReplay = livingReplay
+        livingReplay.start()
         // the record of the TV's switches, on disk: what came before a player that hung
         val journal = io.github.matijasalej.wholeflat.sync.TvJournal(java.io.File(filesDir, "tv_journal.jsonl"))
         AppState.tvJournal = journal
@@ -253,10 +259,12 @@ class PlaybackService : Service() {
             AppLog.error(TAG, "stopping the kitchen failed", t)
         }
         try {
+            if (::livingReplay.isInitialized) livingReplay.stop()
             if (::livingRoom.isInitialized) livingRoom.stop()
         } catch (t: Throwable) {
             AppLog.error(TAG, "stopping the living room failed", t)
         }
+        AppState.livingReplay = null
         AppState.livingRoom = null
         AppState.kitchen = null
         AppState.tv = null

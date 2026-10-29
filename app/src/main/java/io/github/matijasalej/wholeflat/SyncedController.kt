@@ -80,6 +80,13 @@ class SyncedController(
     var configHook: (() -> String?)? = null
 
     /**
+     * The living room as the replay of the muted Spotify app on HDMI (see [LivingReplay]), set once from the service. While it plays, the
+     * TV's player is not used and the kitchen is held to the replay's delay, as to the common delay of Synced mode.
+     */
+    @Volatile
+    var livingReplay: LivingReplay? = null
+
+    /**
      * The configuration of the Ambilight now: the hook's if it gives one; else, with the screen off (display "ambilight"), the `ambilight_dark_*`
      * settings (expert PARTY by default: Lumina is dark without a picture); else null, which is the style of `ambilight_style` and
      * `ambilight_menu` (Lumina: it follows the picture and the beat).
@@ -236,6 +243,7 @@ class SyncedController(
             foreground = foreground, backoffRemainingMs = renderer.backoffRemainingMs(), failedGrabs = renderer.failedGrabs(), idleForMs = idle, retryingTv = renderer.restarting,
             heardSound = AppState.capture?.heardSound() == true,
             tvStuck = renderer.stuck,
+            hdmiReplay = livingReplay?.replaying == true,
         )
         lastInputs = "mode ${mode.key}, source $source, capture ${if (captureAlive) "alive" else "gone"}, silent ${if (silent > 86_400_000L) "never" else "${silent / 1000} s"}, " +
             "TV ${renderer.state.label}, in front ${foreground.name.lowercase()}"
@@ -277,7 +285,10 @@ class SyncedController(
         kitchen.holdStart = if (effectiveMode == Mode.SYNCED && renderer.warming) "the TV is warming up (a splash and silence), its music is not live yet" else null
         // while the TV warms up again (a re-anchor) the kitchen is not sent back to the lag of Lyrics mode: it would be started twice
         holdTheKitchen(playing, now, keepTarget = effectiveMode == Mode.SYNCED && (renderer.warming || renderer.restarting))
-        present(effectiveMode, playing, source, now)
+        // the living room replayed on HDMI is Synced as far as the screen and the lights go: the display decides them, with the Spotify app
+        // as the picture (Listening and Ambilight switch the screen off, the sound goes on through the TV's optical output)
+        val replayed = !playing && livingReplay?.replaying == true
+        present(if (replayed) Mode.SYNCED else effectiveMode, playing || replayed, source, now)
         reanchorCheck(playing, silent)
         recoverAfterCrash(now)
         refreshCurrent(now)
@@ -377,6 +388,7 @@ class SyncedController(
 
     private fun holdTheKitchen(playing: Boolean, now: Long, keepTarget: Boolean = false) {
         val offset = Settings.values.kitchenOffsetMs
+        val replayMs = livingReplay?.holdTargetMs() ?: Double.NaN
         if (playing) {
             val d = renderer.delayMs
             if (!d.isNaN()) {
@@ -386,6 +398,12 @@ class SyncedController(
                 // the lead that puts the lag at the common delay at once: the target less the Play-to-sound delay and the pipeline
                 kitchen.syncedLeadMs = maxOf(0.0, target - kitchen.fixedLagMs())
             }
+        } else if (!replayMs.isNaN()) {
+            // the living room is the capture replayed on HDMI: the kitchen is held to the same delay after the capture, on the capture's own clock
+            val target = replayMs + offset
+            kitchen.syncedClock = null
+            kitchen.syncedTargetMs = target
+            kitchen.syncedLeadMs = maxOf(0.0, target - kitchen.fixedLagMs())
         } else if (!keepTarget) {
             kitchen.syncedTargetMs = Double.NaN
             kitchen.syncedLeadMs = Double.NaN
@@ -506,6 +524,7 @@ class SyncedController(
         o.put("state", renderer.state.label)
         o.put("delay_ms", if (renderer.delayMs.isNaN()) JSONObject.NULL else Math.round(renderer.delayMs * 10.0) / 10.0)
         o.put("kitchen_synced_target_ms", if (kitchen.syncedTargetMs.isNaN()) JSONObject.NULL else Math.round(kitchen.syncedTargetMs * 10.0) / 10.0)
+        o.put("hdmi_replay", livingReplay?.replaying == true)
         o.put("kitchen_hold", kitchen.holdStart ?: JSONObject.NULL)
         o.put("kitchen_align", kitchenAlign.ifEmpty { JSONObject.NULL })
         o.put("reanchor_wanted", reanchorWanted)

@@ -57,6 +57,19 @@ class SettingsModelTest {
         assertEquals(false, o.getBoolean("tv_auto_reanchor"))
         assertEquals(false, o.getBoolean("tv_reanchor_running"))
         assertEquals("smooth", o.getString("tv_scroll"))
+        assertEquals(800, o.getInt("living_replay_ms"))
+        assertEquals(200, o.getInt("living_replay_tv_ms"))
+    }
+
+    @Test
+    fun theReplayDelaysAreClampedToWhatFitsTheTrackAndTheCaptureBuffer() {
+        val m = SettingsModel()
+        assertEquals(setOf("living_replay_ms", "living_replay_tv_ms"), m.applyJson(JSONObject("""{"living_replay_ms": 50, "living_replay_tv_ms": 99999}""")))
+        assertEquals(300, m.values().livingReplayMs)
+        assertEquals(1000, m.values().livingReplayTvMs)
+        assertEquals(setOf("living_replay_ms", "living_replay_tv_ms"), m.applyJson(JSONObject("""{"living_replay_ms": "9999", "living_replay_tv_ms": -3}""")))
+        assertEquals(3000, m.values().livingReplayMs)
+        assertEquals(0, m.values().livingReplayTvMs)
     }
 
     @Test
@@ -137,6 +150,7 @@ class SettingsModelTest {
                 "ambilight_style", "ambilight_menu", "tv_pause_ms", "tv_quiet", "tv_audio_only", "tv_mac", "tv_position_probe",
                 "ambilight_dark_style", "ambilight_dark_algorithm", "ambilight_dark_menu", "tv_auto_reanchor", "tv_reanchor_running", "tv_scroll",
                 "tv_hold_silence_min", "tv_ready_ms", "tv_clear_item", "tv_boot_wait_s", "tv_close_wait_s",
+                "living_replay_ms", "living_replay_tv_ms",
             ),
             keys,
         )

@@ -97,6 +97,9 @@ object AppState {
     @Volatile var tvRenderer: TvRenderer? = null
     @Volatile var synced: SyncedController? = null
 
+    /** The living room as the capture replayed on HDMI while the Spotify app is muted (Synced on HDMI, `/living/replay`). */
+    @Volatile var livingReplay: LivingReplay? = null
+
     /** Every switch of the TV to its player, every end of such a stream, the TV's power and the box's sleeps, on disk (`/tv/journal`). */
     @Volatile var tvJournal: io.github.matijasalej.wholeflat.sync.TvJournal? = null
 
@@ -239,6 +242,7 @@ object AppState {
         o.put("kitchen", kitchen?.statusJson() ?: JSONObject.NULL)
         o.put("tv", tv?.statusJson() ?: JSONObject.NULL)
         o.put("synced", synced?.statusJson() ?: JSONObject.NULL)
+        o.put("living_replay", livingReplay?.statusJson() ?: JSONObject.NULL)
         val captureJson = capture?.statusJson()
         if (captureJson != null) {
             captureJson.put("playback", capturePlayback)

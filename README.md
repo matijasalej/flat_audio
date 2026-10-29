@@ -186,6 +186,32 @@ The phone page is these three buttons and the volume of the kitchen (the slider 
 
 What to watch: `/synced` (the mode manager, the screen and lights, what it last decided and why), `/tv/dlna` (the TV's player: transport state, `warmup_ms`, `backlog_ms`, `delay_ms`, `hold_frozen_ms`, `hdmi_return`, and the `video` block: the encoders, the way the picture is drawn, frames a second, kbit/s and the share of padding, how late items were queued, the packets waiting), `/tv/last-sessions` (every connection of the TV: when it started, how old its key place was, the bytes it was given at once, how long writes blocked, how far behind the live edge it read, who closed it and why), `/tv/journal` (on disk, the last 300 events, it outlives the log and a restart: every switch of the TV to its player with the TV's power and how long it had been on, what its transport held before the item, whether it was stopped first, the tries, the first GET, PLAYING and the outcome; every end of a stream, whether the TV was stopped before it, and what the TV showed 15 s later; the TV's power as JointSpace tells it; the box's screen going off and on, which is its sleep and the CEC Standby that switches the TV off) and `/log` (tags `synced`, `tvdlna`, `tvvideo`, `stream`).
 
+## Synced on HDMI: the living room replayed by the box
+
+The TV's DLNA player hung on every fresh start of the video stream on 28 Oct (17:27, 17:40, 17:53, 18:25; it takes the item, never asks for the stream, and falls back to its tuner), and only the plug clears it. **Synced on HDMI** leaves that player out: the TV stays on its HDMI input with the Spotify app on the screen, and the two rooms are put in step by the box alone.
+
+**How.** The Spotify TV app's own sound is muted with its PLAY_AUDIO app-op, once, from the Mac:
+
+```
+adb shell cmd appops set com.spotify.tv.android PLAY_AUDIO ignore   # on
+adb shell cmd appops set com.spotify.tv.android PLAY_AUDIO allow    # off again: the app is heard directly
+```
+
+The capture still hears the muted app: AudioFlinger gives a track whose app may not play audio the volume 0 in its mixer, but the copy for the capture is taken from the track's frames before any volume (`Track::interceptBuffer`, Android 14), as the capture was already "before the volume". This app then plays what the capture took on the box's HDMI output (`LivingReplay`), so that each frame sounds in the room `living_replay_ms` after it was captured, and the kitchen is held to the same delay, as to the common delay of Synced mode (set once, corrected only beyond 40 ms for 30 s). The replay is written `living_replay_tv_ms` early for the TV's own way from its HDMI input to the sound. It keeps to its place by the track's timestamps against the capture's clock: within 2 ms it is left alone, beyond that a block of 10 ms takes one captured frame more or less (two beyond 10 ms), a quarter of a percent of speed, which is not heard; beyond 40 ms it jumps. Frames the capture does not have yet go out as silence (`missing_ms`).
+
+**The mute is the switch.** The app reads the Spotify app's PLAY_AUDIO every second (that needs no permission). Muted, the living room is replayed; not muted, it is not (it would hear the music twice). While another captured player plays (the Cast receiver), it is not replayed either, as that one is not muted; nor while the box sleeps (its HDMI output and the TV are off, and the app keeps the box awake while music plays). Meanwhile the TV's player is not used at all: a TV that holds our stream is given back, none is taken, and Lyrics does not go back to Synced after a silence. If the Spotify app is muted and nothing can be replayed (the capture does not run), the phone page says *The living room is silent* and how to unmute it. A track whose HDMI output takes nothing for 2 s is made again, after 2, 4, 8 ... up to 60 s (`stuck_tracks`).
+
+**What the TV shows** is the display, as in Synced mode, with the Spotify app as the picture: Listening and Ambilight switch the screen off (the sound goes on through the TV's optical output), Screen + Ambilight shows the Spotify app with its lyrics; the screen comes back on when the replay ends. The phone page says *TV: Spotify app, in step (HDMI)*.
+
+**Calibrating.** `python3 spikes/tvclicks.py` works as for Synced mode: the replay plays the TV's clicks (2 kHz) at the same capture frames as the kitchen's (3 kHz). A kitchen that is X ms ahead of the living room means the TV takes X ms longer than `living_replay_tv_ms` says: add X to it (and set `kitchen_offset_ms` to 0 first; its 46 ms were the fine sync against the TV's player). Then `living_replay_ms` can come down as far as `spare_ms` in `/living/replay` allows (it stays above 50 ms with no `missing_ms`): the Spotify app's own lyrics on the screen are early by it.
+
+| Setting | Meaning |
+| --- | --- |
+| `living_replay_ms` (300 to 3000, default 800) | How long after the capture both rooms sound while the living room is replayed. The kitchen gets a lead five times that of Lyrics mode; the Spotify app's lyrics on the screen are this much early. |
+| `living_replay_tv_ms` (0 to 1000, default 200) | How long the TV takes from the box's HDMI output to the sound in the room: the replay is written that much earlier. A guess until the click check. |
+
+`/living/replay` (also `living_replay` in `/status.json`): `state` (`off`, `starting`, `playing`), `why`, `spotify_muted`, `error_ms` (the last block's error, positive early), `ahead_ms` (how long before its sound a block is written: the track's and the HAL's buffers), `spare_ms` (captured audio beyond the cursor), `stretched_blocks`, `jumps`, `missing_ms`, `tracks`, `write_errors`, and the two commands.
+
 ## Free storage
 
 The Google TV has little storage, and the Spotify app's own cache has filled it to 97% once, which made the installation of this app fail. This app keeps its own use small (no audio cache, only the login and a few settings on disk, the log is in memory and bounded), and shows the free space of `/data` in `/status.json` (`storage`) and on the status screen of the app. **Below 300 MB it warns** (the screen says LOW, and the log gets a line). If it does, clear the cache of the Spotify app and other apps in Settings, Apps.
@@ -234,6 +260,7 @@ The test signal is one 5 ms click per second (Hann-windowed sine, half of full s
 | `/log` | the last 2000 log lines |
 | `/kitchen`, `/tv` | their status only |
 | `/synced`, `/tv/dlna`, `/tv/last-sessions` | Synced mode (see there): the mode manager, the TV's player, the connections of the TV |
+| `/living/replay` | Synced on HDMI (see there): whether the living room is replayed and why, how well it keeps its place |
 | `/tv/frames` | The last ten seconds of the lyrics video as CSV, to see where a scroll goes wrong: `draw,wall_ms,stamp_us,draw_ms,late_ms,pos_ms` for every picture drawn (late: how long after its time the loop woke; pos: the position in the song it was made for, which advances 33.3 ms a picture at 30 a second when the scroll is smooth) and `enc,wall_ms,pts_us,bytes,key,encode_ms` for every picture the encoder gave; the `pts_us` of an `enc` line is the `stamp_us` of a `draw` line. A picture that takes more than 150 ms to come out of the encoder is in the log. |
 | `/tv/grab`, `/tv/release`, `/tv/reanchor` | take the TV's player now, give it back, restart its stream (`?at=boundary` waits for a song boundary) |
 | `/tv/preview.jpg`, `/tv/clicks?seconds=N`, `/tv/clicks/stop` | what the lyrics picture shows now; the click track in both streams for calibrating the rooms |

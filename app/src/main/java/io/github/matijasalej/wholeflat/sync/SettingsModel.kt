@@ -106,6 +106,13 @@ class SettingsValues(
     val tvBootWaitS: Int,
     /** A fresh start waits until the TV's player has been closed this long (s); 0: no wait. A restart (the player still open) does not wait. */
     val tvCloseWaitS: Int,
+    /**
+     * Synced on HDMI (see [ReplayGate]): how long after the capture both rooms sound while the living room is the replay of the muted Spotify
+     * app (ms). The kitchen is held to it as to the common delay of Synced mode; more is a deeper buffer for the Sonos, and a later pause.
+     */
+    val livingReplayMs: Int,
+    /** How long the TV takes from the box's HDMI output to the sound in the room (ms): the replay is written that much earlier. Calibrated with the clicks. */
+    val livingReplayTvMs: Int,
 )
 
 class SettingsModel {
@@ -156,6 +163,8 @@ class SettingsModel {
     var tvClearItem = true
     var tvBootWaitS = DEFAULT_TV_BOOT_WAIT_S
     var tvCloseWaitS = DEFAULT_TV_CLOSE_WAIT_S
+    var livingReplayMs = DEFAULT_LIVING_REPLAY_MS
+    var livingReplayTvMs = DEFAULT_LIVING_REPLAY_TV_MS
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
@@ -164,6 +173,7 @@ class SettingsModel {
         captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPrerollMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
         backgroundCleanup, ambilightStyle, ambilightMenu, tvPauseMs, tvQuiet, tvAudioOnly, tvMac, tvPositionProbe,
         ambilightDarkStyle, ambilightDarkAlgorithm, ambilightDarkMenu, tvAutoReanchor, tvReanchorRunning, tvScroll, tvHoldSilenceMin, tvReadyMs, tvClearItem, tvBootWaitS, tvCloseWaitS,
+        livingReplayMs, livingReplayTvMs,
     )
 
     fun toJson(): JSONObject {
@@ -215,6 +225,8 @@ class SettingsModel {
         o.put(TV_CLEAR_ITEM, tvClearItem)
         o.put(TV_BOOT_WAIT_S, tvBootWaitS)
         o.put(TV_CLOSE_WAIT_S, tvCloseWaitS)
+        o.put(LIVING_REPLAY_MS, livingReplayMs)
+        o.put(LIVING_REPLAY_TV_MS, livingReplayTvMs)
         return o
     }
 
@@ -380,6 +392,14 @@ class SettingsModel {
             val v = number(json.get(TV_CLOSE_WAIT_S))?.coerceIn(0, MAX_TV_CLOSE_WAIT_S)
             if (v != null && v != tvCloseWaitS) { tvCloseWaitS = v; changed.add(TV_CLOSE_WAIT_S) }
         }
+        if (json.has(LIVING_REPLAY_MS)) {
+            val v = number(json.get(LIVING_REPLAY_MS))?.coerceIn(MIN_LIVING_REPLAY_MS, MAX_LIVING_REPLAY_MS)
+            if (v != null && v != livingReplayMs) { livingReplayMs = v; changed.add(LIVING_REPLAY_MS) }
+        }
+        if (json.has(LIVING_REPLAY_TV_MS)) {
+            val v = number(json.get(LIVING_REPLAY_TV_MS))?.coerceIn(0, MAX_LIVING_REPLAY_TV_MS)
+            if (v != null && v != livingReplayTvMs) { livingReplayTvMs = v; changed.add(LIVING_REPLAY_TV_MS) }
+        }
         if (json.has(TV_CLEAR_ITEM)) {
             val v = bool(json.get(TV_CLEAR_ITEM))
             if (v != null && v != tvClearItem) { tvClearItem = v; changed.add(TV_CLEAR_ITEM) }
@@ -503,6 +523,24 @@ class SettingsModel {
         const val TV_CLEAR_ITEM = "tv_clear_item"
         const val TV_BOOT_WAIT_S = "tv_boot_wait_s"
         const val TV_CLOSE_WAIT_S = "tv_close_wait_s"
+        const val LIVING_REPLAY_MS = "living_replay_ms"
+        const val LIVING_REPLAY_TV_MS = "living_replay_tv_ms"
+
+        /**
+         * The replay sounds 0.8 s after the capture: the TV's 200 ms, the track's and the HAL's 250 ms and the capture's 100 ms fit with 250 ms
+         * to spare, and the Sonos gets a lead five times that of Lyrics mode (its floor is 316 ms). The Spotify app's own lyrics on the screen
+         * are this much early, so less is better once the click check has the TV's own latency.
+         */
+        const val DEFAULT_LIVING_REPLAY_MS = 800
+        const val MIN_LIVING_REPLAY_MS = 300
+        const val MAX_LIVING_REPLAY_MS = 3_000
+
+        /**
+         * A guess until the click check: the kitchen at 322 ms after the capture sounded in step with the TV played directly, and the box's
+         * own HDMI path (a mixer period and the HAL's buffer, 2048 frames at 48 kHz) is about 120 ms of that.
+         */
+        const val DEFAULT_LIVING_REPLAY_TV_MS = 200
+        const val MAX_LIVING_REPLAY_TV_MS = 1_000
 
         /** A write to the TV that blocks 100 ms after the burst is a pause of its player (seen: 134 and 150 ms with a freeze each time). */
         const val DEFAULT_TV_PAUSE_MS = 100

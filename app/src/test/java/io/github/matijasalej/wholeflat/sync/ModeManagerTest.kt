@@ -29,7 +29,8 @@ class ModeManagerTest {
         retrying: Boolean = false,
         heard: Boolean = true,
         stuck: Boolean = false,
-    ) = ModeManager.Inputs(now, mode, source, alive, silent, known, tv, leftCount, leftKind, foreground, backoff, failed, idle, retrying, heard, stuck)
+        replay: Boolean = false,
+    ) = ModeManager.Inputs(now, mode, source, alive, silent, known, tv, leftCount, leftKind, foreground, backoff, failed, idle, retrying, heard, stuck, replay)
 
     private fun List<Action>.grabs() = count { it is Action.Grab }
     private fun List<Action>.releases() = filterIsInstance<Action.Release>()
@@ -252,6 +253,34 @@ class ModeManagerTest {
         // synced again by the reset: the TV is not taken for the silence, only when music begins
         assertEquals(0, m.decide(inputs(22 * minute + 1_000L, mode = Mode.SYNCED, silent = 11 * minute + 1_000L)).grabs())
         assertEquals(1, m.decide(inputs(23 * minute, mode = Mode.SYNCED, silent = 0L)).grabs())
+    }
+
+    // ---- the living room replayed on HDMI ----------------------------------------------------------------
+
+    @Test
+    fun theTvIsNotTakenWhileTheLivingRoomIsReplayedOnHdmi() {
+        val m = settled()
+        assertEquals(0, m.decide(inputs(60_000L, silent = 0L, replay = true)).grabs())
+        // the user's own Synced is not a grab either: the rooms are in step without the TV's player
+        assertEquals(0, m.decide(inputs(61_000L, mode = Mode.LYRICS, silent = 0L, replay = true)).grabs())
+        assertEquals(0, m.decide(inputs(62_000L, mode = Mode.SYNCED, silent = 0L, replay = true)).grabs())
+    }
+
+    @Test
+    fun aTvThatHoldsOurStreamIsGivenBackWhenTheReplayBegins() {
+        val m = settled()
+        val a = m.decide(inputs(60_000L, silent = 0L, tv = Tv.PLAYING, replay = true))
+        assertEquals(1, a.releases().size)
+        assertEquals("the living room is replayed on HDMI", a.releases()[0].why)
+        assertEquals(0, a.grabs())
+    }
+
+    @Test
+    fun lyricsStaysLyricsThroughASilenceWhileTheRoomIsReplayed() {
+        val m = settled()
+        assertTrue(m.decide(inputs(22 * minute, mode = Mode.LYRICS, silent = 11 * minute, replay = true)).modes().isEmpty())
+        // the replay ended (the Spotify app is heard directly again): the reset of the silence is back
+        assertEquals(Mode.SYNCED, m.decide(inputs(23 * minute, mode = Mode.LYRICS, silent = 12 * minute)).modes().single().mode)
     }
 
     @Test

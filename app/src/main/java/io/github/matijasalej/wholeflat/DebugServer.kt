@@ -269,6 +269,7 @@ object DebugServer {
                 sendJson(out, 200, JSONObject().put("ok", AppState.tv != null), head)
             }
             "/synced" -> sendJson(out, 200, AppState.synced?.statusJson() ?: JSONObject().put("state", "not running"), head)
+            "/living/replay" -> sendJson(out, 200, AppState.livingReplay?.statusJson() ?: JSONObject().put("state", "not running"), head)
             "/tv/dlna" -> sendJson(out, 200, AppState.tvRenderer?.statusJson() ?: JSONObject().put("state", "not running"), head)
             "/tv/last-sessions" -> sendJson(out, 200, AppState.tvRenderer?.lastSessionsJson() ?: JSONArray(), head)
             "/tv/journal" -> sendJson(out, 200, AppState.tvJournal?.toJson() ?: JSONArray(), head)
@@ -487,7 +488,7 @@ object DebugServer {
         sb.append("<table>")
         renderRows(sb, status, 0)
         sb.append("</table><p>")
-        for (link in listOf("/status.json", "/settings", "/kitchen", "/kitchen/last-sessions", "/capture", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/capture/restart", "/tv/run", "/synced", "/tv/dlna", "/tv/last-sessions", "/tv/journal", "/tv/preview.jpg")) {
+        for (link in listOf("/status.json", "/settings", "/kitchen", "/kitchen/last-sessions", "/capture", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/capture/restart", "/tv/run", "/synced", "/tv/dlna", "/tv/last-sessions", "/tv/journal", "/tv/preview.jpg", "/living/replay")) {
             sb.append("<a href=\"").append(link).append("\">").append(link).append("</a>")
         }
         sb.append("</p><h2 style=\"font-size:15px\">Log (last 120 lines)</h2><pre>")

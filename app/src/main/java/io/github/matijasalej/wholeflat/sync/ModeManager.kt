@@ -58,6 +58,8 @@ object ForegroundPolicy {
  *   display on the phone page, which also has the failed starts forgotten) or the app starts again: the reset after a long silence and
  *   this rule undid each other on every step, hundreds of times a second. A Synced that the user has just asked for is not turned back
  *   by the failures from before it.
+ * - While the living room is the **replay on HDMI** of the muted Spotify app (see [ReplayGate]), the TV's player is not used at all: a TV
+ *   that holds our stream is given back, none is taken, and Lyrics stays Lyrics through a silence.
  */
 class ModeManager(
     /** How long the TV keeps playing silence after the last sound before it is given back (ms): the setting `tv_hold_silence_min`. */
@@ -110,6 +112,11 @@ class ModeManager(
         val heardSound: Boolean = true,
         /** The TV's player is hung (see [StuckTv]): it is not asked for a stream until the user says it is free (a setting on the phone page). */
         val tvStuck: Boolean = false,
+        /**
+         * The living room is the replay of the muted Spotify app on HDMI (see [ReplayGate]): the two rooms are in step without the TV's
+         * player, so it is not taken (one that holds our stream is given back) and Lyrics does not go back to Synced after a silence.
+         */
+        val hdmiReplay: Boolean = false,
     )
 
     sealed class Action {
@@ -190,7 +197,7 @@ class ModeManager(
         if (videoSuppressed && i.foreground != Foreground.VIDEO_APP && i.foreground != Foreground.UNKNOWN) videoSuppressed = false
 
         // 2. the TV is not wanted: release it
-        val wantTv = mode == Mode.SYNCED && i.captureAlive && i.source != "librespot" && i.tvKnown && !videoSuppressed && !i.tvStuck
+        val wantTv = mode == Mode.SYNCED && i.captureAlive && i.source != "librespot" && i.tvKnown && !videoSuppressed && !i.tvStuck && !i.hdmiReplay
         val holding = i.tv == Tv.STARTING || i.tv == Tv.PLAYING
         if (holding && !wantTv && actions.none { it is Action.Release }) {
             val reason = when {
@@ -199,6 +206,7 @@ class ModeManager(
                 !i.captureAlive -> "the capture is gone"
                 videoSuppressed -> "a video app is in front"
                 i.tvStuck -> "the TV's player is stuck"
+                i.hdmiReplay -> "the living room is replayed on HDMI"
                 else -> "no TV"
             }
             actions.add(Action.Release(reason))
@@ -243,9 +251,10 @@ class ModeManager(
             actions.add(Action.SetMode(Mode.LYRICS, "the TV could not be taken ${i.failedGrabs} times in a row"))
         }
 
-        // 6. Lyrics goes back to Synced after a long silence, but not while the TV is given up or its player hung (rule 5 would turn it back at once)
+        // 6. Lyrics goes back to Synced after a long silence, but not while the TV is given up or its player hung (rule 5 would turn it back at once),
+        // nor while the living room is replayed on HDMI (the rooms are in step already, and a start of the TV's player can hang it)
         val givenUp = i.failedGrabs >= giveUpAfter || i.tvStuck
-        if (mode == Mode.LYRICS && i.mode == Mode.LYRICS && i.idleForMs >= resetAfterMs && !givenUp && actions.none { it is Action.SetMode }) {
+        if (mode == Mode.LYRICS && i.mode == Mode.LYRICS && i.idleForMs >= resetAfterMs && !givenUp && !i.hdmiReplay && actions.none { it is Action.SetMode }) {
             actions.add(Action.SetMode(Mode.SYNCED, "more than ${resetAfterMs / 60_000} minutes of silence"))
         }
         actions.filterIsInstance<Action.SetMode>().lastOrNull()?.let { ownSetMode = it.mode }

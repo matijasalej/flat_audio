@@ -23,8 +23,12 @@ object RemoteApi {
         }
         o.put("volume", volume ?: JSONObject.NULL)
         o.put("tv_text", tvText())
-        // the TV's player is hung: the page says what to do, whatever the mode
-        o.put("warning", if (AppState.tvRenderer?.stuck == true) StuckTv.ADVICE else JSONObject.NULL)
+        // the living room cannot hear the muted Spotify app; else the TV's player is hung (it is not used while the room is replayed on HDMI):
+        // the page says what to do, whatever the mode
+        val replay = AppState.livingReplay
+        val warning = replay?.warning()
+            ?: if (AppState.tvRenderer?.stuck == true && replay?.replaying != true) StuckTv.ADVICE else null
+        o.put("warning", warning ?: JSONObject.NULL)
         o.put("kitchen_text", kitchenText())
         o.put("source", AppState.source)
         o.put("version", BuildInfo.versionName)
@@ -33,6 +37,8 @@ object RemoteApi {
 
     private fun tvText(): String {
         val v = Settings.values
+        // the Spotify app stays on the screen, its sound is played by this app in step with the kitchen
+        if (AppState.livingReplay?.replaying == true) return "TV: Spotify app, in step (HDMI)"
         if (v.mode == "lyrics") return "TV: Spotify app"
         val r = AppState.tvRenderer ?: return "TV: not running"
         return when (r.state) {

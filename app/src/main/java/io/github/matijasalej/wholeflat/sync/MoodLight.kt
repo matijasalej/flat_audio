@@ -4,7 +4,7 @@ import org.json.JSONObject
 
 /**
  * The Chill light (display "chill"): the Ambilight of the TV as a lamp of one colour, chosen on the phone page (`light_color`, a mood or a
- * colour of his own; `light_level` dims it), breathing a little. The moods are colours as the page shows them ("#rrggbb"); the TV is given
+ * colour of his own; `light_level` dims it), still or, with `light_pulse`, slowly pulsing. The moods are colours as the page shows them ("#rrggbb"); the TV is given
  * a colour as hue, saturation and brightness, each 0 to 255, in its style `FOLLOW_COLOR` with the algorithm `MANUAL_HUE`.
  *
  * Seen on the TV (23 Oct): hue 85 is green and 170 blue (the hue is the angle scaled to 255); the TV drives each LED with the square of
@@ -37,9 +37,12 @@ object MoodLight {
     const val MIN_LEVEL = 10
     const val MAX_LEVEL = 100
 
-    /** The breathing: how far the brightness swings (of 255) and how fast (the TV's speed, of 255). Slow and small: a lamp, not a show. */
-    const val BREATH_BRIGHTNESS = 30
-    const val BREATH_SPEED = 20
+    /**
+     * The slow pulse: how far the brightness swings (of 255, at most down to black) and how fast (the TV's speed, of 255; the mood lights'
+     * calm drift runs at 20 to 80). Slow and deep enough to be seen: a lamp breathing, not a show.
+     */
+    const val PULSE_BRIGHTNESS = 110
+    const val PULSE_SPEED = 15
 
     /** "#rrggbb" (any case, the "#" may be left out) as "#rrggbb" in small letters; null if it is not a colour. */
     fun parseColor(text: String?): String? {
@@ -73,13 +76,13 @@ object MoodLight {
         )
     }
 
-    /** The body of `POST /6/ambilight/currentconfiguration` that makes the lights [color] at [level] percent, breathing a little. */
-    fun json(color: String, level: Int): String {
+    /** The body of `POST /6/ambilight/currentconfiguration` that makes the lights [color] at [level] percent, still or slowly pulsing ([pulse]). */
+    fun json(color: String, level: Int, pulse: Boolean = false): String {
         val (h, s, b) = hsb(color, level).let { Triple(it[0], it[1], it[2]) }
         val settings = JSONObject()
         settings.put("color", JSONObject().put("hue", h).put("saturation", s).put("brightness", b))
-        settings.put("colorDelta", JSONObject().put("hue", 0).put("saturation", 0).put("brightness", minOf(BREATH_BRIGHTNESS, b)))
-        settings.put("speed", BREATH_SPEED)
+        settings.put("colorDelta", JSONObject().put("hue", 0).put("saturation", 0).put("brightness", if (pulse) minOf(PULSE_BRIGHTNESS, b) else 0))
+        settings.put("speed", if (pulse) PULSE_SPEED else 0)
         val o = JSONObject()
         o.put("styleName", "FOLLOW_COLOR")
         o.put("isExpert", true)

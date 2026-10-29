@@ -54,6 +54,8 @@ class RemoteAssetsTest {
         assertTrue(html.contains("'color='"))
         assertTrue(html.contains("'level='"))
         assertTrue(html.contains("'fine_ms='"))
+        assertTrue(html.contains("'pulse='"))
+        assertTrue(html.contains("Slow pulse"))
         // the volume, the custom hue, the brightness and the kitchen's timing
         assertEquals(4, Regex("""type="range"""").findAll(html).count())
         // no buttons for the mode, no TV extra, no lyrics: they are on the debug page

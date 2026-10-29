@@ -53,6 +53,17 @@ class RemoteActionsTest {
     }
 
     @Test
+    fun thePulseOfTheChillLightIsOnOffOrToggled() {
+        assertEquals(true, parse("pulse" to "on").updates.getBoolean("light_pulse"))
+        assertEquals(true, parse("pulse" to "toggle").updates.getBoolean("light_pulse"))
+        val pulsing = RemoteActions.Current("chill", true, 40, 15, 0, 490, lightPulse = true)
+        assertEquals(false, parse("pulse" to "toggle", current = pulsing).updates.getBoolean("light_pulse"))
+        // the pulse alone does not take the TV
+        assertFalse(parse("pulse" to "on").updates.has("display"))
+        assertEquals(listOf("pulse: fast"), parse("pulse" to "fast").errors)
+    }
+
+    @Test
     fun theFineSyncCanBeSetOutrightByTheSlider() {
         assertEquals(-120, parse("fine_ms" to "-120").updates.getInt("kitchen_offset_ms"))
         assertEquals(75, parse("fine_ms" to "+75").updates.getInt("kitchen_offset_ms"))

@@ -39,6 +39,7 @@ object RemoteApi {
         o.put("kitchen_offset_ms", v.kitchenOffsetMs)
         o.put("light_color", v.lightColor)
         o.put("light_level", v.lightLevel)
+        o.put("light_pulse", v.lightPulse)
         o.put("moods", MoodLight.moodsJson())
         return o
     }
@@ -91,7 +92,7 @@ object RemoteApi {
         } catch (t: Throwable) {
             -1
         }
-        val current = RemoteActions.Current(v.display, v.kitchenEnabled, volume, v.kitchenOffsetMs, v.lyricsOffsetMs, v.tvExtraMs)
+        val current = RemoteActions.Current(v.display, v.kitchenEnabled, volume, v.kitchenOffsetMs, v.lyricsOffsetMs, v.tvExtraMs, v.lightPulse)
         val r = RemoteActions.parse(query, current)
         // the switch of Synced on HDMI is no setting: it is the Spotify app's mute, set through the box's own adb
         query["replay"]?.trim()?.lowercase()?.let { want ->

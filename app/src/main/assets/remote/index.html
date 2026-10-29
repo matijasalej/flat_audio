@@ -87,6 +87,8 @@
   .label { font-size: 14px; color: var(--muted); margin: 4px 4px 0; }
   #hue::-webkit-slider-runnable-track { background: linear-gradient(90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00); }
   #hue::-moz-range-track { background: linear-gradient(90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00); }
+  .switch.pulse { margin: 18px 0 0; }
+  .switch.pulse .name { font-size: 18px; }
   .ends { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); margin: -6px 4px 0; }
 </style>
 </head>
@@ -126,6 +128,11 @@
     <div class="label">Your own colour</div>
     <input type="range" id="level" min="10" max="100" step="5" value="80" aria-label="Brightness">
     <div class="ends"><span>Dim</span><span>Bright</span></div>
+    <div class="switch pulse">
+      <span class="name">Slow pulse</span>
+      <button class="toggle" id="pulse" role="switch" aria-checked="false" aria-label="Slow pulse"></button>
+      <span class="what">The colour fades slowly brighter and dimmer</span>
+    </div>
   </section>
 
   <section class="volume" aria-label="Kitchen volume">
@@ -206,6 +213,7 @@
     chill.hidden = lyrics || s.display !== 'chill';
     renderMoods(s);
     if (!touching.level && typeof s.light_level === 'number') level.value = s.light_level;
+    $('#pulse').setAttribute('aria-checked', String(s.light_pulse === true));
     if (!touching.fine && typeof s.kitchen_offset_ms === 'number') { fine.value = s.kitchen_offset_ms; fineNow.textContent = fineText(s.kitchen_offset_ms); }
     var l = s.lights;
     lightsBox.hidden = !(l && l.on);
@@ -295,6 +303,11 @@
       sendLight(arg()).then(function () { touching[name] = false; });
     });
   }
+  $('#pulse').addEventListener('click', function () {
+    var on = this.getAttribute('aria-checked') !== 'true';
+    this.setAttribute('aria-checked', String(on));
+    sendLight('pulse=' + (on ? 'on' : 'off'));
+  });
   throttled(hue, 'hue', function () { return 'color=' + encodeURIComponent(hex(Number(hue.value))); });
   throttled(level, 'level', function () { return 'level=' + level.value; });
 

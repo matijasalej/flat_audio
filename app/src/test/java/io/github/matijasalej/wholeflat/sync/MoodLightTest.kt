@@ -54,7 +54,7 @@ class MoodLightTest {
     }
 
     @Test
-    fun theBodyIsTheExpertFollowColourBreathingALittle() {
+    fun theBodyIsTheExpertFollowColourStillOrPulsing() {
         val o = JSONObject(MoodLight.json("#0000ff", 50))
         assertEquals("FOLLOW_COLOR", o.getString("styleName"))
         assertEquals(true, o.getBoolean("isExpert"))
@@ -65,10 +65,15 @@ class MoodLightTest {
         assertEquals(128, color.getInt("brightness"))
         val delta = settings.getJSONObject("colorDelta")
         assertEquals(0, delta.getInt("hue"))
-        assertEquals(MoodLight.BREATH_BRIGHTNESS, delta.getInt("brightness"))
-        assertEquals(MoodLight.BREATH_SPEED, settings.getInt("speed"))
-        // a dim light does not breathe below black
-        assertEquals(26, JSONObject(MoodLight.json("#ff0000", 10)).getJSONObject("colorSettings").getJSONObject("colorDelta").getInt("brightness"))
+        // still by default
+        assertEquals(0, delta.getInt("brightness"))
+        assertEquals(0, settings.getInt("speed"))
+        val pulsing = JSONObject(MoodLight.json("#0000ff", 100, pulse = true)).getJSONObject("colorSettings")
+        assertEquals(MoodLight.PULSE_BRIGHTNESS, pulsing.getJSONObject("colorDelta").getInt("brightness"))
+        assertEquals(MoodLight.PULSE_SPEED, pulsing.getInt("speed"))
+        assertEquals(255, pulsing.getJSONObject("color").getInt("brightness"))
+        // a dim light does not pulse below black
+        assertEquals(26, JSONObject(MoodLight.json("#ff0000", 10, pulse = true)).getJSONObject("colorSettings").getJSONObject("colorDelta").getInt("brightness"))
         assertEquals("FOLLOW_COLOR/MANUAL_HUE", AmbilightControl.styleName(MoodLight.json("#ff9a40", 80)))
     }
 }

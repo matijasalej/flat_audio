@@ -81,7 +81,7 @@ class SyncedController(
     var livingReplay: LivingReplay? = null
 
     /**
-     * The configuration of the Ambilight now, by the display: Chill, the colour of `light_color` at `light_level` ([MoodLight]); Party and
+     * The configuration of the Ambilight now, by the display: Chill, the colour of `light_color` at `light_level`, still or pulsing (`light_pulse`; [MoodLight]); Party and
      * Karaoke, the mood lights' look for what is heard now (`light.LightEngine`), and until they have one, with the screen off the
      * `ambilight_dark_*` settings (expert PARTY by default: Lumina is dark without a picture); else null, which is the style of
      * `ambilight_style` and `ambilight_menu` (Lumina: it follows the picture and the beat).
@@ -89,7 +89,7 @@ class SyncedController(
     private fun ambilightConfig(): String? {
         val v = Settings.values
         val display = Display.of(v.display) ?: Display.DEFAULT
-        if (display == Display.CHILL) return MoodLight.json(v.lightColor, v.lightLevel)
+        if (display == Display.CHILL) return MoodLight.json(v.lightColor, v.lightLevel, v.lightPulse)
         if (display.vibe) {
             try {
                 AppState.lights?.tvConfig()?.let { return it }
@@ -589,7 +589,7 @@ class SyncedController(
         /** The settings that make the controller look again at once. */
         private val WATCHED = setOf(
             "mode", "display", "tv_format", "tv_latency_ms", "tv_extra_ms", "kitchen_offset_ms", "kitchen_target_ms", "kitchen_floor_ms",
-            "ambilight_style", "ambilight_menu", "ambilight_dark_style", "ambilight_dark_algorithm", "ambilight_dark_menu", "light_color", "light_level",
+            "ambilight_style", "ambilight_menu", "ambilight_dark_style", "ambilight_dark_algorithm", "ambilight_dark_menu", "light_color", "light_level", "light_pulse",
             "tv_reanchor_min", "tv_audio_only", "tv_quiet", "tv_pause_ms",
         )
     }

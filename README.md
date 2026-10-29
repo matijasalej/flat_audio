@@ -221,7 +221,7 @@ The capture still hears the muted app: AudioFlinger gives a track whose app may 
 | Display | Screen | Ambilight |
 |---|---|---|
 | Listening | off | off |
-| Chill | off | one colour, breathing a little: a mood (Cozy, Candle, Sunset, Rose, Lavender, Ocean, Forest, White) or your own hue, and a brightness (`light_color`, `light_level`) |
+| Chill | off | one colour: a mood (Cozy, Candle, Sunset, Rose, Lavender, Ocean, Forest, White) or your own hue, a brightness, and still or a slow pulse (`light_color`, `light_level`, `light_pulse`) |
 | Party | off | the mood lights (below): the song's colours, the TV's beat modes, Party at a chorus |
 | Karaoke | on (the Spotify app and its lyrics) | the mood lights, as in Party |
 

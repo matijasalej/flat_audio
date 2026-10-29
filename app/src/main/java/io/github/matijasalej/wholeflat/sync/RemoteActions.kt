@@ -20,6 +20,7 @@ object RemoteActions {
         val kitchenOffsetMs: Int,
         val lyricsOffsetMs: Int,
         val tvExtraMs: Int,
+        val lightPulse: Boolean = false,
     )
 
     /** How far one press of the fine sync moves the kitchen against the TV (ms). */
@@ -79,6 +80,7 @@ object RemoteActions {
                     val v = value.toIntOrNull()
                     if (v == null) errors.add("fine_ms: $value") else updates.put("kitchen_offset_ms", v)
                 }
+                "pulse" -> flag(value, now.lightPulse)?.let { updates.put("light_pulse", it) } ?: errors.add("pulse: $value")
                 "lyrics" -> {
                     val v = steps(value, now.lyricsOffsetMs, LYRICS_STEP_MS)
                     if (v == null) errors.add("lyrics: $value") else updates.put("lyrics_offset_ms", v)

@@ -116,6 +116,8 @@ class SettingsValues(
     /** The colour of the Chill light ("#rrggbb", see [MoodLight]) and how bright it is, in percent (10 to 100). */
     val lightColor: String = MoodLight.DEFAULT_COLOR,
     val lightLevel: Int = MoodLight.DEFAULT_LEVEL,
+    /** The Chill light pulses slowly (else it is still). */
+    val lightPulse: Boolean = false,
 )
 
 class SettingsModel {
@@ -170,6 +172,7 @@ class SettingsModel {
     var livingReplayTvMs = DEFAULT_LIVING_REPLAY_TV_MS
     var lightColor = MoodLight.DEFAULT_COLOR
     var lightLevel = MoodLight.DEFAULT_LEVEL
+    var lightPulse = false
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
@@ -178,7 +181,7 @@ class SettingsModel {
         captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPrerollMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
         backgroundCleanup, ambilightStyle, ambilightMenu, tvPauseMs, tvQuiet, tvAudioOnly, tvMac, tvPositionProbe,
         ambilightDarkStyle, ambilightDarkAlgorithm, ambilightDarkMenu, tvAutoReanchor, tvReanchorRunning, tvScroll, tvHoldSilenceMin, tvReadyMs, tvClearItem, tvBootWaitS, tvCloseWaitS,
-        livingReplayMs, livingReplayTvMs, lightColor, lightLevel,
+        livingReplayMs, livingReplayTvMs, lightColor, lightLevel, lightPulse,
     )
 
     fun toJson(): JSONObject {
@@ -234,6 +237,7 @@ class SettingsModel {
         o.put(LIVING_REPLAY_TV_MS, livingReplayTvMs)
         o.put(LIGHT_COLOR, lightColor)
         o.put(LIGHT_LEVEL, lightLevel)
+        o.put(LIGHT_PULSE, lightPulse)
         return o
     }
 
@@ -414,6 +418,10 @@ class SettingsModel {
             val v = number(json.get(LIGHT_LEVEL))?.coerceIn(MoodLight.MIN_LEVEL, MoodLight.MAX_LEVEL)
             if (v != null && v != lightLevel) { lightLevel = v; changed.add(LIGHT_LEVEL) }
         }
+        if (json.has(LIGHT_PULSE)) {
+            val v = bool(json.get(LIGHT_PULSE))
+            if (v != null && v != lightPulse) { lightPulse = v; changed.add(LIGHT_PULSE) }
+        }
         if (json.has(TV_CLEAR_ITEM)) {
             val v = bool(json.get(TV_CLEAR_ITEM))
             if (v != null && v != tvClearItem) { tvClearItem = v; changed.add(TV_CLEAR_ITEM) }
@@ -541,6 +549,7 @@ class SettingsModel {
         const val LIVING_REPLAY_TV_MS = "living_replay_tv_ms"
         const val LIGHT_COLOR = "light_color"
         const val LIGHT_LEVEL = "light_level"
+        const val LIGHT_PULSE = "light_pulse"
 
         /**
          * The replay sounds 0.8 s after the capture: the TV's 200 ms, the track's and the HAL's 250 ms and the capture's 100 ms fit with 250 ms

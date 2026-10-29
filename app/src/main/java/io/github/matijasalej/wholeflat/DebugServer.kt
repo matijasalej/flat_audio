@@ -210,6 +210,12 @@ object DebugServer {
             sendText(out, 405, "method not allowed\n", head)
             return
         }
+        if (req.path == "/lights" || req.path.startsWith("/lights/")) {
+            // the mood lights answer their own routes (see LightEngine.handle)
+            val r = AppState.lights?.handle(req.path, req.query)
+            if (r == null) sendJson(out, 503, JSONObject().put("error", "the lights are not running"), head) else sendBytes(out, r.status, r.type, r.body, head)
+            return
+        }
         when (req.path) {
             "/" -> sendBytes(out, 200, "text/html; charset=utf-8", indexHtml().toByteArray(Charsets.UTF_8), head)
             "/status.json" -> sendJson(out, 200, AppState.toJson(), head)
@@ -488,7 +494,7 @@ object DebugServer {
         sb.append("<table>")
         renderRows(sb, status, 0)
         sb.append("</table><p>")
-        for (link in listOf("/status.json", "/settings", "/kitchen", "/kitchen/last-sessions", "/capture", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/capture/restart", "/tv/run", "/synced", "/tv/dlna", "/tv/last-sessions", "/tv/journal", "/tv/preview.jpg", "/living/replay")) {
+        for (link in listOf("/status.json", "/settings", "/kitchen", "/kitchen/last-sessions", "/capture", "/tv", "/log", "/sys", "/calibrate/start?seconds=20", "/calibrate/stop", "/kitchen/rejoin", "/capture/restart", "/tv/run", "/synced", "/tv/dlna", "/tv/last-sessions", "/tv/journal", "/tv/preview.jpg", "/living/replay", "/lights", "/lights/history")) {
             sb.append("<a href=\"").append(link).append("\">").append(link).append("</a>")
         }
         sb.append("</p><h2 style=\"font-size:15px\">Log (last 120 lines)</h2><pre>")
@@ -510,7 +516,7 @@ object DebugServer {
             sb.append("</span>")
         }
         sb.append("<div class=\"tune\"><b>TV display</b>")
-        for ((key, label) in listOf("listen" to "Listening", "ambilight" to "Ambilight", "screen" to "Screen + Ambilight")) {
+        for ((key, label) in io.github.matijasalej.wholeflat.sync.Display.values().map { it.key to it.label }) {
             sb.append("<button").append(if (t.optString("display") == key) " class=\"on\"" else "").append(" onclick=\"t('display=$key')\">").append(label).append("</button>")
         }
         sb.append("<br>")

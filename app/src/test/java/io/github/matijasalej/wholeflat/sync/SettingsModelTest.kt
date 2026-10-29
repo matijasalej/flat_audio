@@ -150,7 +150,7 @@ class SettingsModelTest {
                 "ambilight_style", "ambilight_menu", "tv_pause_ms", "tv_quiet", "tv_audio_only", "tv_mac", "tv_position_probe",
                 "ambilight_dark_style", "ambilight_dark_algorithm", "ambilight_dark_menu", "tv_auto_reanchor", "tv_reanchor_running", "tv_scroll",
                 "tv_hold_silence_min", "tv_ready_ms", "tv_clear_item", "tv_boot_wait_s", "tv_close_wait_s",
-                "living_replay_ms", "living_replay_tv_ms",
+                "living_replay_ms", "living_replay_tv_ms", "light_color", "light_level",
             ),
             keys,
         )
@@ -265,17 +265,35 @@ class SettingsModelTest {
     }
 
     @Test
-    fun theDisplayIsOneOfThreeAndListeningIsTheDefault() {
+    fun theDisplayIsOneOfFourAndListeningIsTheDefaultAndTheOlderKeysAreReadAsTheNewOnes() {
         val m = SettingsModel()
         assertEquals("listen", m.values().display)
-        assertEquals(setOf("display"), m.applyJson(JSONObject("""{"display": " Screen "}""")))
-        assertEquals("screen", m.values().display)
+        assertEquals(setOf("display"), m.applyJson(JSONObject("""{"display": " Karaoke "}""")))
+        assertEquals("karaoke", m.values().display)
+        assertEquals(setOf("display"), m.applyJson(JSONObject("""{"display": "chill"}""")))
+        // a setting stored before the four: "ambilight" is Party, "screen" Karaoke
         assertEquals(setOf("display"), m.applyJson(JSONObject("""{"display": "ambilight"}""")))
-        assertTrue(m.applyJson(JSONObject("""{"display": "party"}""")).isEmpty())
+        assertEquals("party", m.display)
+        assertEquals(setOf("display"), m.applyJson(JSONObject("""{"display": "screen"}""")))
+        assertEquals("karaoke", m.display)
+        assertTrue(m.applyJson(JSONObject("""{"display": "disco"}""")).isEmpty())
         assertTrue(m.applyJson(JSONObject("""{"display": 3}""")).isEmpty())
-        assertEquals("ambilight", m.display)
+        assertEquals("karaoke", m.display)
         // the settings that the display replaced are not keys any more
         assertTrue(m.applyJson(JSONObject("""{"karaoke": "on", "ambilight_synced": "off"}""")).isEmpty())
+    }
+
+    @Test
+    fun theChillLightIsAColourAndABrightnessWithLimits() {
+        val m = SettingsModel()
+        assertEquals(MoodLight.DEFAULT_COLOR, m.values().lightColor)
+        assertEquals(MoodLight.DEFAULT_LEVEL, m.values().lightLevel)
+        assertEquals(setOf("light_color", "light_level"), m.applyJson(JSONObject("""{"light_color": "2F80FF", "light_level": 3}""")))
+        assertEquals("#2f80ff", m.values().lightColor)
+        assertEquals(MoodLight.MIN_LEVEL, m.values().lightLevel)
+        assertTrue(m.applyJson(JSONObject("""{"light_color": "blue"}""")).isEmpty())
+        assertEquals(setOf("light_level"), m.applyJson(JSONObject("""{"light_level": 500}""")))
+        assertEquals(MoodLight.MAX_LEVEL, m.values().lightLevel)
     }
 
     @Test

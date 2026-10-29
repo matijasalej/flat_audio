@@ -20,27 +20,29 @@ class TvPresentationTest {
     }
 
     @Test
-    fun ambilightIsTheScreenOffAndTheLightsOn() {
-        val w = synced(Display.AMBILIGHT)
-        assertEquals(Screen.OFF, w.screen)
-        assertTrue(w.lights)
+    fun partyAndChillAreTheScreenOffAndTheLightsOn() {
+        for (d in listOf(Display.PARTY, Display.CHILL)) {
+            val w = synced(d)
+            assertEquals(Screen.OFF, w.screen)
+            assertTrue(w.lights)
+        }
     }
 
     @Test
-    fun theScreenDisplayIsTheLyricsVideoAndTheLightsOn() {
-        val w = synced(Display.SCREEN)
+    fun karaokeIsTheScreenAndTheLightsOn() {
+        val w = synced(Display.KARAOKE)
         assertEquals(Screen.LEAVE, w.screen)
         assertTrue(w.lights)
         // a screen that we switched off is switched on again for the lyrics
-        assertEquals(Screen.ON, synced(Display.SCREEN, offByUs = true).screen)
+        assertEquals(Screen.ON, synced(Display.KARAOKE, offByUs = true).screen)
     }
 
     @Test
     fun changingTheDisplayOnlyChangesTheScreenAndTheLights() {
         // from Screen to Listening: off and no lights; from Listening to Screen: on again (we had switched it off)
         assertEquals(Screen.OFF, synced(Display.LISTEN).screen)
-        assertEquals(Screen.ON, synced(Display.SCREEN, offByUs = true).screen)
-        assertTrue(synced(Display.SCREEN, offByUs = true).lights)
+        assertEquals(Screen.ON, synced(Display.KARAOKE, offByUs = true).screen)
+        assertTrue(synced(Display.KARAOKE, offByUs = true).lights)
         assertFalse(synced(Display.LISTEN, offByUs = false).lights)
     }
 
@@ -52,18 +54,18 @@ class TvPresentationTest {
         assertFalse(w.lights)
         assertFalse(TvPresentation.want(Mode.LYRICS, false, Display.LISTEN, "capture", false).lights)
         // the user picked the lights: on while the music plays
-        assertTrue(TvPresentation.want(Mode.LYRICS, false, Display.AMBILIGHT, "capture", false).lights)
-        assertTrue(TvPresentation.want(Mode.LYRICS, false, Display.SCREEN, "capture", false).lights)
+        assertTrue(TvPresentation.want(Mode.LYRICS, false, Display.PARTY, "capture", false).lights)
+        assertTrue(TvPresentation.want(Mode.LYRICS, false, Display.KARAOKE, "capture", false).lights)
         // nothing plays: no lights (what they were before is put back)
-        assertFalse(TvPresentation.want(Mode.LYRICS, false, Display.AMBILIGHT, "idle", false).lights)
+        assertFalse(TvPresentation.want(Mode.LYRICS, false, Display.PARTY, "idle", false).lights)
         // Whole Flat plays: Spotify's own playback has no lyrics on the TV
-        assertFalse(TvPresentation.want(Mode.LYRICS, false, Display.AMBILIGHT, "librespot", false).lights)
+        assertFalse(TvPresentation.want(Mode.LYRICS, false, Display.PARTY, "librespot", false).lights)
         assertEquals(Screen.LEAVE, TvPresentation.want(Mode.LYRICS, false, Display.LISTEN, "capture", false).screen)
     }
 
     @Test
     fun inSyncedModeBeforeTheTvPlaysNothingIsDone() {
-        val w = synced(Display.SCREEN, playing = false)
+        val w = synced(Display.KARAOKE, playing = false)
         assertEquals(Screen.LEAVE, w.screen)
         assertFalse(w.lights)
         // and a screen we had switched off comes back when the TV stops playing our stream

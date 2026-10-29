@@ -8,29 +8,38 @@ import org.junit.Test
 
 class DisplayTest {
     @Test
-    fun theThreeDisplaysAndWhatTheyAre() {
-        assertEquals(listOf("listen", "ambilight", "screen"), Display.values().map { it.key })
+    fun theFourDisplaysAndWhatTheyAre() {
+        assertEquals(listOf("listen", "chill", "party", "karaoke"), Display.values().map { it.key })
         assertEquals(Display.LISTEN, Display.DEFAULT)
         assertFalse(Display.LISTEN.screenOn)
         assertFalse(Display.LISTEN.lights)
-        assertFalse(Display.AMBILIGHT.screenOn)
-        assertTrue(Display.AMBILIGHT.lights)
-        assertTrue(Display.SCREEN.screenOn)
-        assertTrue(Display.SCREEN.lights)
+        assertFalse(Display.LISTEN.vibe)
+        assertFalse(Display.CHILL.screenOn)
+        assertTrue(Display.CHILL.lights)
+        assertFalse(Display.CHILL.vibe)
+        assertFalse(Display.PARTY.screenOn)
+        assertTrue(Display.PARTY.lights)
+        assertTrue(Display.PARTY.vibe)
+        assertTrue(Display.KARAOKE.screenOn)
+        assertTrue(Display.KARAOKE.lights)
+        assertTrue(Display.KARAOKE.vibe)
     }
 
     @Test
-    fun theButtonOfTheTvAppCyclesThroughThem() {
-        assertEquals(Display.AMBILIGHT, Display.LISTEN.next())
-        assertEquals(Display.SCREEN, Display.AMBILIGHT.next())
-        assertEquals(Display.LISTEN, Display.SCREEN.next())
+    fun theButtonOfTheTvAppGoesRound() {
+        assertEquals(Display.CHILL, Display.LISTEN.next())
+        assertEquals(Display.PARTY, Display.CHILL.next())
+        assertEquals(Display.KARAOKE, Display.PARTY.next())
+        assertEquals(Display.LISTEN, Display.KARAOKE.next())
     }
 
     @Test
-    fun aKeyIsFoundInAnyCaseAndOtherTextIsNone() {
-        assertEquals(Display.SCREEN, Display.of(" Screen "))
-        assertEquals(Display.AMBILIGHT, Display.of("AMBILIGHT"))
-        assertNull(Display.of("party"))
+    fun theSettingIsReadInAnyCaseAndTheOlderKeysAreTheNewDisplays() {
+        assertEquals(Display.KARAOKE, Display.of(" Karaoke "))
+        assertEquals(Display.PARTY, Display.of("PARTY"))
+        assertEquals(Display.PARTY, Display.of("ambilight"))
+        assertEquals(Display.KARAOKE, Display.of(" Screen "))
+        assertNull(Display.of("disco"))
         assertNull(Display.of(""))
         assertNull(Display.of(null))
     }

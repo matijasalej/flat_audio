@@ -96,9 +96,11 @@ object AppState {
     @Volatile var capture: CaptureSource? = null
     @Volatile var tvRenderer: TvRenderer? = null
     @Volatile var synced: SyncedController? = null
+    @Volatile var lights: io.github.matijasalej.wholeflat.light.LightEngine? = null
 
     /** The living room as the capture replayed on HDMI while the Spotify app is muted (Synced on HDMI, `/living/replay`). */
     @Volatile var livingReplay: LivingReplay? = null
+    @Volatile var adbSelf: AdbSelf? = null
 
     /** Every switch of the TV to its player, every end of such a stream, the TV's power and the box's sleeps, on disk (`/tv/journal`). */
     @Volatile var tvJournal: io.github.matijasalej.wholeflat.sync.TvJournal? = null

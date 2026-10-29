@@ -13,25 +13,53 @@ class RemoteActionsTest {
     private fun parse(vararg pairs: Pair<String, String>, current: RemoteActions.Current = now) = RemoteActions.parse(mapOf(*pairs), current)
 
     @Test
-    fun theDisplayIsOneOfThreeInAnyCaseAndChoosingItPutsTheAppBackInSyncedMode() {
-        val r = parse("display" to "Screen")
-        assertEquals("screen", r.updates.getString("display"))
+    fun theDisplayIsOneOfFourInAnyCaseAndChoosingItPutsTheAppBackInSyncedMode() {
+        val r = parse("display" to "Karaoke")
+        assertEquals("karaoke", r.updates.getString("display"))
         assertEquals("synced", r.updates.getString("mode"))
-        assertEquals("ambilight", parse("display" to " ambilight ").updates.getString("display"))
+        assertEquals("party", parse("display" to " party ").updates.getString("display"))
+        assertEquals("chill", parse("display" to "CHILL").updates.getString("display"))
         assertEquals("listen", parse("display" to "LISTEN").updates.getString("display"))
-        val bad = parse("display" to "party")
+        // the older keys are the new displays
+        assertEquals("party", parse("display" to "ambilight").updates.getString("display"))
+        assertEquals("karaoke", parse("display" to "screen").updates.getString("display"))
+        val bad = parse("display" to "disco")
         assertFalse(bad.updates.has("display"))
         assertFalse(bad.updates.has("mode"))
-        assertEquals(listOf("display: party"), bad.errors)
+        assertEquals(listOf("display: disco"), bad.errors)
     }
 
     @Test
-    fun nextCyclesThroughTheThreeLikeTheButtonOfTheTvApp() {
-        assertEquals("ambilight", parse("display" to "next").updates.getString("display"))
-        val fromAmbilight = now.let { RemoteActions.Current("ambilight", it.kitchenEnabled, it.kitchenVolume, it.kitchenOffsetMs, it.lyricsOffsetMs, it.tvExtraMs) }
-        assertEquals("screen", parse("display" to "next", current = fromAmbilight).updates.getString("display"))
-        val fromScreen = RemoteActions.Current("screen", true, 40, 15, 0, 490)
-        assertEquals("listen", parse("display" to "next", current = fromScreen).updates.getString("display"))
+    fun nextCyclesThroughTheFourLikeTheButtonOfTheTvApp() {
+        fun from(d: String) = RemoteActions.Current(d, true, 40, 15, 0, 490)
+        assertEquals("chill", parse("display" to "next").updates.getString("display"))
+        assertEquals("party", parse("display" to "next", current = from("chill")).updates.getString("display"))
+        assertEquals("karaoke", parse("display" to "next", current = from("party")).updates.getString("display"))
+        assertEquals("listen", parse("display" to "next", current = from("karaoke")).updates.getString("display"))
+    }
+
+    @Test
+    fun aColourIsTheChillLightAndTheLevelItsBrightness() {
+        val r = parse("color" to "#FF9A40")
+        assertEquals("#ff9a40", r.updates.getString("light_color"))
+        assertEquals("chill", r.updates.getString("display"))
+        assertEquals("synced", r.updates.getString("mode"))
+        assertEquals(listOf("color: red"), parse("color" to "red").errors)
+        assertEquals(60, parse("level" to "60").updates.getInt("light_level"))
+        assertEquals(MoodLight.MIN_LEVEL, parse("level" to "2").updates.getInt("light_level"))
+        // the brightness alone does not take the TV
+        assertFalse(parse("level" to "60").updates.has("display"))
+        assertEquals(listOf("level: lots"), parse("level" to "lots").errors)
+    }
+
+    @Test
+    fun theFineSyncCanBeSetOutrightByTheSlider() {
+        assertEquals(-120, parse("fine_ms" to "-120").updates.getInt("kitchen_offset_ms"))
+        assertEquals(75, parse("fine_ms" to "+75").updates.getInt("kitchen_offset_ms"))
+        assertEquals(0, parse("fine_ms" to "0").updates.getInt("kitchen_offset_ms"))
+        assertEquals(listOf("fine_ms: soon"), parse("fine_ms" to "soon").errors)
+        // "fine" with a sign is a step from where it is (15)
+        assertEquals(-105, parse("fine" to "-120").updates.getInt("kitchen_offset_ms"))
     }
 
     @Test
@@ -83,7 +111,7 @@ class RemoteActionsTest {
 
     @Test
     fun severalPressesInOneRequestAreAllTakenAndUnknownParametersAreIgnored() {
-        val r = parse("display" to "screen", "fine" to "+", "t" to "123456", "volume" to "+", "mode" to "lyrics", "karaoke" to "on")
+        val r = parse("display" to "karaoke", "fine" to "+", "t" to "123456", "volume" to "+", "mode" to "lyrics", "replay" to "on")
         // the page's own parameters, and keys the page does not have any more (the mode: it is Synced, whatever the display), are not taken
         assertEquals(setOf("display", "mode", "kitchen_offset_ms", "kitchen_volume"), r.updates.keys().asSequence().toSet())
         assertEquals("synced", r.updates.getString("mode"))

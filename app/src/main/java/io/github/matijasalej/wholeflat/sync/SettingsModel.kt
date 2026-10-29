@@ -63,7 +63,7 @@ class SettingsValues(
     val tvVideo: String,
     /** Moves the lyrics earlier (positive) or later (negative) against the sound, for what the media session's clock does not tell (ms). */
     val lyricsOffsetMs: Int,
-    /** What the TV shows in Synced mode: "listen" (screen off, lights off), "ambilight" (screen off, lights on) or "screen" (the lyrics video, lights on); see [Display]. */
+    /** What the TV shows: "listen" (screen off, lights off), "chill" (screen off, one colour), "party" (screen off, the mood lights) or "karaoke" (screen on, the mood lights); see [Display]. */
     val display: String,
     /** Whether the apps in the background are asked to give up their processes at each grab of the TV and every ten minutes while the music plays (see BackgroundCleaner). */
     val backgroundCleanup: Boolean,
@@ -83,7 +83,7 @@ class SettingsValues(
     val tvMac: String,
     /** Whether the TV's position (GetPositionInfo) is read every 5 to 10 s and logged, to see whether its player pauses. */
     val tvPositionProbe: Boolean,
-    /** The Ambilight while the screen is off (display "ambilight"): the Lumina style is dark then, so this is its own: a style, and an expert algorithm (empty: the plain form with the menu setting, if any). */
+    /** The Ambilight while the screen is off and the mood lights have no look yet (display "party"): the Lumina style is dark then, so this is its own: a style, and an expert algorithm (empty: the plain form with the menu setting, if any). */
     val ambilightDarkStyle: String,
     val ambilightDarkAlgorithm: String,
     val ambilightDarkMenu: String,
@@ -113,6 +113,9 @@ class SettingsValues(
     val livingReplayMs: Int,
     /** How long the TV takes from the box's HDMI output to the sound in the room (ms): the replay is written that much earlier. Calibrated with the clicks. */
     val livingReplayTvMs: Int,
+    /** The colour of the Chill light ("#rrggbb", see [MoodLight]) and how bright it is, in percent (10 to 100). */
+    val lightColor: String = MoodLight.DEFAULT_COLOR,
+    val lightLevel: Int = MoodLight.DEFAULT_LEVEL,
 )
 
 class SettingsModel {
@@ -165,6 +168,8 @@ class SettingsModel {
     var tvCloseWaitS = DEFAULT_TV_CLOSE_WAIT_S
     var livingReplayMs = DEFAULT_LIVING_REPLAY_MS
     var livingReplayTvMs = DEFAULT_LIVING_REPLAY_TV_MS
+    var lightColor = MoodLight.DEFAULT_COLOR
+    var lightLevel = MoodLight.DEFAULT_LEVEL
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
@@ -173,7 +178,7 @@ class SettingsModel {
         captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPrerollMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
         backgroundCleanup, ambilightStyle, ambilightMenu, tvPauseMs, tvQuiet, tvAudioOnly, tvMac, tvPositionProbe,
         ambilightDarkStyle, ambilightDarkAlgorithm, ambilightDarkMenu, tvAutoReanchor, tvReanchorRunning, tvScroll, tvHoldSilenceMin, tvReadyMs, tvClearItem, tvBootWaitS, tvCloseWaitS,
-        livingReplayMs, livingReplayTvMs,
+        livingReplayMs, livingReplayTvMs, lightColor, lightLevel,
     )
 
     fun toJson(): JSONObject {
@@ -227,6 +232,8 @@ class SettingsModel {
         o.put(TV_CLOSE_WAIT_S, tvCloseWaitS)
         o.put(LIVING_REPLAY_MS, livingReplayMs)
         o.put(LIVING_REPLAY_TV_MS, livingReplayTvMs)
+        o.put(LIGHT_COLOR, lightColor)
+        o.put(LIGHT_LEVEL, lightLevel)
         return o
     }
 
@@ -355,7 +362,7 @@ class SettingsModel {
             if (v != null && v != lyricsOffsetMs) { lyricsOffsetMs = v; changed.add(LYRICS_OFFSET_MS) }
         }
         if (json.has(DISPLAY)) {
-            // anything but "listen", "ambilight" or "screen" is ignored
+            // anything but a display (or its older key) is ignored
             val v = Display.of(json.get(DISPLAY).toString())?.key
             if (v != null && v != display) { display = v; changed.add(DISPLAY) }
         }
@@ -399,6 +406,13 @@ class SettingsModel {
         if (json.has(LIVING_REPLAY_TV_MS)) {
             val v = number(json.get(LIVING_REPLAY_TV_MS))?.coerceIn(0, MAX_LIVING_REPLAY_TV_MS)
             if (v != null && v != livingReplayTvMs) { livingReplayTvMs = v; changed.add(LIVING_REPLAY_TV_MS) }
+        }
+        // the Chill light: a colour (anything else is ignored) and its brightness
+        val newColor = if (json.has(LIGHT_COLOR)) MoodLight.parseColor(json.get(LIGHT_COLOR).toString()) else null
+        if (newColor != null && newColor != lightColor) { lightColor = newColor; changed.add(LIGHT_COLOR) }
+        if (json.has(LIGHT_LEVEL)) {
+            val v = number(json.get(LIGHT_LEVEL))?.coerceIn(MoodLight.MIN_LEVEL, MoodLight.MAX_LEVEL)
+            if (v != null && v != lightLevel) { lightLevel = v; changed.add(LIGHT_LEVEL) }
         }
         if (json.has(TV_CLEAR_ITEM)) {
             val v = bool(json.get(TV_CLEAR_ITEM))
@@ -525,6 +539,8 @@ class SettingsModel {
         const val TV_CLOSE_WAIT_S = "tv_close_wait_s"
         const val LIVING_REPLAY_MS = "living_replay_ms"
         const val LIVING_REPLAY_TV_MS = "living_replay_tv_ms"
+        const val LIGHT_COLOR = "light_color"
+        const val LIGHT_LEVEL = "light_level"
 
         /**
          * The replay sounds 0.8 s after the capture: the TV's 200 ms, the track's and the HAL's 250 ms and the capture's 100 ms fit with 250 ms

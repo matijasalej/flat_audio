@@ -10,6 +10,7 @@ import io.github.matijasalej.wholeflat.sync.Foreground
 import io.github.matijasalej.wholeflat.sync.ForegroundPolicy
 import io.github.matijasalej.wholeflat.sync.Mode
 import io.github.matijasalej.wholeflat.sync.ModeManager
+import io.github.matijasalej.wholeflat.sync.MoodLight
 import io.github.matijasalej.wholeflat.sync.TvPresentation
 import org.json.JSONObject
 import java.util.concurrent.ScheduledThreadPoolExecutor
@@ -73,13 +74,6 @@ class SyncedController(
     )
 
     /**
-     * A whole Ambilight configuration of another part of the app (the mood lights choose the style of a song), asked first; null: the
-     * display decides (see [ambilightConfig]). The hook is set once, from the service.
-     */
-    @Volatile
-    var configHook: (() -> String?)? = null
-
-    /**
      * The living room as the replay of the muted Spotify app on HDMI (see [LivingReplay]), set once from the service. While it plays, the
      * TV's player is not used and the kitchen is held to the replay's delay, as to the common delay of Synced mode.
      */
@@ -87,19 +81,29 @@ class SyncedController(
     var livingReplay: LivingReplay? = null
 
     /**
-     * The configuration of the Ambilight now: the hook's if it gives one; else, with the screen off (display "ambilight"), the `ambilight_dark_*`
-     * settings (expert PARTY by default: Lumina is dark without a picture); else null, which is the style of `ambilight_style` and
-     * `ambilight_menu` (Lumina: it follows the picture and the beat).
+     * The configuration of the Ambilight now, by the display: Chill, the colour of `light_color` at `light_level` ([MoodLight]); Party and
+     * Karaoke, the mood lights' look for what is heard now (`light.LightEngine`), and until they have one, with the screen off the
+     * `ambilight_dark_*` settings (expert PARTY by default: Lumina is dark without a picture); else null, which is the style of
+     * `ambilight_style` and `ambilight_menu` (Lumina: it follows the picture and the beat).
      */
     private fun ambilightConfig(): String? {
-        try {
-            configHook?.invoke()?.let { return it }
-        } catch (t: Throwable) {
-            AppLog.error(TAG, "the Ambilight hook failed", t)
-        }
         val v = Settings.values
-        if (Display.of(v.display) != Display.AMBILIGHT) return null
+        val display = Display.of(v.display) ?: Display.DEFAULT
+        if (display == Display.CHILL) return MoodLight.json(v.lightColor, v.lightLevel)
+        if (display.vibe) {
+            try {
+                AppState.lights?.tvConfig()?.let { return it }
+            } catch (t: Throwable) {
+                AppLog.error(TAG, "the mood lights failed to give a look", t)
+            }
+        }
+        if (display.screenOn || !display.lights) return null
         return AmbilightControl.configJson(v.ambilightDarkStyle, v.ambilightDarkMenu, v.ambilightDarkAlgorithm)
+    }
+
+    /** The mood lights want another style of the TV (a new song, or their settings changed): put on if the lights are on. */
+    fun restyleAmbilight() {
+        exec.execute { ambilight.restyle() }
     }
 
     @Volatile
@@ -145,7 +149,7 @@ class SyncedController(
     private val settingsListener: (Set<String>) -> Unit = { changed ->
         if (changed.any { it in WATCHED }) {
             if (changed.contains("tv_latency_ms") || changed.contains("tv_format") || changed.any { it.startsWith("kitchen_") }) renderer.settingsChanged()
-            if (changed.any { it.startsWith("ambilight_") } || changed.contains("display")) post { ambilight.restyle() }
+            if (changed.any { it.startsWith("ambilight_") || it.startsWith("light_") } || changed.contains("display")) post { ambilight.restyle() }
             // Synced asked for again (the user's display on the phone page; the manager no longer resets a TV that it gave up): the
             // starts that failed before are not held against it
             if (changed.contains("mode") && Settings.values.mode == Mode.SYNCED.key) renderer.resetFailures("the mode was set to synced")
@@ -585,7 +589,7 @@ class SyncedController(
         /** The settings that make the controller look again at once. */
         private val WATCHED = setOf(
             "mode", "display", "tv_format", "tv_latency_ms", "tv_extra_ms", "kitchen_offset_ms", "kitchen_target_ms", "kitchen_floor_ms",
-            "ambilight_style", "ambilight_menu", "ambilight_dark_style", "ambilight_dark_algorithm", "ambilight_dark_menu",
+            "ambilight_style", "ambilight_menu", "ambilight_dark_style", "ambilight_dark_algorithm", "ambilight_dark_menu", "light_color", "light_level",
             "tv_reanchor_min", "tv_audio_only", "tv_quiet", "tv_pause_ms",
         )
     }

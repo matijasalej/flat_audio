@@ -212,6 +212,55 @@ The capture still hears the muted app: AudioFlinger gives a track whose app may 
 
 `/living/replay` (also `living_replay` in `/status.json`): `state` (`off`, `starting`, `playing`), `why`, `spotify_muted`, `error_ms` (the last block's error, positive early), `ahead_ms` (how long before its sound a block is written: the track's and the HAL's buffers), `spare_ms` (captured audio beyond the cursor), `stretched_blocks`, `jumps`, `missing_ms`, `tracks`, `write_errors`, and the two commands.
 
+## The phone page: the switch, the four displays, the kitchen's timing
+
+**The switch "Synced on HDMI"** mutes the Spotify app (on: the box replays the living room in step with the kitchen) or gives it its sound back (off). The app runs the mute itself through the box's own adb (`AdbSelf`, the library dadb): its adb daemon has to listen on port 5555, which it does after `adb tcpip 5555` from the Mac and until the box restarts. The first tap asks on the TV whether to allow the connection: tap "Always allow from this computer". The switch shows the mute as it is (read every second), so a mute from the Mac shows too; the line under it says what stands in the way (Allow on the TV, the box to be armed again after a power cut).
+
+**The displays** (last tap wins; the button of the TV app goes round them):
+
+| Display | Screen | Ambilight |
+|---|---|---|
+| Listening | off | off |
+| Chill | off | one colour, breathing a little: a mood (Cozy, Candle, Sunset, Rose, Lavender, Ocean, Forest, White) or your own hue, and a brightness (`light_color`, `light_level`) |
+| Party | off | the mood lights (below): the song's colours, the TV's beat modes, Party at a chorus |
+| Karaoke | on (the Spotify app and its lyrics) | the mood lights, as in Party |
+
+The older settings `ambilight` and `screen` are read as Party and Karaoke. While the living room is replayed, the mood lights time their changes by `living_replay_ms`. A colour reaches the TV at most twice a second.
+
+**Kitchen timing** sets `kitchen_offset_ms` (−300 to +300 ms; positive: the kitchen later) when the finger is lifted (`/remote/action?fine_ms=-20`).
+
+## Mood lights: the Ambilight follows each song
+
+The lights listen to the captured music on a thread of their own (about 10 % of one core of the box) and choose, song by song and phrase by phrase, which of the TV's own Ambilight styles it shows:
+
+| The song | Class | What the TV shows |
+| --- | --- | --- |
+| calm, or no clear beat (energy below 0.35 or beat clarity below 0.3) | Mono | the cover's colour (tinted by the mood), held by the TV and drifting slowly around itself |
+| most songs | Duo | the cover's colour drifting further, towards a second colour that suits it, faster for faster songs |
+| energetic with a clear beat (energy 0.7 and clarity 0.5 or more) | Multi | the TV's beat-reactive modes: Party, Rhythm, Scanner, VU meter, Spectrum, Colora, a new one every 32 beats |
+
+- **The class:** a colourful cover lifts Duo to Multi from energy 0.55. A chorus or a drop lifts the class for 32 beats (a Duo song's chorus goes to Party), a breakdown lowers it.
+- **The colours** are the cover's, tinted by the mood: more energy is more saturated and brighter, a happy song turns towards yellow-orange, a sad one towards blue.
+- **The beat:** the TV's modes react to the sound the TV itself plays, so they are on the beat by themselves. The app decides when to change: the phrases are counted on the tempo it finds, a change waits for a phrase boundary, and every change is sent ahead by the delay of the TV's stream (about 2.4 s in Synced mode), so that it lands when the song, the chorus or the phrase is heard and not when it is captured.
+- **Never used:** the strobe, and Lumina (`ENERGY_ADAPTIVE_BRIGHTNESS`), which takes its colours from the picture and is dark when the screen is off.
+- It is the same with the screen off (`ambilight`) and with the lyrics (`screen`). JointSpace gets one call when the look changes, never more than one a second (the TV's server stalls at 10 a second).
+
+What the TV can do was measured on 23.10.2026 with the screen off, from `/6/ambilight/processed`:
+- Lumina is dark there, and so is every expert `FOLLOW_AUDIO` style without colours except Party.
+- Party works only as `{"styleName":"FOLLOW_AUDIO","isExpert":true,"algorithm":"PARTY"}`.
+- `FOLLOW_COLOR` `MANUAL_HUE` holds a colour, and moves it by itself with a `colorDelta` and a `speed`.
+- The TV ignores the picture when the screen is off: lights painted into the picture do not reach the wall.
+
+**His choice.** The phone page shows the class, the TV's look and the tempo under **Lights**, with **Less colour**, **Just right** and **More colour**: the song keeps that class from then on (`/lights/colour?step=auto` gives it back to the app), and "just right" tells the review that the app chose well. Every song is remembered (its tempo, energy, mood, the app's class and his choice) at `/lights/history`; `spikes/lights_review.py` compares the tempo with Deezer's and the classes with his choices.
+
+| Setting (at `/lights/set?...`) | Meaning |
+| --- | --- |
+| `lights` (`mood`, `tv`) | `mood`: the mood lights. `tv`: as before (the app's own `ambilight_style`). |
+| `lights_strength` (`subtle`, `adaptive`, `punchy`) | How lively: how fast the colours drift, and how often an energetic song changes mode (every 64, 32 or 16 beats). |
+| `lights_modes` (default all: `party,rhythm,scanner,vu,scanner-cw,spectrum,colora`) | The modes an energetic song goes through. |
+
+What to watch: `/lights` (the song, tempo, lock, energy, mood, sections, the look and why, the cover's hues, what the TV shows and for which song, the delay used, when the next change comes, the calls sent, the analysis's CPU time) and `/log` (tag `lights`).
+
 ## Free storage
 
 The Google TV has little storage, and the Spotify app's own cache has filled it to 97% once, which made the installation of this app fail. This app keeps its own use small (no audio cache, only the login and a few settings on disk, the log is in memory and bounded), and shows the free space of `/data` in `/status.json` (`storage`) and on the status screen of the app. **Below 300 MB it warns** (the screen says LOW, and the log gets a line). If it does, clear the cache of the Spotify app and other apps in Settings, Apps.

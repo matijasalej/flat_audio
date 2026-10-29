@@ -9,8 +9,9 @@ import java.io.File
 
 /**
  * The phone page and what the home screen of the phone needs: the page links the manifest and the icon and says that it is an app, the
- * manifest says where it starts and has its icons, and the icons are PNGs of the sizes that are named. The page has the three displays and the
- * volume of the kitchen and nothing else (no mode buttons, no fine sync: that is on the debug page).
+ * manifest says where it starts and has its icons, and the icons are PNGs of the sizes that are named. The page has the switch of Synced on
+ * HDMI, the four displays with the colour of Chill, the volume and the timing of the kitchen and the less, just right or more colour of the
+ * mood lights, and nothing else (no mode buttons, no TV extra, no lyrics: they are on the debug page).
  */
 class RemoteAssetsTest {
     private fun dir(): File {
@@ -41,22 +42,27 @@ class RemoteAssetsTest {
     }
 
     @Test
-    fun thePageHasTheThreeDisplaysAndTheKitchenVolumeAndNothingElse() {
+    fun thePageHasTheSwitchTheFourDisplaysTheChillColourAndTheKitchen() {
         val html = text("index.html")
-        for (d in listOf("listen", "ambilight", "screen")) assertTrue(d, html.contains("""data-display="$d""""))
-        assertTrue(html.contains("Listening"))
-        assertTrue(html.contains("Screen + Ambilight"))
-        assertTrue(html.contains("""type="range""""))
+        for (d in listOf("listen", "chill", "party", "karaoke")) assertTrue(d, html.contains("""data-display="$d""""))
+        assertEquals(4, Regex("""class="choice"""").findAll(html).count())
+        assertTrue(html.contains("Synced on HDMI"))
+        assertTrue(html.contains("""role="switch""""))
+        assertTrue(html.contains("/remote/action?replay="))
         assertTrue(html.contains("/remote/action?display="))
         assertTrue(html.contains("/remote/action?volume="))
-        // no buttons for the mode, no fine sync, no lyrics: they are not on this page
+        assertTrue(html.contains("'color='"))
+        assertTrue(html.contains("'level='"))
+        assertTrue(html.contains("'fine_ms='"))
+        // the volume, the custom hue, the brightness and the kitchen's timing
+        assertEquals(4, Regex("""type="range"""").findAll(html).count())
+        // no buttons for the mode, no TV extra, no lyrics: they are on the debug page
         assertFalse(html.contains("data-mode"))
         assertFalse(html.contains("mode=synced"))
-        assertFalse(html.contains("fine="))
         assertFalse(html.contains("tv_extra"))
         assertFalse(html.contains("lyrics="))
-        assertEquals(3, Regex("""class="choice"""").findAll(html).count())
-        assertEquals(1, Regex("""type="range"""").findAll(html).count())
+        assertTrue(html.contains("/lights/colour?step="))
+        assertEquals(3, Regex("""class="colour"""").findAll(html).count())
     }
 
     @Test

@@ -4,7 +4,7 @@ import org.json.JSONObject
 
 /**
  * What a press on the phone page (or on the tuning buttons of the debug page) asks for, as changes to the settings:
- * `/remote/action?display=screen&volume=%2B5`, `/tune?fine=-&tv_extra=%2B`. Several may come in one request. Nothing here touches the app;
+ * `/remote/action?display=party&volume=%2B5&color=%23ff9a40&level=60&fine_ms=-20`, `/tune?fine=-&tv_extra=%2B`. Several may come in one request. Nothing here touches the app;
  * the result is a partial settings object (what `Settings.applyJson` takes). Choosing a display also puts the app back in Synced mode
  * (it may have been in Lyrics mode, which the user got into by leaving the TV's player with the TV's own remote). Plain Kotlin.
  */
@@ -60,6 +60,24 @@ object RemoteActions {
                 "fine" -> {
                     val v = steps(value, now.kitchenOffsetMs, FINE_STEP_MS)
                     if (v == null) errors.add("fine: $value") else updates.put("kitchen_offset_ms", v)
+                }
+                "color" -> {
+                    val c = MoodLight.parseColor(value)
+                    if (c == null) errors.add("color: $value") else {
+                        // a colour is the Chill light: it takes the TV (the last tap wins)
+                        updates.put("light_color", c)
+                        updates.put("display", Display.CHILL.key)
+                        updates.put("mode", Mode.SYNCED.key)
+                    }
+                }
+                "level" -> {
+                    val v = value.toIntOrNull()
+                    if (v == null) errors.add("level: $value") else updates.put("light_level", v.coerceIn(MoodLight.MIN_LEVEL, MoodLight.MAX_LEVEL))
+                }
+                "fine_ms" -> {
+                    // the slider: the value itself, also when it is negative ("fine" takes "-20" as a step)
+                    val v = value.toIntOrNull()
+                    if (v == null) errors.add("fine_ms: $value") else updates.put("kitchen_offset_ms", v)
                 }
                 "lyrics" -> {
                     val v = steps(value, now.lyricsOffsetMs, LYRICS_STEP_MS)

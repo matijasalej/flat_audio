@@ -108,6 +108,7 @@ class PlaybackService : Service() {
     private lateinit var tv: TvControl
     private lateinit var tvRenderer: TvRenderer
     private lateinit var synced: SyncedController
+    private lateinit var lights: io.github.matijasalej.wholeflat.light.LightEngine
     private lateinit var captureFeed: CaptureFeed
     private lateinit var captureSource: CaptureSource
     private lateinit var livingReplay: LivingReplay
@@ -187,6 +188,7 @@ class PlaybackService : Service() {
         AppState.tvRenderer = tvRenderer
         AppState.synced = synced
         AppState.livingReplay = livingReplay
+        AppState.adbSelf = AdbSelf(this)
         livingReplay.start()
         // the record of the TV's switches, on disk: what came before a player that hung
         val journal = io.github.matijasalej.wholeflat.sync.TvJournal(java.io.File(filesDir, "tv_journal.jsonl"))
@@ -199,6 +201,8 @@ class PlaybackService : Service() {
             AppState.source != "librespot" && AppState.playback != "playing" && AppState.playback != "loading" &&
                 (tvRenderer.state == TvRenderer.State.STARTING || tvRenderer.state == TvRenderer.State.PLAYING || tv.lastKnownPower() == "Standby")
         }
+        lights = io.github.matijasalej.wholeflat.light.LightEngine(this, captureFeed, coverCache)
+        AppState.lights = lights
         Settings.addListener(settingsListener)
         applyVolume()
         acquireLocks()
@@ -209,6 +213,7 @@ class PlaybackService : Service() {
         tv.start()
         tvRenderer.start()
         synced.start()
+        lights.start()
         DebugServer.ensureStarted(this)
         captureSource.start(captureFeed, CaptureEvents())
     }
@@ -247,6 +252,7 @@ class PlaybackService : Service() {
         }
         try {
             // the TV is given back first: the lights and the screen are put as they were, the player is stopped
+            if (::lights.isInitialized) lights.stop()
             if (::synced.isInitialized) synced.stop()
             if (::tvRenderer.isInitialized) tvRenderer.stop()
         } catch (t: Throwable) {
@@ -280,6 +286,8 @@ class PlaybackService : Service() {
             }
         }
         screenWatch = null
+        AppState.lights = null
+        AppState.adbSelf = null
         AppState.source = "idle"
         Settings.removeListener(settingsListener)
         try {

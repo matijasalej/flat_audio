@@ -1,13 +1,15 @@
 package io.github.matijasalej.wholeflat
 
+import io.github.matijasalej.wholeflat.sync.MoodLight
 import io.github.matijasalej.wholeflat.sync.RemoteActions
+import io.github.matijasalej.wholeflat.sync.ReplaySwitch
 import io.github.matijasalej.wholeflat.sync.StuckTv
 import org.json.JSONObject
 
 /**
  * What the phone page (`/remote`) and the tuning buttons of the debug page ask the app: the state they show and the changes they make.
- * The phone page has the three displays of the TV and the volume of the kitchen, and nothing else; the fine tuning (the TV's extra, the fine
- * sync of the kitchen, the lyrics) is on the debug page. A change is a change of settings (see [RemoteActions]); the settings do the rest.
+ * The phone page has the switch of Synced on HDMI, the four displays of the TV (with the colour of Chill), the volume of the kitchen and
+ * its fine sync; the rest of the tuning (the TV's extra, the lyrics) is on the debug page. A change is a change of settings (see [RemoteActions]); the settings do the rest.
  */
 object RemoteApi {
     /** The state for the page: the display, the mode, the kitchen volume, and a line each of what the TV and the kitchen are doing. */
@@ -32,7 +34,27 @@ object RemoteApi {
         o.put("kitchen_text", kitchenText())
         o.put("source", AppState.source)
         o.put("version", BuildInfo.versionName)
+        o.put("lights", AppState.lights?.phoneJson() ?: JSONObject.NULL)
+        o.put("replay", replayJson())
+        o.put("kitchen_offset_ms", v.kitchenOffsetMs)
+        o.put("light_color", v.lightColor)
+        o.put("light_level", v.lightLevel)
+        o.put("moods", MoodLight.moodsJson())
         return o
+    }
+
+    /** The switch of Synced on HDMI: on (the Spotify app is muted), whether the app can switch it, and the line under it. */
+    private fun replayJson(): JSONObject {
+        val replay = AppState.livingReplay
+        val adb = AppState.adbSelf
+        adb?.probeSoon()
+        val muted = replay?.muted
+        val link = adb?.link ?: ReplaySwitch.Link.UNKNOWN
+        return JSONObject()
+            .put("on", muted ?: JSONObject.NULL)
+            .put("pending", adb?.pending ?: JSONObject.NULL)
+            .put("link", link.key)
+            .put("text", ReplaySwitch.text(link, muted, replay?.replaying == true, adb?.pending, adb?.error))
     }
 
     private fun tvText(): String {
@@ -71,6 +93,20 @@ object RemoteApi {
         }
         val current = RemoteActions.Current(v.display, v.kitchenEnabled, volume, v.kitchenOffsetMs, v.lyricsOffsetMs, v.tvExtraMs)
         val r = RemoteActions.parse(query, current)
+        // the switch of Synced on HDMI is no setting: it is the Spotify app's mute, set through the box's own adb
+        query["replay"]?.trim()?.lowercase()?.let { want ->
+            val on = when (want) {
+                "on" -> true
+                "off" -> false
+                "toggle" -> AppState.livingReplay?.muted != true
+                else -> null
+            }
+            val adb = AppState.adbSelf
+            if (on != null && adb != null) {
+                AppLog.add("remote", "Synced on HDMI ${if (on) "on" else "off"} (asked for: $query)")
+                adb.switch(on)
+            }
+        }
         if (r.updates.length() > 0) {
             AppLog.add("remote", "${r.updates} (asked for: $query)")
             Settings.applyJson(r.updates)

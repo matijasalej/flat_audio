@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Process
 import android.os.SystemClock
 import io.github.matijasalej.wholeflat.sync.AmbilightApi
+import io.github.matijasalej.wholeflat.sync.Display
 import io.github.matijasalej.wholeflat.sync.PowerClock
 import io.github.matijasalej.wholeflat.sync.VideoPolicy
 import org.json.JSONObject
@@ -209,7 +210,8 @@ class TvControl(private val context: Context) {
             // the picture needs a moment before it takes commands
             sleepQuietly(1500)
         }
-        if (v.tvScreenOff) {
+        // a display with the screen on (Viewing, Karaoke) keeps it on
+        if (v.tvScreenOff && !(Display.of(v.display) ?: Display.DEFAULT).screenOn) {
             when (isVideoInFront()) {
                 true -> note("a video app is in front (${lastForeground}), the screen stays on")
                 null -> note("usage access is not granted, the screen stays on (see the README)")

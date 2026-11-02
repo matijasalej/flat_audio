@@ -42,10 +42,10 @@ class RemoteAssetsTest {
     }
 
     @Test
-    fun thePageHasTheSwitchTheFourDisplaysTheChillColourAndTheKitchen() {
+    fun thePageHasTheSwitchTheFiveDisplaysTheChillColourAndTheKitchen() {
         val html = text("index.html")
-        for (d in listOf("listen", "chill", "party", "karaoke")) assertTrue(d, html.contains("""data-display="$d""""))
-        assertEquals(4, Regex("""class="choice"""").findAll(html).count())
+        for (d in listOf("view", "listen", "chill", "party", "karaoke")) assertTrue(d, html.contains("""data-display="$d""""))
+        assertEquals(5, Regex("""class="choice"""").findAll(html).count())
         assertTrue(html.contains("Synced on HDMI"))
         assertTrue(html.contains("""role="switch""""))
         assertTrue(html.contains("/remote/action?replay="))

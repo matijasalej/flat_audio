@@ -8,9 +8,12 @@ import org.junit.Test
 
 class DisplayTest {
     @Test
-    fun theFourDisplaysAndWhatTheyAre() {
-        assertEquals(listOf("listen", "chill", "party", "karaoke"), Display.values().map { it.key })
-        assertEquals(Display.LISTEN, Display.DEFAULT)
+    fun theFiveDisplaysAndWhatTheyAre() {
+        assertEquals(listOf("view", "listen", "chill", "party", "karaoke"), Display.values().map { it.key })
+        assertEquals(Display.VIEW, Display.DEFAULT)
+        assertTrue(Display.VIEW.screenOn)
+        assertFalse(Display.VIEW.lights)
+        assertFalse(Display.VIEW.vibe)
         assertFalse(Display.LISTEN.screenOn)
         assertFalse(Display.LISTEN.lights)
         assertFalse(Display.LISTEN.vibe)
@@ -27,10 +30,11 @@ class DisplayTest {
 
     @Test
     fun theButtonOfTheTvAppGoesRound() {
+        assertEquals(Display.LISTEN, Display.VIEW.next())
         assertEquals(Display.CHILL, Display.LISTEN.next())
         assertEquals(Display.PARTY, Display.CHILL.next())
         assertEquals(Display.KARAOKE, Display.PARTY.next())
-        assertEquals(Display.LISTEN, Display.KARAOKE.next())
+        assertEquals(Display.VIEW, Display.KARAOKE.next())
     }
 
     @Test

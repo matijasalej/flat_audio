@@ -3,12 +3,12 @@ package io.github.matijasalej.wholeflat.sync
 /**
  * What the TV shows and what its Ambilight does, from the mode and the [Display].
  *
- * - **Synced**, the TV playing our stream, by the display: **Listening** the screen is off and so are the lights (the stream goes on, the
- *   sound is all); **Ambilight** the screen is off and the lights follow the audio; **Screen + Ambilight** the lyrics video is on the screen
- *   and the lights follow the audio.
+ * - **Synced**, the TV playing our stream, by the display: **Viewing** the screen stays on and the lights are off; **Listening** the screen
+ *   is off and so are the lights (the stream goes on, the sound is all); **Chill** and **Party** the screen is off and the lights are on;
+ *   **Karaoke** the lyrics video is on the screen and the lights are on.
  * - **Lyrics** (the Spotify app is on the screen over HDMI, with its lyrics, which the user left the TV's player for): the lights are
- *   the display's too, while the music plays: on for **Ambilight** and **Screen + Ambilight**, off for **Listening** (they used to come
- *   on with every song in Lyrics mode, which the user did not ask for).
+ *   the display's too, while the music plays: on for **Chill**, **Party** and **Karaoke**, off for **Viewing** and **Listening** (they used
+ *   to come on with every song in Lyrics mode, which the user did not ask for).
  * - Otherwise the screen is left as it is, and the lights are off.
  *
  * What the lights were before is put back when they are not wanted any more. A screen that this app switched off is switched on again as

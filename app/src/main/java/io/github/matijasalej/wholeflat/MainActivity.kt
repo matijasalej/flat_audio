@@ -101,7 +101,7 @@ class MainActivity : Activity() {
         startButton = button("Start service") { startReceiver() }
         left.addView(startButton)
 
-        // what the TV shows while it plays the music: Listening, Ambilight, Screen + Ambilight; a press goes to the next
+        // what the TV shows while it plays the music: Viewing, Listening, Chill, Party, Karaoke; a press goes to the next
         displayButton = button("TV display") { cycleDisplay() }
         left.addView(displayButton)
 
@@ -323,7 +323,7 @@ class MainActivity : Activity() {
 
     private fun onOff(on: Boolean): String = if (on) "ON" else "OFF"
 
-    /** The button at the top: Listening, Ambilight, Screen + Ambilight, Listening. Choosing one also puts the app back in Synced mode. */
+    /** The button at the top: Viewing, Listening, Chill, Party, Karaoke, Viewing. Choosing one also puts the app back in Synced mode. */
     private fun cycleDisplay() {
         val next = (Display.of(Settings.values.display) ?: Display.DEFAULT).next()
         Settings.applyJson(JSONObject().put("display", next.key).put("mode", "synced"))

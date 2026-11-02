@@ -31,9 +31,10 @@ import java.util.concurrent.TimeUnit
  * start meanwhile (a stream that plays goes on), and when the music goes live on the TV the kitchen is started, or started again, timed
  * so that its first sound is the TV's first sound: the two rooms begin together.
  *
- * **The TV.** In Synced mode what the TV shows is the setting `display` (see [Display]): the screen off with the lights off (Listening),
- * the screen off with the Ambilight on, or the lyrics video on the screen with the Ambilight on; a change of it is only the screen and
- * the lights, the stream is not restarted, and it goes back to Listening after ten minutes without music. The Ambilight follows the audio
+ * **The TV.** In Synced mode what the TV shows is the setting `display` (see [Display]): the screen on with the lights off (Viewing, what
+ * the app opens on), the screen off with the lights off (Listening), the screen off with the Ambilight on, or the lyrics video on the
+ * screen with the Ambilight on; a change of it is only the screen and the lights, the stream is not restarted, and it goes back to
+ * Viewing after ten minutes without music. The Ambilight follows the audio
  * only when the display asks for it (Ambilight, Screen + Ambilight), in Lyrics mode too while the music plays, and what it was before is
  * put back afterwards. A screen that this app switched off is switched on again when the TV stops playing our stream. Both
  * the remembered state of the lights and the fact that the screen was switched off are kept in the preferences, so that an app that
@@ -274,7 +275,7 @@ class SyncedController(
                 }
             }
         }
-        // ten minutes without music: back to Listening (the screen and the lights are not left on for an empty room)
+        // ten minutes without music: back to the default, Viewing (the lights are not left on for an empty room)
         if (idle >= DISPLAY_RESET_MS && source != "librespot" && Settings.values.display != Display.DEFAULT.key) {
             AppLog.add(TAG, "no music for ${idle / 60_000} min: the display goes back to ${Display.DEFAULT.label}")
             Settings.set("display", Display.DEFAULT.key)
@@ -572,7 +573,7 @@ class SyncedController(
         private const val RESTART_FAR_MS = 150.0
         private const val RESTART_EVERY_MS = 20_000L
 
-        /** Without music for this long (ms) the display goes back to Listening. */
+        /** Without music for this long (ms) the display goes back to the default, Viewing. */
         private const val DISPLAY_RESET_MS = 600_000L
 
         /** What the kitchen's own start takes before its Play (the speaker is muted and stopped, its volume and the address are set), a guess to be read from the log (ms). */

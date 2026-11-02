@@ -17,7 +17,7 @@ One Spotify speaker for the whole flat: an Android TV app that plays Spotify in 
 - When music starts, the TV is woken if it is in standby (best effort) and turns its screen off, but not while you're watching video.
 - It starts with the Google TV, reconnects to Spotify by itself and recovers after sleep.
 - **A second way in:** when Spotify refuses the "Whole Flat" device, cast to the Chromecast itself ("Den TV") instead, and the kitchen follows a copy of what it plays (see "If Spotify refuses Whole Flat" below).
-- **Synced mode:** the living room is played through the TV's own DLNA player as a live lyrics video (H.264 and AAC in a constant-rate MPEG transport stream, with the lyrics from LRCLIB), and the kitchen is held to the same delay, so both rooms are in step with the lyrics on the screen (see "Synced mode" below). A phone page picks what the TV shows: Listening, Ambilight, or Screen + Ambilight.
+- **Synced mode:** the living room is played through the TV's own DLNA player as a live lyrics video (H.264 and AAC in a constant-rate MPEG transport stream, with the lyrics from LRCLIB), and the kitchen is held to the same delay, so both rooms are in step with the lyrics on the screen (see "Synced mode" below). A phone page picks what the TV shows: Viewing (the default), Listening, Chill, Party or Karaoke.
 - **Remote-friendly settings:** kitchen on/off, sync offset, kitchen balance and TV options.
 - **Status page and calibration:** a status page in the browser, and a 30-second calibration from the doorway using a Mac (or by ear, with the Test button on the TV).
 
@@ -135,11 +135,12 @@ Set them with `curl 'http://<tv-ip>:8080/settings?capture_lead_ms=300'`.
 
 In the capture mode above the living room is played by the Chromecast itself, at once, and the kitchen can only follow a little later. **Synced mode** turns that round: the box hands the TV a live video of its own, through the TV's DLNA player (the Philips renderer at `http://<tv-ip>:2870/dmr.xml`), and holds the kitchen to the same delay, so that the sound of the two rooms and the lyrics on the screen are one thing. The delay is long (about 2.4 s: the TV buffers what it is given), which only matters when you press pause or skip. It is the default mode (`mode`, `synced`); `lyrics` is the other, see below.
 
-**What the TV shows** is the setting `display`, chosen on the phone page (`http://<box-ip>:8080/remote`) or with the button at the top of the app on the TV; all three are Synced mode, the stream is never restarted by a change of it (it is only the screen and the Ambilight of the TV, through JointSpace), and it goes back to Listening after ten minutes without music:
+**What the TV shows** is the setting `display`, chosen on the phone page (`http://<box-ip>:8080/remote`) or with the button at the top of the app on the TV; all three are Synced mode, the stream is never restarted by a change of it (it is only the screen and the Ambilight of the TV, through JointSpace), and it goes back to Viewing after ten minutes without music (the app also opens on Viewing, whatever was chosen before):
 
 | `display` | Screen | Ambilight |
 | --- | --- | --- |
-| `listen` (default) | off | off |
+| `view` (default) | on (the lyrics video) | off |
+| `listen` | off | off |
 | `ambilight` | off | on, following the audio (`FOLLOW_AUDIO`, `ENERGY_ADAPTIVE_BRIGHTNESS`; what it was before is put back afterwards) |
 | `screen` | the lyrics video | on, the same style |
 
@@ -201,7 +202,7 @@ The capture still hears the muted app: AudioFlinger gives a track whose app may 
 
 **The mute is the switch.** The app reads the Spotify app's PLAY_AUDIO every second (that needs no permission). Muted, the living room is replayed; not muted, it is not (it would hear the music twice). While another captured player plays (the Cast receiver), it is not replayed either, as that one is not muted; nor while the box sleeps (its HDMI output and the TV are off, and the app keeps the box awake while music plays). Meanwhile the TV's player is not used at all: a TV that holds our stream is given back, none is taken, and Lyrics does not go back to Synced after a silence. If the Spotify app is muted and nothing can be replayed (the capture does not run), the phone page says *The living room is silent* and how to unmute it. A track whose HDMI output takes nothing for 2 s is made again, after 2, 4, 8 ... up to 60 s (`stuck_tracks`).
 
-**What the TV shows** is the display, as in Synced mode, with the Spotify app as the picture: Listening and Ambilight switch the screen off (the sound goes on through the TV's optical output), Screen + Ambilight shows the Spotify app with its lyrics; the screen comes back on when the replay ends. The phone page says *TV: Spotify app, in step (HDMI)*.
+**What the TV shows** is the display, as in Synced mode, with the Spotify app as the picture: Viewing leaves it on the screen with the Ambilight off, Listening and Ambilight switch the screen off (the sound goes on through the TV's optical output), Screen + Ambilight shows the Spotify app with its lyrics; the screen comes back on when the replay ends. The phone page says *TV: Spotify app, in step (HDMI)*.
 
 **Calibrating.** `python3 spikes/tvclicks.py` works as for Synced mode: the replay plays the TV's clicks (2 kHz) at the same capture frames as the kitchen's (3 kHz). A kitchen that is X ms ahead of the living room means the TV takes X ms longer than `living_replay_tv_ms` says: add X to it (and set `kitchen_offset_ms` to 0 first; its 46 ms were the fine sync against the TV's player). Then `living_replay_ms` can come down as far as `spare_ms` in `/living/replay` allows (it stays above 50 ms with no `missing_ms`): the Spotify app's own lyrics on the screen are early by it.
 
@@ -212,14 +213,15 @@ The capture still hears the muted app: AudioFlinger gives a track whose app may 
 
 `/living/replay` (also `living_replay` in `/status.json`): `state` (`off`, `starting`, `playing`), `why`, `spotify_muted`, `error_ms` (the last block's error, positive early), `ahead_ms` (how long before its sound a block is written: the track's and the HAL's buffers), `spare_ms` (captured audio beyond the cursor), `stretched_blocks`, `jumps`, `missing_ms`, `tracks`, `write_errors`, and the two commands.
 
-## The phone page: the switch, the four displays, the kitchen's timing
+## The phone page: the switch, the five displays, the kitchen's timing
 
 **The switch "Synced on HDMI"** mutes the Spotify app (on: the box replays the living room in step with the kitchen) or gives it its sound back (off). The app runs the mute itself through the box's own adb (`AdbSelf`, the library dadb): its adb daemon has to listen on port 5555, which it does after `adb tcpip 5555` from the Mac and until the box restarts. The first tap asks on the TV whether to allow the connection: tap "Always allow from this computer". The switch shows the mute as it is (read every second), so a mute from the Mac shows too; the line under it says what stands in the way (Allow on the TV, the box to be armed again after a power cut).
 
-**The displays** (last tap wins; the button of the TV app goes round them):
+**The displays** (last tap wins; the button of the TV app goes round them; the app opens on Viewing, and goes back to it after ten minutes without music):
 
 | Display | Screen | Ambilight |
 |---|---|---|
+| Viewing (default) | on (the Spotify app) | off |
 | Listening | off | off |
 | Chill | off | one colour: a mood (Cozy, Candle, Sunset, Rose, Lavender, Ocean, Forest, White) or your own hue, a brightness, and still or a slow pulse (`light_color`, `light_level`, `light_pulse`) |
 | Party | off | the mood lights (below): the song's colours, the TV's beat modes, Party at a chorus |
@@ -274,7 +276,7 @@ Open the app: the left column works with the remote (up and down to move, OK to 
 | Kitchen | ON: the Sonos plays along. OFF: only the living room. |
 | Capture of the Cast receiver | ON (default): what the Chromecast plays when you cast to it is copied to the Sonos (see "If Spotify refuses Whole Flat"). OFF: no capture. |
 | Living room fixed volume | ON (default): the living room always gets the full signal (loudness is on the amplifier), and the phone's volume controls only the Sonos. OFF: the phone's volume also sets the living room (60 dB logarithmic curve). |
-| TV display | At the top: Listening, Ambilight, Screen + Ambilight (see "Synced mode"); a press goes to the next. |
+| TV display | At the top: Viewing, Listening, Chill, Party, Karaoke (see "Synced mode"); a press goes to the next. |
 | TV screen off | Switch the TV's picture off when music starts after a silence (not while a video app is in front). |
 | Wake the TV | If the TV is in standby when music starts, ask it to switch on (best effort). |
 | Kitchen offset | -300 to +300 ms. Positive: the kitchen plays later than the living room. This is the calibration of the two rooms. |

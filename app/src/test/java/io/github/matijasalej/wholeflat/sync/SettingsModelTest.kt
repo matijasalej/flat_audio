@@ -37,7 +37,7 @@ class SettingsModelTest {
         assertEquals("auto", o.getString("tv_render"))
         assertEquals("720p30 cbr 2500 gop1", o.getString("tv_video"))
         assertEquals(0, o.getInt("lyrics_offset_ms"))
-        assertEquals("listen", o.getString("display"))
+        assertEquals("view", o.getString("display"))
         assertEquals(true, o.getBoolean("background_cleanup"))
         assertEquals("FOLLOW_AUDIO", o.getString("ambilight_style"))
         assertEquals("ENERGY_ADAPTIVE_BRIGHTNESS", o.getString("ambilight_menu"))
@@ -265,9 +265,10 @@ class SettingsModelTest {
     }
 
     @Test
-    fun theDisplayIsOneOfFourAndListeningIsTheDefaultAndTheOlderKeysAreReadAsTheNewOnes() {
+    fun theDisplayIsOneOfFiveAndViewingIsTheDefaultAndTheOlderKeysAreReadAsTheNewOnes() {
         val m = SettingsModel()
-        assertEquals("listen", m.values().display)
+        assertEquals("view", m.values().display)
+        assertEquals(setOf("display"), m.applyJson(JSONObject("""{"display": "listen"}""")))
         assertEquals(setOf("display"), m.applyJson(JSONObject("""{"display": " Karaoke "}""")))
         assertEquals("karaoke", m.values().display)
         assertEquals(setOf("display"), m.applyJson(JSONObject("""{"display": "chill"}""")))
@@ -409,7 +410,7 @@ class SettingsModelTest {
         m.applyJson(stored)
         assertEquals("synced", m.mode)
         assertEquals(20, m.kitchenOffsetMs)
-        assertEquals("listen", m.display)
+        assertEquals("view", m.display)
         // a mode of the current version is what the app or the user set
         val current = JSONObject("""{"mode": "lyrics"}""")
         SettingsModel.migrate(current, SettingsModel.VERSION)
@@ -418,6 +419,19 @@ class SettingsModelTest {
         val synced = JSONObject("""{"mode": "synced"}""")
         SettingsModel.migrate(synced, version = 2)
         assertEquals("synced", synced.getString("mode"))
+    }
+
+    @Test
+    fun theAppOpensOnViewingWhateverDisplayWasStored() {
+        val stored = JSONObject("""{"display": "party", "kitchen_offset_ms": 20}""")
+        assertTrue(SettingsModel.atStart(stored))
+        val m = SettingsModel()
+        m.applyJson(stored)
+        assertEquals("view", m.display)
+        assertEquals(20, m.kitchenOffsetMs)
+        // Viewing stored already, or no display at all: nothing to store again
+        assertFalse(SettingsModel.atStart(JSONObject("""{"display": "view"}""")))
+        assertFalse(SettingsModel.atStart(JSONObject("""{"kitchen_offset_ms": 20}""")))
     }
 
     @Test

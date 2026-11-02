@@ -55,7 +55,7 @@ import kotlin.concurrent.thread
  *   GET  /tv/journal            every switch of the TV to its player, every end of such a stream, the TV's power and the box's sleeps (on disk)
  *   GET  /tv/grab               has the TV play the capture now (the mode manager may give it back; set mode=lyrics to test alone)
  *   GET  /tv/release            gives the TV back (it returns to HDMI)
- *   GET  /remote                the phone page: the three displays of the TV (Listening, Ambilight, Screen + Ambilight) and the kitchen volume;
+ *   GET  /remote                the phone page: the five displays of the TV (Viewing, Listening, Chill, Party, Karaoke) and the kitchen volume;
  *                               /remote/state.json its state, /remote/action?display=screen&volume=%2B the presses, /remote/manifest.webmanifest
  *                               and the icons for the home screen
  *   GET  /tune                  the fine tuning of the debug page: ?tv_extra=%2B|-, ?fine=%2B|- (the kitchen against the TV), ?lyrics=%2B|-, ?display=...

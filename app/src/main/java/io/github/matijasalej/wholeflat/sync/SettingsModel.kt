@@ -63,7 +63,7 @@ class SettingsValues(
     val tvVideo: String,
     /** Moves the lyrics earlier (positive) or later (negative) against the sound, for what the media session's clock does not tell (ms). */
     val lyricsOffsetMs: Int,
-    /** What the TV shows: "listen" (screen off, lights off), "chill" (screen off, one colour), "party" (screen off, the mood lights) or "karaoke" (screen on, the mood lights); see [Display]. */
+    /** What the TV shows: "view" (screen on, lights off), "listen" (screen off, lights off), "chill" (screen off, one colour), "party" (screen off, the mood lights) or "karaoke" (screen on, the mood lights); see [Display]. */
     val display: String,
     /** Whether the apps in the background are asked to give up their processes at each grab of the TV and every ten minutes while the music plays (see BackgroundCleaner). */
     val backgroundCleanup: Boolean,
@@ -675,6 +675,13 @@ class SettingsModel {
                 stored.remove("karaoke")
                 stored.remove("ambilight_synced")
             }
+        }
+
+        /** What a start of the app does to settings [stored] (in place): the display opens on [Display.DEFAULT], whatever was chosen before. True if a stored display was another. */
+        fun atStart(stored: JSONObject): Boolean {
+            val was = stored.opt(DISPLAY) ?: return false
+            stored.remove(DISPLAY)
+            return Display.of(was.toString()) != Display.DEFAULT
         }
 
         /** Empty, or a host name or address. */

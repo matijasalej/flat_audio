@@ -2,6 +2,7 @@ package io.github.matijasalej.wholeflat
 
 import android.content.Context
 import android.content.SharedPreferences
+import io.github.matijasalej.wholeflat.sync.Display
 import io.github.matijasalej.wholeflat.sync.SettingsModel
 import io.github.matijasalej.wholeflat.sync.SettingsValues
 import org.json.JSONObject
@@ -49,9 +50,12 @@ object Settings {
             SettingsModel.migrate(stored, version)
             AppLog.add(TAG, "settings of version $version brought up to ${SettingsModel.VERSION}")
         }
+        // the app opens on the default display (Viewing: the screen on, the Ambilight off), whatever was chosen before
+        val displayReset = SettingsModel.atStart(stored)
+        if (displayReset) AppLog.add(TAG, "the display opens on ${Display.DEFAULT.label}")
         model.applyJson(stored)
         values = model.values()
-        if (version < SettingsModel.VERSION) persist()
+        if (version < SettingsModel.VERSION || displayReset) persist()
         AppLog.add(TAG, "loaded: " + model.toJson())
     }
 

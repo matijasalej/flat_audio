@@ -11,6 +11,17 @@ class TvPresentationTest {
         TvPresentation.want(Mode.SYNCED, tvPlaying = playing, display = display, source = "capture", screenOffByUs = offByUs)
 
     @Test
+    fun viewingIsTheScreenOnAndTheLightsOff() {
+        val w = synced(Display.VIEW)
+        assertEquals(Screen.LEAVE, w.screen)
+        assertFalse(w.lights)
+        // a screen that we switched off (Listening before) is switched on again
+        assertEquals(Screen.ON, synced(Display.VIEW, offByUs = true).screen)
+        // in Lyrics mode too: no lights with the music
+        assertFalse(TvPresentation.want(Mode.LYRICS, false, Display.VIEW, "capture", false).lights)
+    }
+
+    @Test
     fun listeningIsTheScreenOffAndTheLightsOff() {
         val w = synced(Display.LISTEN)
         assertEquals(Screen.OFF, w.screen)

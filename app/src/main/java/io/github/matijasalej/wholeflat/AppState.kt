@@ -102,6 +102,9 @@ object AppState {
     @Volatile var livingReplay: LivingReplay? = null
     @Volatile var adbSelf: AdbSelf? = null
 
+    /** The remote's power button, read from the box's log: a press that found the box awake puts it to sleep (`/power`). */
+    @Volatile var powerFollow: PowerFollow? = null
+
     /** Every switch of the TV to its player, every end of such a stream, the TV's power and the box's sleeps, on disk (`/tv/journal`). */
     @Volatile var tvJournal: io.github.matijasalej.wholeflat.sync.TvJournal? = null
 

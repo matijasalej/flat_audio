@@ -2,19 +2,23 @@ package io.github.matijasalej.wholeflat
 
 import android.content.Context
 import dadb.AdbKeyPair
+import dadb.AdbShellPacket
 import dadb.Dadb
 import io.github.matijasalej.wholeflat.sync.ReplaySwitch
 import io.github.matijasalej.wholeflat.sync.ReplaySwitch.Link
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 
 /**
- * The box's own adb, as this app's client: what lets the phone page switch Synced on HDMI ([ReplaySwitch]). The app connects to the adb
- * daemon on 127.0.0.1:[ReplaySwitch.PORT] with a key of its own (made once, in its files), and runs a shell command there. The daemon
- * listens on that port only after `adb tcpip 5555` from the Mac, until the box restarts; the first connection with the key asks on the
- * TV whether to allow it. One command at a time, on a thread of its own: a connection may wait for that tap.
+ * The box's own adb, as this app's client: what lets the phone page switch Synced on HDMI ([ReplaySwitch]), and what reads the box's
+ * log for the remote's power button ([PowerFollow]). The app connects to the adb daemon on 127.0.0.1:[ReplaySwitch.PORT] with a key of
+ * its own (made once, in its files), and runs a shell command there. The daemon listens on that port only after `adb tcpip 5555` from
+ * the Mac, until the box restarts; the first connection with the key asks on the TV whether to allow it. One command at a time, on a
+ * thread of its own: a connection may wait for that tap. A [stream] runs on its caller's thread, on a connection of its own.
  */
 class AdbSelf(context: Context) {
     private val dir = File(context.filesDir, "adb")
@@ -60,6 +64,76 @@ class AdbSelf(context: Context) {
         }
     }
 
+    /** Runs [command] on the box's adb after any command before it, and waits for it: its output, or null (see [link] and [error]). */
+    fun runCommand(command: String): String? = try {
+        exec.submit(Callable { run(command) }).get()
+    } catch (e: Exception) {
+        null
+    }
+
+    @Volatile
+    private var streaming: Dadb? = null
+
+    /**
+     * Runs [command] on the box's adb on the calling thread, and hands each line of its output to [onLine] until it ends, the connection
+     * drops or [stopStream] is called. [onOpen] is called once the command runs. False if it could not start (see [link] and [error]). The
+     * connection has no read time-out: a log watch may wait for hours for its next line.
+     */
+    fun stream(command: String, onOpen: () -> Unit, onLine: (String) -> Unit): Boolean {
+        if (!listens()) {
+            link = Link.NOT_ARMED
+            return false
+        }
+        var opened = false
+        return try {
+            Dadb.create(HOST, ReplaySwitch.PORT, keyPair(), CONNECT_TIMEOUT_MS, 0).use { adb ->
+                streaming = adb
+                adb.openShell(command).use { shell ->
+                    link = Link.READY
+                    error = null
+                    opened = true
+                    onOpen()
+                    val pending = ByteArrayOutputStream()
+                    while (true) {
+                        val packet = shell.read()
+                        if (packet is AdbShellPacket.Exit) break
+                        if (packet !is AdbShellPacket.StdOut) continue
+                        for (b in packet.payload) {
+                            if (b == '\n'.code.toByte()) {
+                                onLine(pending.toString(Charsets.UTF_8.name()).trimEnd('\r'))
+                                pending.reset()
+                            } else {
+                                pending.write(b.toInt())
+                            }
+                        }
+                    }
+                }
+            }
+            true
+        } catch (t: Throwable) {
+            // a stop closes the connection under the read: that is no failure
+            if (streaming != null) {
+                error = t.message ?: t.javaClass.simpleName
+                if (!opened) link = Link.FAILED
+                AppLog.error(TAG, "the box's adb stream ended for \"$command\"", t)
+            }
+            opened
+        } finally {
+            streaming = null
+        }
+    }
+
+    /** Ends the [stream] that runs, if one does. */
+    fun stopStream() {
+        val adb = streaming ?: return
+        streaming = null
+        try {
+            adb.close()
+        } catch (e: Exception) {
+            // closed already
+        }
+    }
+
     private fun listens(): Boolean = try {
         Socket().use { it.connect(InetSocketAddress(HOST, ReplaySwitch.PORT), CONNECT_TIMEOUT_MS) }
         true
@@ -92,6 +166,7 @@ class AdbSelf(context: Context) {
         }
     }
 
+    @Synchronized
     private fun keyPair(): AdbKeyPair {
         val private = File(dir, "adbkey")
         val public = File(dir, "adbkey.pub")

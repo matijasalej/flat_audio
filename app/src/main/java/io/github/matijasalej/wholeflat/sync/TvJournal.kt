@@ -17,7 +17,8 @@ import java.util.Locale
  *  - `live`: the warm-up of a stream was over (`warmup_ms`);
  *  - `end`: a stream of the TV ended (why, and whether the TV was stopped before it); `after`: what the TV showed some seconds later;
  *  - `tv_power`: the TV's power as JointSpace tells it changed (On, Standby, unreachable);
- *  - `box`: the screen of the box went on or off (it sleeps at its timeout and broadcasts CEC Standby).
+ *  - `box`: the screen of the box went on or off (it sleeps at its timeout and broadcasts CEC Standby);
+ *  - `power_press`: the remote's power button (`PowerFollow`): on, off or undo, why, and what the app did (put the box to sleep or woke it).
  *
  * The file is only appended to, and cut back to the last [capacity] lines when it holds twice as many. Plain Kotlin.
  */

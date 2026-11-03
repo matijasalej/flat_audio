@@ -150,7 +150,7 @@ class SettingsModelTest {
                 "ambilight_style", "ambilight_menu", "tv_pause_ms", "tv_quiet", "tv_audio_only", "tv_mac", "tv_position_probe",
                 "ambilight_dark_style", "ambilight_dark_algorithm", "ambilight_dark_menu", "tv_auto_reanchor", "tv_reanchor_running", "tv_scroll",
                 "tv_hold_silence_min", "tv_ready_ms", "tv_clear_item", "tv_boot_wait_s", "tv_close_wait_s",
-                "living_replay_ms", "living_replay_tv_ms", "light_color", "light_level", "light_pulse",
+                "living_replay_ms", "living_replay_tv_ms", "light_color", "light_level", "light_pulse", "power_follow",
             ),
             keys,
         )
@@ -298,6 +298,16 @@ class SettingsModelTest {
         assertFalse(m.values().lightPulse)
         assertEquals(setOf("light_pulse"), m.applyJson(JSONObject("""{"light_pulse": true}""")))
         assertTrue(m.values().lightPulse)
+    }
+
+    @Test
+    fun thePowerButtonFollowsUnlessSwitchedOff() {
+        val m = SettingsModel()
+        assertTrue(m.values().powerFollow)
+        assertEquals(setOf("power_follow"), m.applyJson(JSONObject("""{"power_follow": false}""")))
+        assertFalse(m.values().powerFollow)
+        assertFalse(m.toJson().getBoolean("power_follow"))
+        assertTrue(m.applyJson(JSONObject("""{"power_follow": "maybe"}""")).isEmpty())
     }
 
     @Test

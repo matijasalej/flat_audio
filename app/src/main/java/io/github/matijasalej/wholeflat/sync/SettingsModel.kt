@@ -118,6 +118,8 @@ class SettingsValues(
     val lightLevel: Int = MoodLight.DEFAULT_LEVEL,
     /** The Chill light pulses slowly (else it is still). */
     val lightPulse: Boolean = false,
+    /** The remote's power button puts the box to sleep too when it found the box awake, so that the TV goes off with the Onkyo ([PowerPress]). */
+    val powerFollow: Boolean = true,
 )
 
 class SettingsModel {
@@ -173,6 +175,7 @@ class SettingsModel {
     var lightColor = MoodLight.DEFAULT_COLOR
     var lightLevel = MoodLight.DEFAULT_LEVEL
     var lightPulse = false
+    var powerFollow = true
 
     /** An immutable copy, for the threads that only read. */
     fun values(): SettingsValues = SettingsValues(
@@ -181,7 +184,7 @@ class SettingsModel {
         captureVolumeMirror, kitchenFormat, kitchenFlacBlock, mode, tvLatencyMs, tvFormat, tvBurstMs, tvExtraMs, tvPrerollMs, tvPcrLeadMs, tvReanchorMin, tvRender, tvVideo, lyricsOffsetMs, display,
         backgroundCleanup, ambilightStyle, ambilightMenu, tvPauseMs, tvQuiet, tvAudioOnly, tvMac, tvPositionProbe,
         ambilightDarkStyle, ambilightDarkAlgorithm, ambilightDarkMenu, tvAutoReanchor, tvReanchorRunning, tvScroll, tvHoldSilenceMin, tvReadyMs, tvClearItem, tvBootWaitS, tvCloseWaitS,
-        livingReplayMs, livingReplayTvMs, lightColor, lightLevel, lightPulse,
+        livingReplayMs, livingReplayTvMs, lightColor, lightLevel, lightPulse, powerFollow,
     )
 
     fun toJson(): JSONObject {
@@ -238,6 +241,7 @@ class SettingsModel {
         o.put(LIGHT_COLOR, lightColor)
         o.put(LIGHT_LEVEL, lightLevel)
         o.put(LIGHT_PULSE, lightPulse)
+        o.put(POWER_FOLLOW, powerFollow)
         return o
     }
 
@@ -422,6 +426,10 @@ class SettingsModel {
             val v = bool(json.get(LIGHT_PULSE))
             if (v != null && v != lightPulse) { lightPulse = v; changed.add(LIGHT_PULSE) }
         }
+        if (json.has(POWER_FOLLOW)) {
+            val v = bool(json.get(POWER_FOLLOW))
+            if (v != null && v != powerFollow) { powerFollow = v; changed.add(POWER_FOLLOW) }
+        }
         if (json.has(TV_CLEAR_ITEM)) {
             val v = bool(json.get(TV_CLEAR_ITEM))
             if (v != null && v != tvClearItem) { tvClearItem = v; changed.add(TV_CLEAR_ITEM) }
@@ -550,6 +558,7 @@ class SettingsModel {
         const val LIGHT_COLOR = "light_color"
         const val LIGHT_LEVEL = "light_level"
         const val LIGHT_PULSE = "light_pulse"
+        const val POWER_FOLLOW = "power_follow"
 
         /**
          * The replay sounds 0.8 s after the capture: the TV's 200 ms, the track's and the HAL's 250 ms and the capture's 100 ms fit with 250 ms

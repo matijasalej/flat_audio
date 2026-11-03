@@ -43,7 +43,7 @@ object ReplaySwitch {
      */
     fun text(link: Link, muted: Boolean?, replaying: Boolean, pending: Boolean?, error: String?): String = when {
         link == Link.WAITING_ALLOW -> "Tap Allow on the TV (\"Always allow from this computer\")"
-        link == Link.NOT_ARMED -> "The switch needs the box armed from the Mac once after a power cut: $ARM_COMMAND"
+        link == Link.NOT_ARMED -> "The switch and the remote's power button need the box armed from the Mac once after a power cut: $ARM_COMMAND"
         link == Link.FAILED -> "The switch failed: ${error ?: "unknown error"}"
         pending != null && pending != muted -> if (pending) "Switching on…" else "Switching off…"
         muted == null -> "Whether the Spotify app is muted cannot be read"

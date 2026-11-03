@@ -74,12 +74,17 @@ class PlaybackService : Service() {
     /** The box's screen going off (its sleep, with the CEC Standby that switches the TV off) and on, for the journal. */
     private var screenWatch: BroadcastReceiver? = null
 
+    /** The remote's power button switches the TV off with the Onkyo (`power_follow`). */
+    @Volatile
+    private var powerFollow: PowerFollow? = null
+
     private fun registerScreenWatch(journal: io.github.matijasalej.wholeflat.sync.TvJournal) {
         val r = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 val on = intent.action == Intent.ACTION_SCREEN_ON
                 journal.add("box", org.json.JSONObject().put("screen", if (on) "on" else "off").put("source", AppState.source))
                 if (on) tv.forgetPower()
+                if (on) powerFollow?.screenOn() else powerFollow?.screenOff()
             }
         }
         val filter = IntentFilter().apply {
@@ -196,6 +201,13 @@ class PlaybackService : Service() {
         tvRenderer.journal = journal
         tv.onPower = { from, to -> journal.add("tv_power", org.json.JSONObject().put("from", from).put("to", to)) }
         registerScreenWatch(journal)
+        // the remote's power button: its press is read from the box's log through the box's own adb, and a press that found the box
+        // awake puts it to sleep, so that the TV goes off with the Onkyo
+        powerFollow = AppState.adbSelf?.let { adb ->
+            PowerFollow(adb, journal) { (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive }
+        }
+        AppState.powerFollow = powerFollow
+        powerFollow?.start()
         // the box's own HDMI output is not fed while the TV plays our stream in its DLNA player or sleeps (and nothing of Whole Flat's own plays)
         livingRoom.idleSuspended = {
             AppState.source != "librespot" && AppState.playback != "playing" && AppState.playback != "loading" &&
@@ -287,6 +299,13 @@ class PlaybackService : Service() {
         }
         screenWatch = null
         AppState.lights = null
+        try {
+            powerFollow?.stop()
+        } catch (t: Throwable) {
+            AppLog.error(TAG, "stopping the power button's watch failed", t)
+        }
+        powerFollow = null
+        AppState.powerFollow = null
         AppState.adbSelf = null
         AppState.source = "idle"
         Settings.removeListener(settingsListener)

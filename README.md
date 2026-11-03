@@ -231,6 +231,23 @@ The older settings `ambilight` and `screen` are read as Party and Karaoke. While
 
 **Kitchen timing** sets `kitchen_offset_ms` (−300 to +300 ms; positive: the kitchen later) when the finger is lifted (`/remote/action?fine_ms=-20`).
 
+## The remote's power button: the TV goes off with the Onkyo
+
+The remote's Power is set to the Onkyo by infrared (Google TV, Settings → Remotes & Accessories → Set up remote buttons: Power and Volume to the Onkyo, Input over CEC). Google's remote service hears every press over its own Bluetooth link: with the box asleep it wakes the box, and the box's wake turns the TV on over CEC, so one press switches everything on. With the box awake it did nothing, and the TV stayed on while the Onkyo went off.
+
+The app reads the press in the box's log (`Axel.RemoteManager: Waking up device`, and `PowerManagerService: Waking up from Asleep (… axel:IR_power_button)` when it woke the box) and decides it half a second later (`PowerPress`). A press that did not wake the box puts it to sleep (`input keyevent KEYCODE_SLEEP`), and its sleep's CEC Standby switches the TV off. A second press that comes before the box slept cancels the first: the box is woken again (`KEYCODE_WAKEUP`). An app cannot read other apps' logs, so this runs through the box's own adb, like the switch above: it works while the box is armed (`adb tcpip 5555` after a restart). The setting `power_follow` (on by default) turns it off; `/power` shows the watch and the last press, and every press goes to `/tv/journal` (`power_press`).
+
+The Onkyo's power code is a toggle, so the two can get out of step (the box's 10-minute sleep turns the TV off and leaves the Onkyo on). They come back together by themselves: the Onkyo's Auto Standby (on by default on European units) switches it off 20 minutes after its input goes silent, and the box sleeps after 10 minutes without a key while no music plays.
+
+**The cast icon in the corner** was Android's screen-capture indicator: the app's capture of the music is a screen capture to Android, and it is open all the time. It is hidden on the box with
+
+```sh
+adb shell device_config put privacy media_projection_indicators_enabled false   # hide
+adb shell device_config delete privacy media_projection_indicators_enabled      # show again
+```
+
+(for every app's screen capture; the microphone and camera indicators stay). If a Google update brings it back, run the first line again.
+
 ## Mood lights: the Ambilight follows each song
 
 The lights listen to the captured music on a thread of their own (about 10 % of one core of the box) and choose, song by song and phrase by phrase, which of the TV's own Ambilight styles it shows:
